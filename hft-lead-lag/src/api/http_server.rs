@@ -201,27 +201,30 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
         gate.get_tickers_with_volume(min_volume_usd)
     );
 
-    let mut symbols: HashMap<String, (f64, f64)> = HashMap::new();
+    let mut binance_volumes: HashMap<String, f64> = HashMap::new();
+    let mut gate_volumes: HashMap<String, f64> = HashMap::new();
+
     if let Ok(tickers) = binance_tickers {
         for t in tickers {
-            symbols
-                .entry(t.symbol)
-                .and_modify(|entry| entry.0 = t.quote_volume)
-                .or_insert((t.quote_volume, 0.0));
+            binance_volumes.insert(t.symbol, t.quote_volume);
         }
     }
     if let Ok(tickers) = gate_tickers {
         for t in tickers {
-            symbols
-                .entry(t.symbol)
-                .and_modify(|entry| entry.1 = t.quote_volume)
-                .or_insert((0.0, t.quote_volume));
+            gate_volumes.insert(t.symbol, t.quote_volume);
         }
     }
 
-    symbols
-        .into_iter()
-        .map(|(symbol, (binance_volume, gate_volume))| ScreenerRow {
+    let binance_symbols: HashSet<String> = binance_volumes.keys().cloned().collect();
+    let gate_symbols: HashSet<String> = gate_volumes.keys().cloned().collect();
+
+    binance_symbols
+        .intersection(&gate_symbols)
+        .cloned()
+        .map(|symbol| {
+            let binance_volume = binance_volumes.get(&symbol).copied().unwrap_or(0.0);
+            let gate_volume = gate_volumes.get(&symbol).copied().unwrap_or(0.0);
+            ScreenerRow {
             symbol,
             leader_exchange: if binance_volume >= gate_volume {
                 "binance".to_string()
@@ -235,6 +238,7 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             entry_half_life_ms: 0.0,
             avg_gt_p90_ms: 0.0,
             gate_natr_30m_pct: 0.0,
+            }
         })
         .collect()
 }
