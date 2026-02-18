@@ -1,0 +1,85 @@
+[package]
+name = "hft-lead-lag"
+version = "0.1.0"
+edition = "2021"
+authors = ["HFT Team"]
+description = "High-frequency lead-lag trading system for Binance and Gate.io"
+
+# Fast build optimization
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+lto = false
+codegen-units = 256
+
+[profile.dev.build-override]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Futures utilities
+futures-util = "0.3"
+
+# WebSocket (rustls for no OpenSSL dependency)
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+
+# HTTP (cold path only, rustls)
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+
+# JSON parsing
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Cryptography
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+# Time (faster than chrono)
+time = { version = "0.3", features = ["macros", "formatting"] }
+
+# Bytes for zero-copy
+bytes = "1.5"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Configuration
+serde_with = "3.4"
+toml = "0.8"
+
+# String interning for symbols
+arc-swap = "1.6"
+
+# URL encoding for signatures
+urlencoding = "2.1"
+
+# Base64 for some auth
+base64 = "0.21"
+
+# Fast float parsing
+fast-float = "0.2"
+
+# Concurrent map for symbol cache
+dashmap = "5.5"
+
+# Async trait
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.12"

@@ -1,0 +1,13 @@
+//! Infrastructure layer - Exchange implementations, WebSocket, REST
+//! 
+//! This module contains:
+//! - Exchange-specific WebSocket connectors
+//! - REST clients (cold path)
+//! - Authentication implementations
+//! - Message parsers
+
+pub mod exchanges;
+pub mod websocket;
+pub mod rest;
+
+pub use exchanges::*;

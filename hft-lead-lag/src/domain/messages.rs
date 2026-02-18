@@ -1,0 +1,190 @@
+//! Market data message types optimized for HFT
+//! 
+//! Design principles:
+//! - Zero-copy parsing where possible (using bytes::Bytes)
+//! - Fixed-point arithmetic for prices (i64 ticks at 1e-8 precision)
+//! - Minimal allocations in hot path
+//! - Cache-friendly field ordering
+
+use bytes::Bytes;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Price represented as fixed-point ticks (1e-8 precision)
+/// Using i64 avoids decimal overhead in hot path
+pub type PriceTicks = i64;
+pub type QuantityTicks = i64;
+
+/// Convert ticks to decimal for display/calculation
+#[inline]
+pub fn ticks_to_decimal(ticks: PriceTicks) -> f64 {
+    ticks as f64 / 100_000_000.0
+}
+
+/// Convert decimal to ticks
+#[inline]
+pub fn decimal_to_ticks(decimal: f64) -> PriceTicks {
+    (decimal * 100_000_000.0) as i64
+}
+
+/// Book ticker - best bid/ask update
+/// Field order optimized for cache alignment (64 bytes total)
+#[derive(Debug, Clone)]
+pub struct BookTicker {
+    /// Symbol as interned string (Arc<str> equivalent)
+    pub symbol: Bytes,
+    /// Best bid price in ticks
+    pub bid_price_ticks: PriceTicks,
+    /// Best ask price in ticks
+    pub ask_price_ticks: PriceTicks,
+    /// Best bid quantity in ticks
+    pub bid_qty_ticks: QuantityTicks,
+    /// Best ask quantity in ticks
+    pub ask_qty_ticks: QuantityTicks,
+    /// Exchange timestamp (nanoseconds since epoch)
+    pub exchange_ts_ns: i64,
+    /// Local receive timestamp (nanoseconds since epoch)
+    pub local_ts_ns: i64,
+}
+
+impl BookTicker {
+    /// Create new book ticker
+    pub fn new(
+        symbol: Bytes,
+        bid_price_ticks: PriceTicks,
+        ask_price_ticks: PriceTicks,
+        bid_qty_ticks: QuantityTicks,
+        ask_qty_ticks: QuantityTicks,
+        exchange_ts_ns: i64,
+    ) -> Self {
+        Self {
+            symbol,
+            bid_price_ticks,
+            ask_price_ticks,
+            bid_qty_ticks,
+            ask_qty_ticks,
+            exchange_ts_ns,
+            local_ts_ns: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64,
+        }
+    }
+
+    /// Get bid price as f64
+    #[inline]
+    pub fn bid_price(&self) -> f64 {
+        ticks_to_decimal(self.bid_price_ticks)
+    }
+
+    /// Get ask price as f64
+    #[inline]
+    pub fn ask_price(&self) -> f64 {
+        ticks_to_decimal(self.ask_price_ticks)
+    }
+
+    /// Get mid price
+    #[inline]
+    pub fn mid_price(&self) -> f64 {
+        (self.bid_price() + self.ask_price()) / 2.0
+    }
+
+    /// Get spread in ticks
+    #[inline]
+    pub fn spread_ticks(&self) -> PriceTicks {
+        self.ask_price_ticks - self.bid_price_ticks
+    }
+
+    /// Get spread as percentage of mid
+    #[inline]
+    pub fn spread_pct(&self) -> f64 {
+        let mid = self.mid_price();
+        if mid == 0.0 {
+            0.0
+        } else {
+            ticks_to_decimal(self.spread_ticks()) / mid
+        }
+    }
+}
+
+/// Trade message
+#[derive(Debug, Clone)]
+pub struct Trade {
+    /// Symbol
+    pub symbol: Bytes,
+    /// Trade ID
+    pub trade_id: i64,
+    /// Trade price in ticks
+    pub price_ticks: PriceTicks,
+    /// Trade quantity in ticks
+    pub qty_ticks: QuantityTicks,
+    /// Is buyer the maker?
+    pub is_buyer_maker: bool,
+    /// Exchange timestamp
+    pub exchange_ts_ns: i64,
+    /// Local receive timestamp
+    pub local_ts_ns: i64,
+}
+
+impl Trade {
+    pub fn new(
+        symbol: Bytes,
+        trade_id: i64,
+        price_ticks: PriceTicks,
+        qty_ticks: QuantityTicks,
+        is_buyer_maker: bool,
+        exchange_ts_ns: i64,
+    ) -> Self {
+        Self {
+            symbol,
+            trade_id,
+            price_ticks,
+            qty_ticks,
+            is_buyer_maker,
+            exchange_ts_ns,
+            local_ts_ns: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64,
+        }
+    }
+
+    #[inline]
+    pub fn price(&self) -> f64 {
+        ticks_to_decimal(self.price_ticks)
+    }
+
+    #[inline]
+    pub fn qty(&self) -> f64 {
+        ticks_to_decimal(self.qty_ticks)
+    }
+}
+
+/// Subscription result message
+#[derive(Debug, Clone)]
+pub struct SubscriptionResult {
+    pub subscription_id: u64,
+    pub symbol: Bytes,
+    pub channel: Bytes,
+    pub success: bool,
+    pub error_message: Option<Bytes>,
+}
+
+/// Raw WebSocket message for internal processing
+/// Allows zero-copy parsing downstream
+#[derive(Debug)]
+pub struct RawWsMessage {
+    pub data: Bytes,
+    pub received_ns: i64,
+}
+
+impl RawWsMessage {
+    pub fn new(data: Bytes) -> Self {
+        Self {
+            data,
+            received_ns: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as i64,
+        }
+    }
+}

@@ -1,0 +1,33 @@
+# HFT Lead-Lag Trading System Configuration
+
+# Exchange Settings
+[binance]
+enabled = true
+blacklist = []
+
+[binance.credentials]
+api_key = ""  # Set via BINANCE_API_KEY env var
+api_secret = ""  # Set via BINANCE_API_SECRET env var
+
+[gate]
+enabled = true
+blacklist = []
+
+[gate.credentials]
+api_key = ""  # Set via GATE_API_KEY env var
+api_secret = ""  # Set via GATE_API_SECRET env var
+
+# Trading Settings
+[trading]
+order_qty_usd = 10.0
+min_min_spread = 0.0005
+min_profit_spread = 0.0005
+max_position_size_usd = 10.0
+
+# Lead-Lag Strategy Settings
+[lead_lag]
+primary_exchange = "binance"
+hedge_exchange = "gate"
+trigger_spread_bps = 5.0
+max_position_age_ms = 5000
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
