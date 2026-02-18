@@ -466,6 +466,10 @@ pub struct ChartData {
     pub ts: Vec<f64>,
     pub binance_mid: Vec<f64>,
     pub gate_mid: Vec<f64>,
+    pub gate_bid: Vec<f64>,
+    pub gate_ask: Vec<f64>,
+    pub binance_bid: Vec<f64>,
+    pub binance_ask: Vec<f64>,
     pub trades: Vec<ChartTrade>,
     pub position: String,
     pub entry_price: Option<f64>,
@@ -506,6 +510,10 @@ struct MidSample {
     ts_ms: i64,
     binance_mid: f64,
     gate_mid: f64,
+    gate_bid: f64,
+    gate_ask: f64,
+    binance_bid: f64,
+    binance_ask: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -549,7 +557,11 @@ impl ShadowTrader {
         let bn_mid = ((binance.bid + binance.ask) / 2.0).max(1e-12);
         let gt_mid = ((gate.bid + gate.ask) / 2.0).max(1e-12);
 
-        self.mid_samples.push_back(MidSample { ts_ms, binance_mid: bn_mid, gate_mid: gt_mid });
+        self.mid_samples.push_back(MidSample {
+            ts_ms, binance_mid: bn_mid, gate_mid: gt_mid,
+            gate_bid: gate.bid, gate_ask: gate.ask,
+            binance_bid: binance.bid, binance_ask: binance.ask,
+        });
         self.cleanup(ts_ms, window_ms);
 
         // Warmup
@@ -815,14 +827,23 @@ impl ShadowTrader {
         // Downsample to max ~600 points
         let len = self.mid_samples.len();
         let step = (len / 600).max(1);
-        let mut ts = Vec::with_capacity(len / step + 1);
-        let mut bn_vals = Vec::with_capacity(len / step + 1);
-        let mut gt_vals = Vec::with_capacity(len / step + 1);
+        let cap = len / step + 1;
+        let mut ts = Vec::with_capacity(cap);
+        let mut bn_vals = Vec::with_capacity(cap);
+        let mut gt_vals = Vec::with_capacity(cap);
+        let mut gt_bid = Vec::with_capacity(cap);
+        let mut gt_ask = Vec::with_capacity(cap);
+        let mut bn_bid = Vec::with_capacity(cap);
+        let mut bn_ask = Vec::with_capacity(cap);
         for (i, s) in self.mid_samples.iter().enumerate() {
             if i % step == 0 {
                 ts.push(s.ts_ms as f64 / 1000.0);
                 bn_vals.push(s.binance_mid);
                 gt_vals.push(s.gate_mid);
+                gt_bid.push(s.gate_bid);
+                gt_ask.push(s.gate_ask);
+                bn_bid.push(s.binance_bid);
+                bn_ask.push(s.binance_ask);
             }
         }
         let trades: Vec<ChartTrade> = self.completed_trades.iter().map(|t| ChartTrade {
@@ -845,6 +866,10 @@ impl ShadowTrader {
             ts,
             binance_mid: bn_vals,
             gate_mid: gt_vals,
+            gate_bid: gt_bid,
+            gate_ask: gt_ask,
+            binance_bid: bn_bid,
+            binance_ask: bn_ask,
             trades,
             position: self.position_label(),
             entry_price: self.position.as_ref().map(|p| p.gate_entry_price),

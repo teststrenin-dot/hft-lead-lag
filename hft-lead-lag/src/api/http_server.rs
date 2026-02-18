@@ -457,6 +457,46 @@ async fn screener_page() -> Html<&'static str> {
     clearChart();
     document.getElementById('chart-title').textContent = sym;
     renderTable();
+    // Load historical chart data so zones/dots are visible
+    loadHistory(sym);
+  }
+
+  async function loadHistory(sym) {
+    try {
+      const res = await fetch(`/api/v1/chart/${sym}`);
+      if (!res.ok) return;
+      const c = await res.json();
+      if (!c || !c.ts || c.ts.length === 0) return;
+      // Pre-fill chart buffers with historical bid/ask
+      tsBuf = c.ts.slice();
+      gtBid = (c.gate_bid || []).slice();
+      gtAsk = (c.gate_ask || []).slice();
+      bnBid = (c.binance_bid || []).slice();
+      bnAsk = (c.binance_ask || []).slice();
+      // If bid/ask arrays missing, fall back to mid
+      if (gtBid.length === 0 && c.gate_mid) { gtBid = c.gate_mid.slice(); gtAsk = c.gate_mid.slice(); }
+      if (bnBid.length === 0 && c.binance_mid) { bnBid = c.binance_mid.slice(); bnAsk = c.binance_mid.slice(); }
+      // Set last known prices
+      if (gtBid.length > 0) { lastGate.bid = gtBid[gtBid.length-1]; lastGate.ask = gtAsk[gtAsk.length-1]; }
+      if (bnBid.length > 0) { lastBn.bid = bnBid[bnBid.length-1]; lastBn.ask = bnAsk[bnAsk.length-1]; }
+      // Load zones
+      shadowZones = (c.trades || []).map(t => ({
+        entry_s: t.entry_ts_ms / 1000,
+        exit_s: t.exit_ts_ms / 1000,
+        dir: t.direction,
+        pnl: t.pnl_pct,
+        entry_price: t.entry_price,
+        exit_price: t.exit_price,
+        reason: t.exit_reason,
+        open: false
+      }));
+      if (c.position !== 'FLAT' && c.position !== 'PENDING' && c.entry_ts_ms) {
+        openZone = { entry_s: c.entry_ts_ms / 1000, dir: c.position.replace('LONG_GT','LONG').replace('SHORT_GT','SHORT'), pnl: 0, entry_price: c.entry_price, open: true };
+      } else {
+        openZone = null;
+      }
+      dirty = true;
+    } catch(e) {}
   }
 
   // --- Chart: 4 raw bid/ask lines via WS ---
