@@ -3,7 +3,7 @@
 # Exchange Settings
 [binance]
 enabled = true
-blacklist = []
+blacklist = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 [binance.credentials]
 api_key = ""  # Set via BINANCE_API_KEY env var
@@ -11,7 +11,7 @@ api_secret = ""  # Set via BINANCE_API_SECRET env var
 
 [gate]
 enabled = true
-blacklist = []
+blacklist = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 [gate.credentials]
 api_key = ""  # Set via GATE_API_KEY env var

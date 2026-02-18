@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 use std::time::{Duration, Instant};
 
 /// Minimum 24h USD volume for symbol filtering
-const MIN_VOLUME_USD: f64 = 10_000_000.0;  // 10 million USD
+const MIN_VOLUME_USD: f64 = 5_000_000.0;  // 5 million USD
 const MAX_STRATEGY_SYMBOLS: usize = 8;
 const SUBSCRIBE_DELAY_MS: u64 = 15;
 
@@ -74,9 +74,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Find common symbols (available on both exchanges with sufficient volume)
     let binance_set: std::collections::HashSet<String> = binance_symbols.iter().cloned().collect();
     let gate_set: std::collections::HashSet<String> = gate_symbols.iter().cloned().collect();
-    let mut common_symbols: Vec<String> = binance_set.intersection(&gate_set).cloned().collect();
+    let blacklist: std::collections::HashSet<&str> = config_manager
+        .binance_blacklist()
+        .iter()
+        .chain(config_manager.gate_blacklist().iter())
+        .map(|s| s.as_str())
+        .collect();
+    let mut common_symbols: Vec<String> = binance_set
+        .intersection(&gate_set)
+        .filter(|s| !blacklist.contains(s.as_str()))
+        .cloned()
+        .collect();
     common_symbols.sort_unstable();
     
+    if !blacklist.is_empty() {
+        info!("Blacklisted symbols: {:?}", blacklist);
+    }
     info!("Common symbols: {}", common_symbols.len());
 
     // Strategy checks run on a bounded subset.

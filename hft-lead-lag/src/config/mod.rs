@@ -107,12 +107,17 @@ pub struct ConfigManager {
 impl ConfigManager {
     /// Create config from environment variables
     pub fn from_env() -> Self {
+        // Try loading config.toml first, fall back to defaults
+        let mut config = std::fs::read_to_string("config/config.toml")
+            .ok()
+            .and_then(|c| toml::from_str::<AppConfig>(&c).ok())
+            .unwrap_or_default();
+
+        // Environment variables override file config for credentials
         let binance_key = std::env::var("BINANCE_API_KEY").ok();
         let binance_secret = std::env::var("BINANCE_API_SECRET").ok();
         let gate_key = std::env::var("GATE_API_KEY").ok();
         let gate_secret = std::env::var("GATE_API_SECRET").ok();
-
-        let mut config = AppConfig::default();
 
         if let (Some(key), Some(secret)) = (binance_key, binance_secret) {
             config.binance.credentials = Some(ExchangeCredentials {

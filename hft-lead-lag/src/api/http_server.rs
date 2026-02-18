@@ -415,15 +415,18 @@ async fn screener_page() -> Html<&'static str> {
     renderTable();
   }
 
-  // --- Chart: 4 raw bid/ask lines via WS at 60fps ---
+  // --- Chart: 4 raw bid/ask lines via WS ---
   const MAX_PTS = 36000; // ~10 min at ~60 tps
   let tsBuf = [], gtBid = [], gtAsk = [], bnBid = [], bnAsk = [];
   let uplot = null, dirty = false, ws = null;
+  let shadowZones = []; // [{entry_s, exit_s, dir}] — completed trades
+  let openZone = null;  // {entry_s, dir} — currently open position
 
   function clearChart() {
     tsBuf = []; gtBid = []; gtAsk = []; bnBid = []; bnAsk = [];
     lastGate = { bid: NaN, ask: NaN };
     lastBn = { bid: NaN, ask: NaN };
+    shadowZones = []; openZone = null;
     dirty = true;
   }
 
@@ -467,10 +470,32 @@ async fn screener_page() -> Html<&'static str> {
     if (uplot) { uplot.destroy(); uplot = null; }
     const w = window.innerWidth - 32;
     const h = Math.min(window.innerHeight * 0.38, 360);
+    const drawZones = (u) => {
+      const ctx = u.ctx;
+      const xScale = u.scales.x;
+      const yScale = u.scales.y;
+      if (!xScale.min || !yScale.min) return;
+      const top = u.bbox.top;
+      const bot = top + u.bbox.height;
+      const all = shadowZones.slice();
+      if (openZone) all.push({ ...openZone, exit_s: xScale.max });
+      for (const z of all) {
+        const x0 = u.valToPos(Math.max(z.entry_s, xScale.min), 'x', true);
+        const x1 = u.valToPos(Math.min(z.exit_s, xScale.max), 'x', true);
+        if (x1 <= x0) continue;
+        ctx.fillStyle = z.dir === 'LONG' ? 'rgba(74,222,128,0.12)' : 'rgba(248,113,113,0.12)';
+        ctx.fillRect(x0, top, x1 - x0, bot - top);
+        // Entry edge line
+        ctx.strokeStyle = z.dir === 'LONG' ? 'rgba(74,222,128,0.5)' : 'rgba(248,113,113,0.5)';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x0, top); ctx.lineTo(x0, bot); ctx.stroke();
+      }
+    };
     const opts = {
       width: w, height: h,
       cursor: { show: true, drag: { x: false, y: false } },
       scales: { x: { time: true }, y: { auto: true } },
+      hooks: { draw: [drawZones] },
       axes: [
         { stroke: '#6b7280', grid: { stroke: '#1f2937' }, ticks: { stroke: '#374151' }, font: '10px system-ui', size: 36 },
         { stroke: '#6b7280', grid: { stroke: '#1f2937' }, ticks: { stroke: '#374151' }, font: '10px system-ui', size: 60 }
@@ -507,23 +532,46 @@ async fn screener_page() -> Html<&'static str> {
     requestAnimationFrame(renderLoop);
   }
 
-  // Poll shadow trades every 5s for trade markers
+  // Poll shadow trades every 5s — zones + debug info
   async function pollTrades() {
     if (!selectedSym) return;
     try {
-      const res = await fetch(`/api/v1/shadow/${selectedSym}`);
-      if (!res.ok) return;
-      const d = await res.json();
-      if (!d) return;
-      const el = document.getElementById('trades-info');
-      const parts = [];
-      parts.push(`${d.position} | edge: short=${d.short_edge_bps.toFixed(1)} long=${d.long_edge_bps.toFixed(1)} bps`);
-      if (d.last_5_trades_pnl_pct.length > 0) {
-        parts.push('last trades: ' + d.last_5_trades_pnl_pct.map(
-          p => `<span class="${p>=0?'win':'loss'}">${p.toFixed(4)}%</span>`
-        ).join(', '));
+      const [chartRes, shadowRes] = await Promise.all([
+        fetch(`/api/v1/chart/${selectedSym}`),
+        fetch(`/api/v1/shadow/${selectedSym}`)
+      ]);
+      // Update trade zones from chart data
+      if (chartRes.ok) {
+        const c = await chartRes.json();
+        if (c) {
+          shadowZones = (c.trades || []).map(t => ({
+            entry_s: t.entry_ts_ms / 1000,
+            exit_s: t.exit_ts_ms / 1000,
+            dir: t.direction
+          }));
+          if (c.position !== 'FLAT' && c.entry_ts_ms) {
+            openZone = { entry_s: c.entry_ts_ms / 1000, dir: c.position.replace('LONG_GT','LONG').replace('SHORT_GT','SHORT') };
+          } else {
+            openZone = null;
+          }
+          dirty = true;
+        }
       }
-      el.innerHTML = parts.join(' | ');
+      // Update debug info
+      if (shadowRes.ok) {
+        const d = await shadowRes.json();
+        if (d) {
+          const el = document.getElementById('trades-info');
+          const parts = [];
+          parts.push(`${d.position} | edge: short=${d.short_edge_bps.toFixed(1)} long=${d.long_edge_bps.toFixed(1)} bps`);
+          if (d.last_5_trades_pnl_pct.length > 0) {
+            parts.push('last trades: ' + d.last_5_trades_pnl_pct.map(
+              p => `<span class="${p>=0?'win':'loss'}">${p.toFixed(4)}%</span>`
+            ).join(', '));
+          }
+          el.innerHTML = parts.join(' | ');
+        }
+      }
     } catch(e) {}
   }
 
