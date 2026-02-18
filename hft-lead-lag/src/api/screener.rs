@@ -218,6 +218,16 @@ impl ScreenerStore {
     pub fn shadow_debug(&self, symbol: &str) -> Option<ShadowDebug> {
         self.symbols.get(symbol).map(|s| s.shadow.debug())
     }
+
+    pub fn chart_data(&self, symbol: &str) -> Option<ChartData> {
+        self.symbols.get(symbol).map(|s| s.shadow.chart_data(symbol))
+    }
+
+    pub fn symbol_list(&self) -> Vec<String> {
+        let mut syms: Vec<String> = self.symbols.iter().map(|r| r.key().clone()).collect();
+        syms.sort();
+        syms
+    }
 }
 
 impl Default for ScreenerStore {
@@ -383,8 +393,8 @@ enum ShadowDirection {
 struct ShadowPosition {
     direction: ShadowDirection,
     gate_entry_price: f64,
-    #[allow(dead_code)]
     entry_ts_ms: i64,
+    entry_premium_bps: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +407,34 @@ struct ShadowSignal {
 struct ShadowTrade {
     pnl_pct: f64,
     ts_ms: i64,
+    direction: ShadowDirection,
+    entry_ts_ms: i64,
+    entry_premium_bps: f64,
+    exit_premium_bps: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChartTrade {
+    pub entry_ts_ms: i64,
+    pub exit_ts_ms: i64,
+    pub direction: String,
+    pub pnl_pct: f64,
+    pub entry_premium_bps: f64,
+    pub exit_premium_bps: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChartData {
+    pub symbol: String,
+    pub ts: Vec<f64>,
+    pub premium_bps: Vec<f64>,
+    pub p90: Option<f64>,
+    pub p10: Option<f64>,
+    pub p50: Option<f64>,
+    pub trades: Vec<ChartTrade>,
+    pub position: String,
+    pub entry_price: Option<f64>,
+    pub entry_ts_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -490,7 +528,7 @@ impl ShadowTrader {
             if ts_ms >= sig.fire_ts_ms + EXECUTION_DELAY_MS {
                 let dir = sig.direction;
                 self.pending_signal = None;
-                self.execute_entry(ts_ms, dir, gate);
+                self.execute_entry(ts_ms, dir, gate, premium_bps);
                 just_entered = true;
             }
         }
@@ -511,7 +549,7 @@ impl ShadowTrader {
                     ShadowDirection::Long => premium_bps >= p50,
                 };
                 if should_exit {
-                    self.execute_exit(ts_ms, gate, window_ms);
+                    self.execute_exit(ts_ms, gate, window_ms, premium_bps);
                 }
             }
         }
@@ -556,7 +594,7 @@ impl ShadowTrader {
         self.prev_premium_bps = premium_bps;
     }
 
-    fn execute_entry(&mut self, ts_ms: i64, direction: ShadowDirection, gate: &Quote) {
+    fn execute_entry(&mut self, ts_ms: i64, direction: ShadowDirection, gate: &Quote, premium_bps: f64) {
         let gate_price = match direction {
             ShadowDirection::Short => apply_impact(gate.bid, gate.bid_qty, gate.bid, true),
             ShadowDirection::Long => apply_impact(gate.ask, gate.ask_qty, gate.ask, false),
@@ -565,10 +603,11 @@ impl ShadowTrader {
             direction,
             gate_entry_price: gate_price,
             entry_ts_ms: ts_ms,
+            entry_premium_bps: premium_bps,
         });
     }
 
-    fn execute_exit(&mut self, ts_ms: i64, gate: &Quote, window_ms: i64) {
+    fn execute_exit(&mut self, ts_ms: i64, gate: &Quote, window_ms: i64, premium_bps: f64) {
         let pos = match self.position.take() {
             Some(p) => p,
             None => return,
@@ -588,7 +627,14 @@ impl ShadowTrader {
             }
         };
 
-        self.completed_trades.push_back(ShadowTrade { pnl_pct, ts_ms });
+        self.completed_trades.push_back(ShadowTrade {
+            pnl_pct,
+            ts_ms,
+            direction: pos.direction,
+            entry_ts_ms: pos.entry_ts_ms,
+            entry_premium_bps: pos.entry_premium_bps,
+            exit_premium_bps: premium_bps,
+        });
         self.cooldown_until_ms = ts_ms + COOLDOWN_MS;
         let cutoff = ts_ms - window_ms;
         while let Some(t) = self.completed_trades.front() {
@@ -677,6 +723,44 @@ impl ShadowTrader {
             short_edge_bps: short_edge,
             long_edge_bps: long_edge,
             min_edge_required_bps: MIN_EDGE_BPS,
+        }
+    }
+
+    fn chart_data(&self, symbol: &str) -> ChartData {
+        // Downsample premium_bps to max ~600 points (1 per second for 10 min)
+        let len = self.premium_bps.len();
+        let step = (len / 600).max(1);
+        let mut ts = Vec::with_capacity(len / step + 1);
+        let mut vals = Vec::with_capacity(len / step + 1);
+        for (i, (t, v)) in self.premium_bps.iter().enumerate() {
+            if i % step == 0 {
+                ts.push(*t as f64 / 1000.0); // seconds for uPlot
+                vals.push(*v);
+            }
+        }
+        let trades: Vec<ChartTrade> = self.completed_trades.iter().map(|t| ChartTrade {
+            entry_ts_ms: t.entry_ts_ms,
+            exit_ts_ms: t.ts_ms,
+            direction: match t.direction {
+                ShadowDirection::Short => "SHORT".to_string(),
+                ShadowDirection::Long => "LONG".to_string(),
+            },
+            pnl_pct: t.pnl_pct,
+            entry_premium_bps: t.entry_premium_bps,
+            exit_premium_bps: t.exit_premium_bps,
+        }).collect();
+
+        ChartData {
+            symbol: symbol.to_string(),
+            ts,
+            premium_bps: vals,
+            p90: self.cached_p90,
+            p10: self.cached_p10,
+            p50: self.cached_p50,
+            trades,
+            position: self.position_label(),
+            entry_price: self.position.as_ref().map(|p| p.gate_entry_price),
+            entry_ts_ms: self.position.as_ref().map(|p| p.entry_ts_ms),
         }
     }
 }
