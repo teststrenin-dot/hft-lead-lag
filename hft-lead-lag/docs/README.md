@@ -52,6 +52,9 @@ docs/
 | Risk Management | ✅ Done | Sprint 1 |
 | REST symbols API (24h vol/dynamics) | ✅ Done | Sprint 1 (post) |
 | WS market broadcast API | ✅ Done | Sprint 1 (post) |
+| Web Screener (`/screener`, `/api/v1/screener`) | ✅ Done (MVP) | Sprint 1 (post) |
+| Screener live coverage (`common_symbols`) | ✅ Done | Sprint 1 (post) |
+| Lead-Lag P90/P50 + `entry_w_ms` runtime metrics | 🟡 In progress | TASK-002 |
 | Centralized logs (`project/logs`) | ✅ Done | Sprint 1 (post) |
 | Order Management | ⬜ Todo | Sprint 2 |
 | Position Tracking | ⬜ Todo | Sprint 2 |
@@ -91,6 +94,8 @@ cargo run
 ```bash
 curl http://127.0.0.1:5000/health
 curl http://127.0.0.1:5000/api/v1/symbols
+curl http://127.0.0.1:5000/api/v1/screener
+# UI: http://127.0.0.1:5000/screener
 # WS stream: ws://127.0.0.1:8181/ws
 ```
 
@@ -127,4 +132,4 @@ cargo test
 
 ---
 
-*Last updated: 2026-02-18 (task-002 checkpoints added)*
+*Last updated: 2026-02-18 (screener coverage fix + task-002 progress)*
