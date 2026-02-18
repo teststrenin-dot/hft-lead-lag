@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use serde::Serialize;
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
+const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
 
 /// Assumed notional per leg in USD for market impact estimation.
 const ASSUMED_NOTIONAL_USD: f64 = 1_000.0;
@@ -131,7 +132,12 @@ impl ScreenerStore {
         };
 
         state.updated_at_ms = exchange_ts_ms;
-        state.lag_ms = (binance.ts_ms - gate.ts_ms).unsigned_abs() as f64;
+        let instant_lag = (binance.ts_ms - gate.ts_ms).unsigned_abs() as f64;
+        state.lag_samples.push_back((exchange_ts_ms, instant_lag));
+        while state.lag_samples.front().map_or(false, |(t, _)| exchange_ts_ms - *t > LAG_WINDOW_MS) {
+            state.lag_samples.pop_front();
+        }
+        state.lag_ms = percentile(state.lag_samples.iter().map(|(_, v)| *v), 50.0).unwrap_or(instant_lag);
         state.leader_exchange = if binance.ts_ms >= gate.ts_ms {
             "binance".to_string()
         } else {
@@ -260,6 +266,7 @@ struct SymbolState {
     gate: Option<Quote>,
     leader_exchange: String,
     lag_ms: f64,
+    lag_samples: VecDeque<(i64, f64)>,
     ws_drift_ms: f64,
     binance_ws_drift_ms: Option<f64>,
     gate_ws_drift_ms: Option<f64>,

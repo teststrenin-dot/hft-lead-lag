@@ -321,7 +321,9 @@ async fn screener_page() -> Html<&'static str> {
     .meta { margin-bottom: 8px; color: #9ca3af; font-size: 12px; }
     table { width: 100%; border-collapse: collapse; background:#111827; font-size: 13px; }
     th, td { padding: 5px 6px; border-bottom: 1px solid #1f2937; text-align: left; }
-    th { position: sticky; top: 0; background:#111827; color:#93c5fd; font-size: 12px; }
+    th { position: sticky; top: 0; background:#111827; color:#93c5fd; font-size: 12px; cursor: pointer; user-select: none; }
+    th.sort-asc::after { content: ' ▲'; font-size: 9px; }
+    th.sort-desc::after { content: ' ▼'; font-size: 9px; }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
     tr.active { background: #1e3a5f !important; }
     tr:hover { background: #162032; cursor: pointer; }
@@ -361,33 +363,52 @@ async fn screener_page() -> Html<&'static str> {
   <table>
     <thead>
       <tr>
-        <th>Coin</th>
-        <th>Leader</th>
-        <th class="num">Lag</th>
-        <th class="num">Drift BN</th>
-        <th class="num">Drift GT</th>
-        <th class="num">Vol 24h</th>
-        <th class="num">Half-life</th>
-        <th class="num">>P90</th>
-        <th class="num">NATR%</th>
-        <th>Pos</th>
-        <th class="num">PnL/hr%</th>
-        <th class="num">Trd</th>
-        <th class="num">Avg%</th>
-        <th class="num">Win%</th>
+        <th data-key="symbol" onclick="sortBy('symbol')">Coin</th>
+        <th data-key="leader_exchange" onclick="sortBy('leader_exchange')">Leader</th>
+        <th class="num" data-key="lag_ms" onclick="sortBy('lag_ms')">Lag</th>
+        <th class="num" data-key="ws_drift_ingress_binance_ms" onclick="sortBy('ws_drift_ingress_binance_ms')">Drift BN</th>
+        <th class="num" data-key="ws_drift_ingress_gate_ms" onclick="sortBy('ws_drift_ingress_gate_ms')">Drift GT</th>
+        <th class="num" data-key="volume_24h_usd" onclick="sortBy('volume_24h_usd')">Vol 24h</th>
+        <th class="num" data-key="entry_half_life_ms" onclick="sortBy('entry_half_life_ms')">Half-life</th>
+        <th class="num" data-key="avg_gt_p90_ms" onclick="sortBy('avg_gt_p90_ms')">>P90</th>
+        <th class="num" data-key="gate_natr_30m_pct" onclick="sortBy('gate_natr_30m_pct')">NATR%</th>
+        <th data-key="shadow_position" onclick="sortBy('shadow_position')">Pos</th>
+        <th class="num" data-key="shadow_pnl_per_hour_pct" onclick="sortBy('shadow_pnl_per_hour_pct')">PnL/hr%</th>
+        <th class="num" data-key="shadow_trades" onclick="sortBy('shadow_trades')">Trd</th>
+        <th class="num" data-key="shadow_avg_trade_pct" onclick="sortBy('shadow_avg_trade_pct')">Avg%</th>
+        <th class="num" data-key="shadow_win_rate_pct" onclick="sortBy('shadow_win_rate_pct')">Win%</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
 
   <script>
+  // --- Sort state ---
+  let sortKey = 'symbol', sortAsc = true;
+  function sortBy(key) {
+    if (sortKey === key) { sortAsc = !sortAsc; } else { sortKey = key; sortAsc = true; }
+    // Update header indicators
+    document.querySelectorAll('th').forEach(th => {
+      th.classList.remove('sort-asc','sort-desc');
+      if (th.dataset.key === sortKey) th.classList.add(sortAsc ? 'sort-asc' : 'sort-desc');
+    });
+    renderTable();
+  }
+  function sortRows(rows) {
+    return rows.sort((a, b) => {
+      let va = a[sortKey], vb = b[sortKey];
+      if (typeof va === 'string') { const c = va.localeCompare(vb); return sortAsc ? c : -c; }
+      return sortAsc ? va - vb : vb - va;
+    });
+  }
+
   // --- Screener table ---
   let selectedSym = '';
   async function renderTable() {
     try {
       const res = await fetch('/api/v1/screener', { cache: 'no-store' });
       const data = await res.json();
-      const rows = (data.rows || []).slice().sort((a, b) => a.symbol.localeCompare(b.symbol));
+      const rows = sortRows((data.rows || []).slice());
       document.getElementById('meta').textContent =
         `symbols=${data.total_symbols} period=${data.period_minutes}m updated=${new Date(data.generated_at_ms).toLocaleTimeString()}`;
       document.getElementById('rows').innerHTML = rows.map(r => `
