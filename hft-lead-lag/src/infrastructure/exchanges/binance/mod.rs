@@ -67,12 +67,14 @@ impl BinanceMarketData {
         let bid_qty = extract_json_string_field(data, "B").and_then(|q| qty_to_ticks(&q))?;
         let ask_price = extract_json_string_field(data, "a").and_then(|p| price_to_ticks(&p))?;
         let ask_qty = extract_json_string_field(data, "A").and_then(|q| qty_to_ticks(&q))?;
-        let update_id = extract_json_i64_field(data, "u").unwrap_or(0);
+        let exchange_ts_ms = extract_json_i64_field(data, "T")
+            .or_else(|| extract_json_i64_field(data, "E"))
+            .unwrap_or(0);
 
         Some(BookTicker::new(
             symbol_cache.intern_bytes(&symbol),
             bid_price, ask_price, bid_qty, ask_qty,
-            update_id.saturating_mul(1_000_000),
+            exchange_ts_ms.saturating_mul(1_000_000),
         ))
     }
 

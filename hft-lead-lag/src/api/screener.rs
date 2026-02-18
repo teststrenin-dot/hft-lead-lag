@@ -15,6 +15,7 @@ pub struct ScreenerRow {
     pub symbol: String,
     pub leader_exchange: String,
     pub lag_ms: f64,
+    pub ws_drift_ms: f64,
     pub entry_half_life_ms: f64,
     pub avg_gt_p90_ms: f64,
     pub gate_natr_30m_pct: f64,
@@ -44,7 +45,7 @@ impl ScreenerStore {
         exchange: &'static str,
         bid: f64,
         ask: f64,
-        _timestamp_ns: i64,
+        timestamp_ns: i64,
     ) {
         if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || ask <= 0.0 {
             return;
@@ -58,12 +59,24 @@ impl ScreenerStore {
             .or_insert_with(SymbolState::default);
 
         let state = state.value_mut();
+        let ws_drift = calculate_ws_drift_ms(ts_ms, timestamp_ns);
         let quote = Quote { bid, ask, ts_ms };
         match exchange {
-            "binance" => state.binance = Some(quote),
-            "gate" => state.gate = Some(quote),
+            "binance" => {
+                state.binance = Some(quote);
+                if let Some(v) = ws_drift {
+                    state.binance_ws_drift_ms = Some(v);
+                }
+            }
+            "gate" => {
+                state.gate = Some(quote);
+                if let Some(v) = ws_drift {
+                    state.gate_ws_drift_ms = Some(v);
+                }
+            }
             _ => return,
         }
+        refresh_ws_drift(state);
 
         let (Some(binance), Some(gate)) = (state.binance.clone(), state.gate.clone()) else {
             state.updated_at_ms = ts_ms;
@@ -132,6 +145,7 @@ impl ScreenerStore {
                 symbol: item.key().clone(),
                 leader_exchange: item.value().leader_exchange.clone(),
                 lag_ms: item.value().lag_ms,
+                ws_drift_ms: item.value().ws_drift_ms,
                 entry_half_life_ms: item.value().entry_half_life_ms,
                 avg_gt_p90_ms: item.value().avg_gt_p90_ms,
                 gate_natr_30m_pct: 0.0,
@@ -167,6 +181,9 @@ struct SymbolState {
     gate: Option<Quote>,
     leader_exchange: String,
     lag_ms: f64,
+    ws_drift_ms: f64,
+    binance_ws_drift_ms: Option<f64>,
+    gate_ws_drift_ms: Option<f64>,
     entry_half_life_ms: f64,
     avg_gt_p90_ms: f64,
     updated_at_ms: i64,
@@ -292,4 +309,49 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or_default()
+}
+
+fn refresh_ws_drift(state: &mut SymbolState) {
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    if let Some(v) = state.binance_ws_drift_ms {
+        sum += v;
+        count += 1;
+    }
+    if let Some(v) = state.gate_ws_drift_ms {
+        sum += v;
+        count += 1;
+    }
+    state.ws_drift_ms = if count == 0 { 0.0 } else { sum / count as f64 };
+}
+
+fn calculate_ws_drift_ms(local_ts_ms: i64, raw_exchange_ts_ns: i64) -> Option<f64> {
+    let exchange_ts_ms = normalize_exchange_ts_ms(raw_exchange_ts_ns)?;
+    let drift_ms = local_ts_ms.saturating_sub(exchange_ts_ms) as f64;
+    if drift_ms.abs() <= 24.0 * 60.0 * 60.0 * 1000.0 {
+        Some(drift_ms)
+    } else {
+        None
+    }
+}
+
+fn normalize_exchange_ts_ms(raw_ts_ns: i64) -> Option<i64> {
+    if raw_ts_ns <= 0 {
+        return None;
+    }
+
+    if raw_ts_ns >= 1_000_000_000_000_000_000 {
+        return Some(raw_ts_ns / 1_000_000);
+    }
+    if raw_ts_ns >= 1_000_000_000_000_000 {
+        return Some(raw_ts_ns / 1_000);
+    }
+    if raw_ts_ns >= 1_000_000_000_000 {
+        return Some(raw_ts_ns);
+    }
+    if raw_ts_ns >= 1_000_000_000 {
+        return raw_ts_ns.checked_mul(1_000);
+    }
+
+    None
 }

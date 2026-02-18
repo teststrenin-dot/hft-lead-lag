@@ -22,6 +22,7 @@
   - `Монета` (`symbol`)
   - `Кто лид` (`leader_exchange`: `binance` / `gate`)
   - `Время отставания, ms` (`lag_ms`)
+  - `WS drift, ms` (`ws_drift_ms` = `local_receive_ts_ms - exchange_server_ts_ms`)
   - `Half-life entry window, ms` (`entry_half_life_ms`)
   - `Avg >P90 time, ms` (`avg_gt_p90_ms`, alias: `entry_w_ms`)
   - `Gate NATR 30m, %` (`gate_natr_30m_pct`)
@@ -41,7 +42,7 @@
 ### Тестируемые checkpoint’ы (Задача #1)
 
 1. **SCREENER-CP-01 / Структура данных**  
-   Каждая строка содержит `symbol`, `leader_exchange`, `lag_ms`, `entry_half_life_ms`, `avg_gt_p90_ms`, `gate_natr_30m_pct`.
+   Каждая строка содержит `symbol`, `leader_exchange`, `lag_ms`, `ws_drift_ms`, `entry_half_life_ms`, `avg_gt_p90_ms`, `gate_natr_30m_pct`.
 
 2. **SCREENER-CP-02 / Volume filter**  
    В выдаче нет символов с `quote_volume < 1_000_000`.
@@ -63,6 +64,9 @@
 
 8. **SCREENER-CP-08 / NATR корректность**  
    `gate_natr_30m_pct` считается по Gate futures candles (`interval=30m`, `period=30`) как `ATR(30)/Close*100`, значение неотрицательное.
+
+9. **SCREENER-CP-09 / WS drift корректность**  
+   `ws_drift_ms` считается как `local_receive_ts_ms - exchange_server_ts_ms` (если серверный timestamp валиден), метрика выводится в API/UI.
 
 ---
 
