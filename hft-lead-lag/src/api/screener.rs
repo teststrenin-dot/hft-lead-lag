@@ -423,6 +423,7 @@ struct ShadowPosition {
     entry_ts_ms: i64,
     /// Binance mid at entry — used to measure catchup
     binance_mid_at_entry: f64,
+    spike_bps: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -431,6 +432,8 @@ struct ShadowTrade {
     ts_ms: i64,
     direction: ShadowDirection,
     entry_ts_ms: i64,
+    entry_price: f64,
+    exit_price: f64,
     exit_reason: &'static str,
     spike_bps: f64,
     catchup_pct: f64,
@@ -453,6 +456,8 @@ pub struct ChartTrade {
     pub exit_reason: String,
     pub spike_bps: f64,
     pub catchup_pct: f64,
+    pub entry_price: f64,
+    pub exit_price: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -511,6 +516,7 @@ struct PendingOrder {
     /// Only for exit: snapshot of position at exit request time
     exit_pos: Option<ShadowPosition>,
     spike_bps: f64,
+    exit_reason: &'static str,
 }
 
 #[derive(Debug, Default)]
@@ -558,8 +564,7 @@ impl ShadowTrader {
                 if pending.is_exit {
                     // Fill exit at current Gate bid/ask
                     if let Some(pos) = pending.exit_pos.clone() {
-                        let reason = "target"; // we only know reason from the trigger
-                        self.fill_exit(ts_ms, gate, window_ms, pos);
+                        self.fill_exit(ts_ms, gate, window_ms, pos, pending.exit_reason);
                     }
                 } else {
                     // Fill entry at current Gate bid/ask
@@ -572,6 +577,7 @@ impl ShadowTrader {
                         gate_entry_price: gate_price,
                         entry_ts_ms: ts_ms,
                         binance_mid_at_entry: bn_mid,
+                        spike_bps: pending.spike_bps,
                     });
                 }
                 self.pending = None;
@@ -600,6 +606,9 @@ impl ShadowTrader {
             let stopped_out = unrealized_bps <= -STOP_LOSS_BPS;
 
             if gate_moved_enough || timed_out || stopped_out {
+                let reason = if gate_moved_enough { "target" }
+                    else if stopped_out { "stop_loss" }
+                    else { "timeout" };
                 // Queue exit with 7ms delay
                 self.position = None;
                 self.pending = Some(PendingOrder {
@@ -608,6 +617,7 @@ impl ShadowTrader {
                     is_exit: true,
                     exit_pos: Some(pos),
                     spike_bps: 0.0,
+                    exit_reason: reason,
                 });
             }
         }
@@ -629,6 +639,7 @@ impl ShadowTrader {
                     is_exit: false,
                     exit_pos: None,
                     spike_bps,
+                    exit_reason: "",
                 });
             }
         }
@@ -662,21 +673,22 @@ impl ShadowTrader {
         gate: &Quote,
         window_ms: i64,
         pos: ShadowPosition,
+        exit_reason: &'static str,
     ) {
         let fees = GATE_TAKER_FEE * 2.0; // entry + exit
 
-        let (pnl_pct, catchup_pct) = match pos.direction {
+        let (pnl_pct, catchup_pct, exit_price) = match pos.direction {
             ShadowDirection::Long => {
                 let exit_price = gate.bid;
                 let raw_pnl = (exit_price - pos.gate_entry_price) / pos.gate_entry_price;
                 let catchup = raw_pnl * 100.0;
-                ((raw_pnl - fees) * 100.0, catchup)
+                ((raw_pnl - fees) * 100.0, catchup, exit_price)
             }
             ShadowDirection::Short => {
                 let exit_price = gate.ask;
                 let raw_pnl = (pos.gate_entry_price - exit_price) / pos.gate_entry_price;
                 let catchup = raw_pnl * 100.0;
-                ((raw_pnl - fees) * 100.0, catchup)
+                ((raw_pnl - fees) * 100.0, catchup, exit_price)
             }
         };
 
@@ -687,8 +699,10 @@ impl ShadowTrader {
             ts_ms,
             direction: pos.direction,
             entry_ts_ms: pos.entry_ts_ms,
-            exit_reason: "filled",
-            spike_bps: 0.0,
+            entry_price: pos.gate_entry_price,
+            exit_price,
+            exit_reason,
+            spike_bps: pos.spike_bps,
             catchup_pct,
             catchup_ms,
         });
@@ -821,6 +835,8 @@ impl ShadowTrader {
             exit_reason: t.exit_reason.to_string(),
             spike_bps: t.spike_bps,
             catchup_pct: t.catchup_pct,
+            entry_price: t.entry_price,
+            exit_price: t.exit_price,
         }).collect();
 
         ChartData {

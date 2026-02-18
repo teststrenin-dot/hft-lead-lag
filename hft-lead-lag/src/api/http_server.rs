@@ -524,30 +524,42 @@ async fn screener_page() -> Html<&'static str> {
         const x0 = u.valToPos(Math.max(z.entry_s, xs.min), 'x', true);
         const x1 = u.valToPos(Math.min(z.exit_s, xs.max), 'x', true);
         if (x1 <= x0) continue;
+        const isLong = z.dir === 'LONG';
         // Shaded zone
-        ctx.fillStyle = z.dir === 'LONG' ? 'rgba(74,222,128,0.10)' : 'rgba(248,113,113,0.10)';
+        ctx.fillStyle = isLong ? 'rgba(74,222,128,0.10)' : 'rgba(248,113,113,0.10)';
         ctx.fillRect(x0, top, x1 - x0, bot - top);
         // Entry vertical line
-        ctx.strokeStyle = z.dir === 'LONG' ? 'rgba(74,222,128,0.7)' : 'rgba(248,113,113,0.7)';
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = isLong ? 'rgba(74,222,128,0.5)' : 'rgba(248,113,113,0.5)';
+        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(x0, top); ctx.lineTo(x0, bot); ctx.stroke();
-        // Entry dot
-        const yMid = top + (bot - top) * 0.5;
-        ctx.beginPath(); ctx.arc(x0, yMid, 5, 0, 2 * Math.PI);
-        ctx.fillStyle = z.dir === 'LONG' ? '#4ade80' : '#f87171';
-        ctx.fill();
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
-        // Exit dot (only for completed trades)
-        if (!z.open) {
-          ctx.beginPath(); ctx.arc(x1, yMid, 5, 0, 2 * Math.PI);
+        ctx.setLineDash([]);
+        // Entry dot at price level
+        if (z.entry_price) {
+          const yEntry = u.valToPos(z.entry_price, 'y', true);
+          ctx.beginPath(); ctx.arc(x0, yEntry, 5, 0, 2 * Math.PI);
+          ctx.fillStyle = isLong ? '#4ade80' : '#f87171';
+          ctx.fill();
+          ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+          // Entry label
+          ctx.fillStyle = '#e5e7eb';
+          ctx.font = 'bold 9px system-ui';
+          ctx.textAlign = 'left';
+          ctx.fillText(isLong ? '▲ L' : '▼ S', x0 + 8, yEntry + 3);
+        }
+        // Exit dot at price level (only for completed trades)
+        if (!z.open && z.exit_price) {
+          const yExit = u.valToPos(z.exit_price, 'y', true);
+          ctx.beginPath(); ctx.arc(x1, yExit, 5, 0, 2 * Math.PI);
           ctx.fillStyle = (z.pnl >= 0) ? '#4ade80' : '#f87171';
           ctx.fill();
-          ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
-          // PnL label at exit
+          ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+          // PnL + reason label
           ctx.fillStyle = (z.pnl >= 0) ? '#4ade80' : '#f87171';
-          ctx.font = '10px system-ui';
-          ctx.textAlign = 'center';
-          ctx.fillText((z.pnl >= 0 ? '+' : '') + z.pnl.toFixed(3) + '%', x1, yMid - 10);
+          ctx.font = '9px system-ui';
+          ctx.textAlign = 'right';
+          const lbl = (z.pnl >= 0 ? '+' : '') + z.pnl.toFixed(3) + '% ' + (z.reason || '');
+          ctx.fillText(lbl, x1 - 8, yExit - 8);
         }
       }
     };
@@ -608,10 +620,13 @@ async fn screener_page() -> Html<&'static str> {
             exit_s: t.exit_ts_ms / 1000,
             dir: t.direction,
             pnl: t.pnl_pct,
+            entry_price: t.entry_price,
+            exit_price: t.exit_price,
+            reason: t.exit_reason,
             open: false
           }));
           if (c.position !== 'FLAT' && c.position !== 'PENDING' && c.entry_ts_ms) {
-            openZone = { entry_s: c.entry_ts_ms / 1000, dir: c.position.replace('LONG_GT','LONG').replace('SHORT_GT','SHORT'), pnl: 0, open: true };
+            openZone = { entry_s: c.entry_ts_ms / 1000, dir: c.position.replace('LONG_GT','LONG').replace('SHORT_GT','SHORT'), pnl: 0, entry_price: c.entry_price, open: true };
           } else {
             openZone = null;
           }
