@@ -422,26 +422,30 @@ async fn screener_page() -> Html<&'static str> {
 
   function clearChart() {
     tsBuf = []; gtBid = []; gtAsk = []; bnBid = []; bnAsk = [];
+    lastGate = { bid: NaN, ask: NaN };
+    lastBn = { bid: NaN, ask: NaN };
     dirty = true;
   }
 
   // Latest quotes per exchange (for interpolation when only one side updates)
   let lastGate = { bid: NaN, ask: NaN };
   let lastBn = { bid: NaN, ask: NaN };
+  let reconnectMs = 1000;
 
   function connectWS() {
     const url = `ws://${location.hostname}:8181/ws`;
-    ws = new WebSocket(url);
-    ws.onmessage = (ev) => {
-      const d = JSON.parse(ev.data);
-      if (d.symbol !== selectedSym || !selectedSym) return;
-      const ts = d.timestamp_ns / 1e9; // ns → seconds
+    const sock = new WebSocket(url);
+    ws = sock;
+    sock.onopen = () => { reconnectMs = 1000; };
+    sock.onmessage = (ev) => {
+      let d; try { d = JSON.parse(ev.data); } catch { return; }
+      if (!d.symbol || d.symbol !== selectedSym) return;
+      const ts = d.timestamp_ns / 1e9;
       if (d.exchange === 'gate') {
         lastGate.bid = d.bid; lastGate.ask = d.ask;
       } else {
         lastBn.bid = d.bid; lastBn.ask = d.ask;
       }
-      // Only push when we have both sides
       if (isNaN(lastGate.bid) || isNaN(lastBn.bid)) return;
       tsBuf.push(ts);
       gtBid.push(lastGate.bid);
@@ -449,15 +453,18 @@ async fn screener_page() -> Html<&'static str> {
       bnBid.push(lastBn.bid);
       bnAsk.push(lastBn.ask);
       if (tsBuf.length > MAX_PTS) {
-        tsBuf.shift(); gtBid.shift(); gtAsk.shift(); bnBid.shift(); bnAsk.shift();
+        const trim = tsBuf.length - MAX_PTS;
+        tsBuf.splice(0, trim); gtBid.splice(0, trim); gtAsk.splice(0, trim);
+        bnBid.splice(0, trim); bnAsk.splice(0, trim);
       }
       dirty = true;
     };
-    ws.onclose = () => setTimeout(connectWS, 1000);
-    ws.onerror = () => ws.close();
+    sock.onclose = () => { setTimeout(connectWS, reconnectMs); reconnectMs = Math.min(reconnectMs * 2, 30000); };
+    sock.onerror = () => sock.close();
   }
 
   function makeChart() {
+    if (uplot) { uplot.destroy(); uplot = null; }
     const w = window.innerWidth - 32;
     const h = Math.min(window.innerHeight * 0.38, 360);
     const opts = {
@@ -481,9 +488,11 @@ async fn screener_page() -> Html<&'static str> {
     uplot = new uPlot(opts, [new Float64Array(0), [], [], [], []], el);
   }
 
-  // 60fps render loop
-  function renderLoop() {
-    if (dirty && uplot && tsBuf.length > 1) {
+  // 15fps chart render — human-visible updates don't need 60fps
+  let lastRenderTs = 0;
+  function renderLoop(ts) {
+    if (dirty && uplot && tsBuf.length > 1 && ts - lastRenderTs > 66) {
+      lastRenderTs = ts;
       uplot.setData([
         new Float64Array(tsBuf),
         new Float64Array(gtBid),
@@ -503,6 +512,7 @@ async fn screener_page() -> Html<&'static str> {
     if (!selectedSym) return;
     try {
       const res = await fetch(`/api/v1/shadow/${selectedSym}`);
+      if (!res.ok) return;
       const d = await res.json();
       if (!d) return;
       const el = document.getElementById('trades-info');
@@ -521,11 +531,10 @@ async fn screener_page() -> Html<&'static str> {
     if (uplot) uplot.setSize({ width: window.innerWidth - 32, height: Math.min(window.innerHeight * 0.38, 360) });
   });
 
-  // Boot
+  // Boot — use setTimeout chaining for table to avoid overlapping fetches
   makeChart();
   connectWS();
-  renderTable();
-  setInterval(renderTable, 1000);
+  (async function tableLoop() { await renderTable(); setTimeout(tableLoop, 1000); })();
   setInterval(pollTrades, 5000);
   requestAnimationFrame(renderLoop);
   </script>
