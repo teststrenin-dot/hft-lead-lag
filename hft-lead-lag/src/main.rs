@@ -250,6 +250,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut signal_count = 0usize;
     let mut last_status_at = Instant::now();
     let mut last_status_ticker_count = 0usize;
+    let mut signal_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+    signal_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -342,7 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
 
             // Check for lead-lag signals periodically
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+            _ = signal_interval.tick() => {
                 for symbol in &strategy_symbols {
                     if let Some(signal) = strategy.check_signal(symbol).await {
                         signal_count += 1;

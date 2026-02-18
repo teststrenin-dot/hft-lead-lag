@@ -278,23 +278,33 @@ async fn enrich_gate_natr_30m(
         }
     }
 
-    for (idx, symbol) in to_fetch {
-        let client = GateRestClient::new();
-        let value = match tokio::time::timeout(
-            Duration::from_millis(NATR_FETCH_TIMEOUT_MS),
-            client.get_natr_30m(&symbol, NATR_PERIOD_30M),
-        )
-        .await
-        {
-            Ok(Ok(Some(v))) if v.is_finite() && v >= 0.0 => Some(v),
-            Ok(Ok(Some(_))) => Some(0.0),
-            Ok(Ok(None)) => None,
-            Ok(Err(_)) => None,
-            Err(_) => None,
-        };
+    let futs: Vec<_> = to_fetch
+        .iter()
+        .map(|(_, symbol)| {
+            let sym = symbol.clone();
+            let c = GateRestClient::new();
+            async move {
+                match tokio::time::timeout(
+                    Duration::from_millis(NATR_FETCH_TIMEOUT_MS),
+                    c.get_natr_30m(&sym, NATR_PERIOD_30M),
+                )
+                .await
+                {
+                    Ok(Ok(Some(v))) if v.is_finite() && v >= 0.0 => Some(v),
+                    Ok(Ok(Some(_))) => Some(0.0),
+                    Ok(Ok(None)) => None,
+                    Ok(Err(_)) => None,
+                    Err(_) => None,
+                }
+            }
+        })
+        .collect();
 
+    let results = futures_util::future::join_all(futs).await;
+
+    for ((idx, symbol), value) in to_fetch.into_iter().zip(results) {
         cache.insert(
-            symbol.clone(),
+            symbol,
             CachedNatr {
                 value_pct: value,
                 updated_at_ms: now,

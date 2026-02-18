@@ -520,17 +520,17 @@ impl ShadowTrader {
         let gt_mid = (gate.bid + gate.ask) / 2.0;
         let premium_bps = ((gt_mid - bn_mid) / bn_mid) * 10_000.0;
 
-        self.premium_bps.push_back((ts_ms, premium_bps));
         self.cleanup(ts_ms, window_ms);
 
         // 2-minute warmup
         let elapsed = ts_ms.saturating_sub(self.start_ts_ms.unwrap_or(ts_ms));
         if elapsed < WARMUP_MS {
+            self.premium_bps.push_back((ts_ms, premium_bps));
             self.prev_premium_bps = premium_bps;
             return;
         }
 
-        // Recalculate frozen thresholds once per minute
+        // Recalculate frozen thresholds once per minute (before adding current sample)
         if ts_ms >= self.thresholds_updated_at_ms + THRESHOLD_INTERVAL_MS {
             self.cached_p90 = percentile(self.premium_bps.iter().map(|(_, v)| *v), 90.0);
             self.cached_p10 = percentile(self.premium_bps.iter().map(|(_, v)| *v), 10.0);
@@ -538,15 +538,27 @@ impl ShadowTrader {
             self.thresholds_updated_at_ms = ts_ms;
         }
 
-        // Execute pending signal after delay (before threshold unwrap so it
-        // can't get stuck if thresholds temporarily become None)
+        self.premium_bps.push_back((ts_ms, premium_bps));
+
+        // Execute pending signal after delay — revalidate edge before filling
         let mut just_entered = false;
         if let Some(ref sig) = self.pending_signal {
             if ts_ms >= sig.fire_ts_ms + EXECUTION_DELAY_MS {
                 let dir = sig.direction;
+                let still_valid = match (dir, self.cached_p90, self.cached_p10, self.cached_p50) {
+                    (ShadowDirection::Short, Some(p90), _, Some(p50)) => {
+                        premium_bps >= p90 && (p90 - p50).abs() >= MIN_EDGE_BPS
+                    }
+                    (ShadowDirection::Long, _, Some(p10), Some(p50)) => {
+                        premium_bps <= p10 && (p50 - p10).abs() >= MIN_EDGE_BPS
+                    }
+                    _ => false,
+                };
                 self.pending_signal = None;
-                self.execute_entry(ts_ms, dir, gate, premium_bps);
-                just_entered = true;
+                if still_valid {
+                    self.execute_entry(ts_ms, dir, gate, premium_bps);
+                    just_entered = true;
+                }
             }
         }
 
@@ -799,15 +811,21 @@ fn apply_impact(price: f64, qty: f64, ref_price: f64, is_sell: bool) -> f64 {
     if is_sell { price - impact } else { price + impact }
 }
 
-fn percentile(values: impl Iterator<Item = f64>, percentile: f64) -> Option<f64> {
+fn percentile(values: impl Iterator<Item = f64>, pct: f64) -> Option<f64> {
     let mut values: Vec<f64> = values.filter(|v| v.is_finite()).collect();
     if values.is_empty() {
         return None;
     }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-    let rank = (percentile.clamp(0.0, 100.0) / 100.0) * (values.len() - 1) as f64;
-    let index = rank.round() as usize;
-    values.get(index).copied()
+    values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let rank = (pct.clamp(0.0, 100.0) / 100.0) * (values.len() - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    if lo == hi {
+        values.get(lo).copied()
+    } else {
+        let frac = rank - lo as f64;
+        Some(values[lo] * (1.0 - frac) + values[hi] * frac)
+    }
 }
 
 fn now_ms() -> i64 {
