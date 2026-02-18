@@ -177,12 +177,7 @@ async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<ScreenerRespo
     }
 
     let mut rows: Vec<ScreenerRow> = by_symbol.into_values().collect();
-    rows.sort_by(|a, b| {
-        b.lag_ms
-            .partial_cmp(&a.lag_ms)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.symbol.cmp(&b.symbol))
-    });
+    rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
     enrich_gate_natr_30m(&mut rows, &state.natr_cache).await;
 
     Json(ScreenerResponse {
@@ -235,6 +230,8 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             ws_drift_ms: 0.0,
             ws_drift_binance_ms: 0.0,
             ws_drift_gate_ms: 0.0,
+            ws_drift_ingress_binance_ms: 0.0,
+            ws_drift_ingress_gate_ms: 0.0,
             entry_half_life_ms: 0.0,
             avg_gt_p90_ms: 0.0,
             gate_natr_30m_pct: 0.0,
@@ -316,8 +313,8 @@ async fn screener_page() -> Html<&'static str> {
         <th>Coin</th>
         <th>Leader</th>
         <th class="num">Lag (ms)</th>
-        <th class="num">WS drift Binance (ms)</th>
-        <th class="num">WS drift Gate (ms)</th>
+        <th class="num">WS drift ingress Binance (ms)</th>
+        <th class="num">WS drift ingress Gate (ms)</th>
         <th class="num">Entry half-life (ms)</th>
         <th class="num">Avg >P90 time (ms)</th>
         <th class="num">Gate NATR 30m (%)</th>
@@ -330,7 +327,9 @@ async fn screener_page() -> Html<&'static str> {
       try {
         const res = await fetch('/api/v1/screener', { cache: 'no-store' });
         const data = await res.json();
-        const rows = data.rows || [];
+        const rows = (data.rows || []).slice().sort((a, b) =>
+          String(a.symbol).localeCompare(String(b.symbol))
+        );
         document.getElementById('meta').textContent =
           `symbols=${data.total_symbols} period=${data.period_minutes}m updated=${new Date(data.generated_at_ms).toLocaleTimeString()}`;
         document.getElementById('rows').innerHTML = rows.map(r => `
@@ -338,8 +337,8 @@ async fn screener_page() -> Html<&'static str> {
             <td>${r.symbol}</td>
             <td>${r.leader_exchange}</td>
             <td class="num">${Number(r.lag_ms).toFixed(2)}</td>
-            <td class="num">${Number(r.ws_drift_binance_ms).toFixed(2)}</td>
-            <td class="num">${Number(r.ws_drift_gate_ms).toFixed(2)}</td>
+            <td class="num">${Number(r.ws_drift_ingress_binance_ms).toFixed(2)}</td>
+            <td class="num">${Number(r.ws_drift_ingress_gate_ms).toFixed(2)}</td>
             <td class="num">${Number(r.entry_half_life_ms).toFixed(2)}</td>
             <td class="num">${Number(r.avg_gt_p90_ms).toFixed(2)}</td>
             <td class="num">${Number(r.gate_natr_30m_pct).toFixed(4)}</td>
@@ -350,7 +349,7 @@ async fn screener_page() -> Html<&'static str> {
       }
     }
     render();
-    setInterval(render, 2000);
+    setInterval(render, 500);
   </script>
 </body>
 </html>"#,

@@ -18,6 +18,8 @@ pub struct ScreenerRow {
     pub ws_drift_ms: f64,
     pub ws_drift_binance_ms: f64,
     pub ws_drift_gate_ms: f64,
+    pub ws_drift_ingress_binance_ms: f64,
+    pub ws_drift_ingress_gate_ms: f64,
     pub entry_half_life_ms: f64,
     pub avg_gt_p90_ms: f64,
     pub gate_natr_30m_pct: f64,
@@ -48,6 +50,7 @@ impl ScreenerStore {
         bid: f64,
         ask: f64,
         timestamp_ns: i64,
+        local_receive_ts_ns: i64,
     ) {
         if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || ask <= 0.0 {
             return;
@@ -55,6 +58,7 @@ impl ScreenerStore {
 
         let local_ts_ms = now_ms();
         let exchange_ts_ms = normalize_exchange_ts_ms(timestamp_ns).unwrap_or(local_ts_ms);
+        let ingress_local_ts_ms = normalize_exchange_ts_ms(local_receive_ts_ns).unwrap_or(local_ts_ms);
 
         let mut state = self
             .symbols
@@ -63,6 +67,7 @@ impl ScreenerStore {
 
         let state = state.value_mut();
         let ws_drift = calculate_ws_drift_ms(local_ts_ms, timestamp_ns);
+        let ingress_ws_drift = calculate_ws_drift_ms(ingress_local_ts_ms, timestamp_ns);
         let quote = Quote {
             bid,
             ask,
@@ -74,11 +79,17 @@ impl ScreenerStore {
                 if let Some(v) = ws_drift {
                     state.binance_ws_drift_ms = Some(v);
                 }
+                if let Some(v) = ingress_ws_drift {
+                    state.binance_ingress_ws_drift_ms = Some(v);
+                }
             }
             "gate" => {
                 state.gate = Some(quote);
                 if let Some(v) = ws_drift {
                     state.gate_ws_drift_ms = Some(v);
+                }
+                if let Some(v) = ingress_ws_drift {
+                    state.gate_ingress_ws_drift_ms = Some(v);
                 }
             }
             _ => return,
@@ -155,18 +166,15 @@ impl ScreenerStore {
                 ws_drift_ms: item.value().ws_drift_ms,
                 ws_drift_binance_ms: item.value().binance_ws_drift_ms.unwrap_or(0.0),
                 ws_drift_gate_ms: item.value().gate_ws_drift_ms.unwrap_or(0.0),
+                ws_drift_ingress_binance_ms: item.value().binance_ingress_ws_drift_ms.unwrap_or(0.0),
+                ws_drift_ingress_gate_ms: item.value().gate_ingress_ws_drift_ms.unwrap_or(0.0),
                 entry_half_life_ms: item.value().entry_half_life_ms,
                 avg_gt_p90_ms: item.value().avg_gt_p90_ms,
                 gate_natr_30m_pct: 0.0,
             })
             .collect();
 
-        rows.sort_by(|a, b| {
-            b.lag_ms
-                .partial_cmp(&a.lag_ms)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.symbol.cmp(&b.symbol))
-        });
+        rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
         rows
     }
 }
@@ -193,6 +201,8 @@ struct SymbolState {
     ws_drift_ms: f64,
     binance_ws_drift_ms: Option<f64>,
     gate_ws_drift_ms: Option<f64>,
+    binance_ingress_ws_drift_ms: Option<f64>,
+    gate_ingress_ws_drift_ms: Option<f64>,
     entry_half_life_ms: f64,
     avg_gt_p90_ms: f64,
     updated_at_ms: i64,

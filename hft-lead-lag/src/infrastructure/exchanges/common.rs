@@ -65,6 +65,21 @@ impl HmacSha512 {
     }
 }
 
+/// Timestamped raw WebSocket payload: `(data, receive_ts_ns)`.
+/// The nanosecond timestamp is captured at the moment the WS frame
+/// arrives in the reader task, before it enters the mpsc channel.
+pub type StampedBytes = (Vec<u8>, i64);
+
+/// Get current timestamp in nanoseconds since UNIX epoch.
+/// Use this to stamp incoming WS frames at receive time.
+#[inline]
+pub fn now_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64
+}
+
 /// Get current timestamp in milliseconds
 #[inline]
 pub fn timestamp_ms() -> i64 {

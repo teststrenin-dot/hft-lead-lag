@@ -19,8 +19,8 @@ use crate::domain::{
     symbols::SymbolCache,
 };
 use crate::infrastructure::exchanges::common::{
-    HmacSha512, timestamp_sec, timestamp_ms, extract_json_string_field, 
-    extract_json_i64_field, price_to_ticks, qty_to_ticks,
+    HmacSha512, timestamp_sec, timestamp_ms, now_ns, StampedBytes,
+    extract_json_string_field, extract_json_i64_field, price_to_ticks, qty_to_ticks,
 };
 
 /// Gate.io Futures WebSocket endpoint
@@ -31,7 +31,7 @@ pub struct GateMarketData {
     /// WebSocket writer channel
     ws_tx: Option<mpsc::UnboundedSender<Message>>,
     /// Receiver for incoming messages
-    msg_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    msg_rx: Option<mpsc::UnboundedReceiver<StampedBytes>>,
     /// Symbol cache for interning
     symbol_cache: SymbolCache,
     /// Next subscription ID
@@ -54,6 +54,29 @@ impl GateMarketData {
             api_secret: None,
             is_authenticated: false,
         }
+    }
+
+    /// Drain all pending book ticker messages, returning only the latest per symbol.
+    pub fn drain_book_tickers(&mut self) -> Vec<BookTicker> {
+        let rx = match self.msg_rx.as_mut() {
+            Some(rx) => rx,
+            None => return Vec::new(),
+        };
+        let mut latest: std::collections::HashMap<Bytes, BookTicker> = std::collections::HashMap::new();
+        loop {
+            match rx.try_recv() {
+                Ok((data, recv_ts_ns)) => {
+                    let data_str = String::from_utf8_lossy(&data);
+                    if data_str.contains("book_ticker") {
+                        if let Some(ticker) = Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns) {
+                            latest.insert(ticker.symbol.clone(), ticker);
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        latest.into_values().collect()
     }
 
     /// Set API credentials
@@ -96,7 +119,7 @@ impl GateMarketData {
     }
 
     /// Parse book ticker message from Gate.io format
-    fn parse_book_ticker(&self, data: &[u8], _local_ts_ns: i64) -> Option<BookTicker> {
+    fn parse_book_ticker(&self, data: &[u8], local_ts_ns: i64) -> Option<BookTicker> {
         // Extract contract name - Gate uses "BTC_USD" format
         let contract = extract_json_string_field(data, "c")
             .or_else(|| extract_json_string_field(data, "contract"))?;
@@ -122,6 +145,7 @@ impl GateMarketData {
             bid_qty,
             ask_qty,
             exchange_ts.saturating_mul(1_000_000),
+            local_ts_ns,
         ))
     }
 
@@ -158,7 +182,7 @@ impl GateMarketData {
     }
 
     /// Parse trade message from Gate.io format
-    fn parse_trade(&self, data: &[u8], _local_ts_ns: i64) -> Option<Trade> {
+    fn parse_trade(&self, data: &[u8], local_ts_ns: i64) -> Option<Trade> {
         let contract = extract_json_string_field(data, "c")
             .or_else(|| extract_json_string_field(data, "contract"))?;
         
@@ -183,6 +207,7 @@ impl GateMarketData {
             qty,
             is_buyer_maker,
             exchange_ts.saturating_mul(1_000_000),
+            local_ts_ns,
         ))
     }
 }
@@ -211,7 +236,7 @@ impl MarketDataStream for GateMarketData {
         let (write_half, read_half) = futures_util::stream::StreamExt::split(ws_stream);
         let (ws_tx, mut ws_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) =
             mpsc::unbounded_channel();
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel::<StampedBytes>();
 
         // Spawn message reader task
         let auth_payload = if let (Some(key), Some(secret)) = (&self.api_key, &self.api_secret) {
@@ -228,13 +253,14 @@ impl MarketDataStream for GateMarketData {
             let mut read = read_half;
 
             while let Some(msg_result) = read.next().await {
+                let recv_ts = now_ns();
                 match msg_result {
                     Ok(msg) => match msg {
                         Message::Text(text) => {
-                            let _ = msg_tx.send(text.into_bytes());
+                            let _ = msg_tx.send((text.into_bytes(), recv_ts));
                         }
                         Message::Binary(bin) => {
-                            let _ = msg_tx.send(bin);
+                            let _ = msg_tx.send((bin, recv_ts));
                         }
                         Message::Close(frame) => {
                             warn!("Gate.io WebSocket closed: {:?}", frame);
@@ -336,7 +362,7 @@ impl MarketDataStream for GateMarketData {
 
     async fn recv_book_ticker(&mut self) -> ExchangeResult<BookTicker> {
         loop {
-            let data = if let Some(rx) = &mut self.msg_rx {
+            let (data, recv_ts_ns) = if let Some(rx) = &mut self.msg_rx {
                 rx.recv().await.ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?
             } else {
                 return Err(ExchangeError::ConnectionClosed("Not connected".into()));
@@ -346,7 +372,7 @@ impl MarketDataStream for GateMarketData {
             let is_book_ticker = data_str.contains("futures.book_ticker") || data_str.contains("book_ticker");
             
             if is_book_ticker {
-                if let Some(ticker) = Self::parse_book_ticker_static(&data, &self.symbol_cache, 0) {
+                if let Some(ticker) = Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns) {
                     return Ok(ticker);
                 }
             }
@@ -355,7 +381,7 @@ impl MarketDataStream for GateMarketData {
 
     async fn recv_trade(&mut self) -> ExchangeResult<Trade> {
         loop {
-            let data = if let Some(rx) = &mut self.msg_rx {
+            let (data, recv_ts_ns) = if let Some(rx) = &mut self.msg_rx {
                 rx.recv().await.ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?
             } else {
                 return Err(ExchangeError::ConnectionClosed("Not connected".into()));
@@ -365,7 +391,7 @@ impl MarketDataStream for GateMarketData {
             let is_trade = data_str.contains("futures.trades");
             
             if is_trade {
-                if let Some(trade) = Self::parse_trade_static(&data, &self.symbol_cache, 0) {
+                if let Some(trade) = Self::parse_trade_static(&data, &self.symbol_cache, recv_ts_ns) {
                     return Ok(trade);
                 }
             }
@@ -375,7 +401,7 @@ impl MarketDataStream for GateMarketData {
 
 impl GateMarketData {
     /// Static parser to avoid borrow conflicts
-    fn parse_book_ticker_static(data: &[u8], symbol_cache: &SymbolCache, _local_ts_ns: i64) -> Option<BookTicker> {
+    fn parse_book_ticker_static(data: &[u8], symbol_cache: &SymbolCache, local_ts_ns: i64) -> Option<BookTicker> {
         let contract = extract_json_string_field(data, "s")
             .or_else(|| extract_json_string_field(data, "contract"))
             .or_else(|| extract_json_string_field(data, "c"))?;
@@ -409,11 +435,12 @@ impl GateMarketData {
             bid_qty,
             ask_qty,
             exchange_ts.saturating_mul(1_000_000),
+            local_ts_ns,
         ))
     }
 
     /// Static parser to avoid borrow conflicts
-    fn parse_trade_static(data: &[u8], symbol_cache: &SymbolCache, _local_ts_ns: i64) -> Option<Trade> {
+    fn parse_trade_static(data: &[u8], symbol_cache: &SymbolCache, local_ts_ns: i64) -> Option<Trade> {
         let contract = extract_json_string_field(data, "c")
             .or_else(|| extract_json_string_field(data, "contract"))?;
         
@@ -438,6 +465,7 @@ impl GateMarketData {
             qty,
             is_buyer_maker,
             exchange_ts.saturating_mul(1_000_000),
+            local_ts_ns,
         ))
     }
 }

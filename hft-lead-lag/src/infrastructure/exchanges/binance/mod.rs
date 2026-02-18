@@ -17,7 +17,7 @@ use crate::domain::{
     symbols::SymbolCache,
 };
 use crate::infrastructure::exchanges::common::{
-    timestamp_ms, extract_json_string_field, 
+    timestamp_ms, now_ns, StampedBytes, extract_json_string_field, 
     extract_json_i64_field, price_to_ticks, qty_to_ticks,
 };
 
@@ -27,9 +27,9 @@ pub struct BinanceMarketData {
     /// WebSocket sender channels (2 symbols per socket in batch mode)
     ws_txs: Vec<mpsc::UnboundedSender<Message>>,
     /// Shared fan-in channel for all WS reader tasks
-    msg_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    msg_tx: Option<mpsc::UnboundedSender<StampedBytes>>,
     /// Receiver for incoming messages
-    msg_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    msg_rx: Option<mpsc::UnboundedReceiver<StampedBytes>>,
     symbol_cache: SymbolCache,
     next_subscription_id: SubscriptionId,
     api_key: Option<String>,
@@ -45,6 +45,29 @@ impl BinanceMarketData {
             next_subscription_id: 1,
             api_key: None,
         }
+    }
+
+    /// Drain all pending book ticker messages, returning only the latest per symbol.
+    pub fn drain_book_tickers(&mut self) -> Vec<BookTicker> {
+        let rx = match self.msg_rx.as_mut() {
+            Some(rx) => rx,
+            None => return Vec::new(),
+        };
+        let mut latest: std::collections::HashMap<bytes::Bytes, BookTicker> = std::collections::HashMap::new();
+        loop {
+            match rx.try_recv() {
+                Ok((data, recv_ts_ns)) => {
+                    let data_str = String::from_utf8_lossy(&data);
+                    if data_str.contains("bookTicker") {
+                        if let Some(ticker) = Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns) {
+                            latest.insert(ticker.symbol.clone(), ticker);
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        latest.into_values().collect()
     }
 
     pub fn set_credentials(&mut self, api_key: String, _api_secret: String) {
@@ -64,7 +87,7 @@ impl BinanceMarketData {
         )
     }
 
-    fn parse_book_ticker_static(data: &[u8], symbol_cache: &SymbolCache, _local_ts_ns: i64) -> Option<BookTicker> {
+    fn parse_book_ticker_static(data: &[u8], symbol_cache: &SymbolCache, local_ts_ns: i64) -> Option<BookTicker> {
         let symbol = extract_json_string_field(data, "s")?;
         let bid_price = extract_json_string_field(data, "b").and_then(|p| price_to_ticks(&p))?;
         let bid_qty = extract_json_string_field(data, "B").and_then(|q| qty_to_ticks(&q))?;
@@ -78,10 +101,11 @@ impl BinanceMarketData {
             symbol_cache.intern_bytes(&symbol),
             bid_price, ask_price, bid_qty, ask_qty,
             exchange_ts_ms.saturating_mul(1_000_000),
+            local_ts_ns,
         ))
     }
 
-    fn parse_trade_static(data: &[u8], symbol_cache: &SymbolCache, _local_ts_ns: i64) -> Option<Trade> {
+    fn parse_trade_static(data: &[u8], symbol_cache: &SymbolCache, local_ts_ns: i64) -> Option<Trade> {
         let symbol = extract_json_string_field(data, "s")?;
         let trade_id = extract_json_i64_field(data, "t")?;
         let price = extract_json_string_field(data, "p").and_then(|p| price_to_ticks(&p))?;
@@ -92,11 +116,12 @@ impl BinanceMarketData {
         Some(Trade::new(
             symbol_cache.intern_bytes(&symbol),
             trade_id, price, qty, is_buyer_maker, exchange_ts.saturating_mul(1_000_000),
+            local_ts_ns,
         ))
     }
 
     async fn spawn_ws_worker(
-        msg_tx: mpsc::UnboundedSender<Vec<u8>>,
+        msg_tx: mpsc::UnboundedSender<StampedBytes>,
     ) -> ExchangeResult<mpsc::UnboundedSender<Message>> {
         let request = BINANCE_WS_ENDPOINT
             .into_client_request()
@@ -115,12 +140,13 @@ impl BinanceMarketData {
             let mut read = read_half;
 
             while let Some(msg_result) = read.next().await {
+                let recv_ts = now_ns();
                 match msg_result {
                     Ok(Message::Text(text)) => {
-                        let _ = msg_tx.send(text.into_bytes());
+                        let _ = msg_tx.send((text.into_bytes(), recv_ts));
                     }
                     Ok(Message::Binary(bin)) => {
-                        let _ = msg_tx.send(bin);
+                        let _ = msg_tx.send((bin, recv_ts));
                     }
                     Ok(Message::Close(frame)) => {
                         warn!("WS closed: {:?}", frame);
@@ -214,7 +240,7 @@ impl MarketDataStream for BinanceMarketData {
     }
 
     async fn connect(&mut self) -> ExchangeResult<()> {
-        let (msg_tx, msg_rx): (mpsc::UnboundedSender<Vec<u8>>, mpsc::UnboundedReceiver<Vec<u8>>) =
+        let (msg_tx, msg_rx): (mpsc::UnboundedSender<StampedBytes>, mpsc::UnboundedReceiver<StampedBytes>) =
             mpsc::unbounded_channel();
         let primary_ws = Self::spawn_ws_worker(msg_tx.clone()).await?;
         self.ws_txs.clear();
@@ -282,11 +308,11 @@ impl MarketDataStream for BinanceMarketData {
         let rx = self.msg_rx.as_mut().ok_or_else(|| ExchangeError::ConnectionClosed("Not connected".into()))?;
 
         loop {
-            let data = rx.recv().await.ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
+            let (data, recv_ts_ns) = rx.recv().await.ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
             let data_str = String::from_utf8_lossy(&data);
             
             if data_str.contains("bookTicker") {
-                if let Some(ticker) = Self::parse_book_ticker_static(&data, &self.symbol_cache, 0) {
+                if let Some(ticker) = Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns) {
                     return Ok(ticker);
                 }
             }
@@ -297,11 +323,11 @@ impl MarketDataStream for BinanceMarketData {
         let rx = self.msg_rx.as_mut().ok_or_else(|| ExchangeError::ConnectionClosed("Not connected".into()))?;
 
         loop {
-            let data = rx.recv().await.ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
+            let (data, recv_ts_ns) = rx.recv().await.ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
             let data_str = String::from_utf8_lossy(&data);
             
             if data_str.contains("\"e\":\"trade\"") {
-                if let Some(trade) = Self::parse_trade_static(&data, &self.symbol_cache, 0) {
+                if let Some(trade) = Self::parse_trade_static(&data, &self.symbol_cache, recv_ts_ns) {
                     return Ok(trade);
                 }
             }

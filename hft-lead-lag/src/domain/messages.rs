@@ -7,7 +7,6 @@
 //! - Cache-friendly field ordering
 
 use bytes::Bytes;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Price represented as fixed-point ticks (1e-8 precision)
 /// Using i64 avoids decimal overhead in hot path
@@ -47,7 +46,8 @@ pub struct BookTicker {
 }
 
 impl BookTicker {
-    /// Create new book ticker
+    /// Create new book ticker.
+    /// `local_ts_ns` must be captured at WS receive time (see `common::now_ns`).
     pub fn new(
         symbol: Bytes,
         bid_price_ticks: PriceTicks,
@@ -55,6 +55,7 @@ impl BookTicker {
         bid_qty_ticks: QuantityTicks,
         ask_qty_ticks: QuantityTicks,
         exchange_ts_ns: i64,
+        local_ts_ns: i64,
     ) -> Self {
         Self {
             symbol,
@@ -63,10 +64,7 @@ impl BookTicker {
             bid_qty_ticks,
             ask_qty_ticks,
             exchange_ts_ns,
-            local_ts_ns: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as i64,
+            local_ts_ns,
         }
     }
 
@@ -133,6 +131,7 @@ impl Trade {
         qty_ticks: QuantityTicks,
         is_buyer_maker: bool,
         exchange_ts_ns: i64,
+        local_ts_ns: i64,
     ) -> Self {
         Self {
             symbol,
@@ -141,10 +140,7 @@ impl Trade {
             qty_ticks,
             is_buyer_maker,
             exchange_ts_ns,
-            local_ts_ns: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as i64,
+            local_ts_ns,
         }
     }
 
@@ -167,24 +163,4 @@ pub struct SubscriptionResult {
     pub channel: Bytes,
     pub success: bool,
     pub error_message: Option<Bytes>,
-}
-
-/// Raw WebSocket message for internal processing
-/// Allows zero-copy parsing downstream
-#[derive(Debug)]
-pub struct RawWsMessage {
-    pub data: Bytes,
-    pub received_ns: i64,
-}
-
-impl RawWsMessage {
-    pub fn new(data: Bytes) -> Self {
-        Self {
-            data,
-            received_ns: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as i64,
-        }
-    }
 }

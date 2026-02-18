@@ -208,6 +208,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!("System initialized; monitoring {} strategy symbols", strategy_symbols.len());
 
+    // Drain messages that accumulated during subscription phase to avoid
+    // stale ticks with misleading local_ts_ns at the start of the main loop.
+    let stale_binance = binance.drain_book_tickers().len();
+    let stale_gate = gate.drain_book_tickers().len();
+    if stale_binance + stale_gate > 0 {
+        info!(
+            "Drained {} stale startup ticks (binance={} gate={})",
+            stale_binance + stale_gate, stale_binance, stale_gate
+        );
+    }
+
     // Main event loop
     let mut ticker_count = 0usize;
     let mut signal_count = 0usize;
@@ -220,24 +231,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             result = binance.recv_book_ticker() => {
                 match result {
                     Ok(ticker) => {
-                        ticker_count += 1;
-                        let symbol = String::from_utf8_lossy(&ticker.symbol).to_string();
-                        screener.update(
-                            &symbol,
-                            "binance",
-                            ticker.bid_price(),
-                            ticker.ask_price(),
-                            ticker.exchange_ts_ns,
-                        );
-                        let _ = ws_tx.send(MarketDataEvent {
-                            symbol: symbol.clone(),
-                            exchange: "binance".to_string(),
-                            bid: ticker.bid_price(),
-                            ask: ticker.ask_price(),
-                            timestamp_ns: ticker.exchange_ts_ns,
-                        });
-                        
-                        strategy.update_primary_book(ticker).await;
+                        // Process this tick + drain all buffered ticks, keep latest per symbol
+                        let mut latest: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> = std::collections::HashMap::new();
+                        let sym = String::from_utf8_lossy(&ticker.symbol).to_string();
+                        latest.insert(sym, ticker);
+                        for t in binance.drain_book_tickers() {
+                            let s = String::from_utf8_lossy(&t.symbol).to_string();
+                            latest.insert(s, t);
+                        }
+                        for (symbol, ticker) in &latest {
+                            ticker_count += 1;
+                            screener.update(
+                                symbol,
+                                "binance",
+                                ticker.bid_price(),
+                                ticker.ask_price(),
+                                ticker.exchange_ts_ns,
+                                ticker.local_ts_ns,
+                            );
+                            let _ = ws_tx.send(MarketDataEvent {
+                                symbol: symbol.clone(),
+                                exchange: "binance".to_string(),
+                                bid: ticker.bid_price(),
+                                ask: ticker.ask_price(),
+                                timestamp_ns: ticker.exchange_ts_ns,
+                            });
+                        }
+                        // Forward strategy ticks for bounded symbol set
+                        for sym in &strategy_symbols {
+                            if let Some(t) = latest.get(sym) {
+                                strategy.update_primary_book(t.clone()).await;
+                            }
+                        }
                     }
                     Err(e) => {
                         error!("Binance data error: {}", e);
@@ -249,24 +274,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             result = gate.recv_book_ticker() => {
                 match result {
                     Ok(ticker) => {
-                        ticker_count += 1;
-                        let symbol = String::from_utf8_lossy(&ticker.symbol).to_string();
-                        screener.update(
-                            &symbol,
-                            "gate",
-                            ticker.bid_price(),
-                            ticker.ask_price(),
-                            ticker.exchange_ts_ns,
-                        );
-                        let _ = ws_tx.send(MarketDataEvent {
-                            symbol: symbol.clone(),
-                            exchange: "gate".to_string(),
-                            bid: ticker.bid_price(),
-                            ask: ticker.ask_price(),
-                            timestamp_ns: ticker.exchange_ts_ns,
-                        });
-                        
-                        strategy.update_hedge_book(ticker).await;
+                        let mut latest: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> = std::collections::HashMap::new();
+                        let sym = String::from_utf8_lossy(&ticker.symbol).to_string();
+                        latest.insert(sym, ticker);
+                        for t in gate.drain_book_tickers() {
+                            let s = String::from_utf8_lossy(&t.symbol).to_string();
+                            latest.insert(s, t);
+                        }
+                        for (symbol, ticker) in &latest {
+                            ticker_count += 1;
+                            screener.update(
+                                symbol,
+                                "gate",
+                                ticker.bid_price(),
+                                ticker.ask_price(),
+                                ticker.exchange_ts_ns,
+                                ticker.local_ts_ns,
+                            );
+                            let _ = ws_tx.send(MarketDataEvent {
+                                symbol: symbol.clone(),
+                                exchange: "gate".to_string(),
+                                bid: ticker.bid_price(),
+                                ask: ticker.ask_price(),
+                                timestamp_ns: ticker.exchange_ts_ns,
+                            });
+                        }
+                        for sym in &strategy_symbols {
+                            if let Some(t) = latest.get(sym) {
+                                strategy.update_hedge_book(t.clone()).await;
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!("Gate data error: {}", e);
