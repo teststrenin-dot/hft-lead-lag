@@ -12,9 +12,12 @@ export GATE_API_KEY="f9dd727fd86d14c064971e59e0c88e3f"
 export GATE_API_SECRET="534d0d582a0fa23faf378cf2b0b68cc4c56212b47f1293b93fa335fdf326dfb1"
 export RUST_LOG=hft_lead_lag=info
 
-LOG_FILE="/root/turbo/hft-lead-lag/test_connection_$(date +%Y%m%d_%H%M%S).log"
+LOG_DIR="/root/turbo/hft-lead-lag/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/test_connection.log"
+SUMMARY_FILE="$LOG_DIR/summary.log"
 
-echo "=== HFT Lead-Lag Connection Test ===" | tee -a "$LOG_FILE"
+echo "=== HFT Lead-Lag Connection Test ===" | tee "$LOG_FILE"
 echo "Started: $(date)" | tee -a "$LOG_FILE"
 echo "" | tee -a "$LOG_FILE"
 
@@ -49,3 +52,9 @@ fi
 
 echo "" | tee -a "$LOG_FILE"
 echo "Log saved to: $LOG_FILE" | tee -a "$LOG_FILE"
+{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] connection-test"
+    tail -n 8 "$LOG_FILE"
+    echo "----"
+} > "$SUMMARY_FILE"
+echo "Summary saved to: $SUMMARY_FILE" | tee -a "$LOG_FILE"

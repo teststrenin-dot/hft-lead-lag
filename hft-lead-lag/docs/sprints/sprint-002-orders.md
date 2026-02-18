@@ -67,6 +67,8 @@
 ### Внешние зависимости
 - Binance API rate limits: 1200 requests/minute
 - Gate API rate limits: 100 requests/second
+- Базовые runtime API готовы: `/api/v1/symbols`, `ws://127.0.0.1:8181/ws`
+- Логи доступны централизованно: `project/logs/*`
 
 ---
 
@@ -107,4 +109,4 @@
 
 ---
 
-*Sprint planned: 2026-02-18*
+*Sprint planned: 2026-02-18 (deps refreshed after checkpoint)*

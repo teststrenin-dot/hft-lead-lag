@@ -122,7 +122,7 @@ impl GateMarketData {
             ask_price,
             bid_qty,
             ask_qty,
-            exchange_ts * 1_000_000,
+            exchange_ts.saturating_mul(1_000_000),
         ))
     }
 
@@ -181,7 +181,7 @@ impl GateMarketData {
             price,
             qty,
             is_buyer_maker,
-            exchange_ts * 1_000_000,
+            exchange_ts.saturating_mul(1_000_000),
         ))
     }
 }
@@ -390,7 +390,7 @@ impl GateMarketData {
             ask_price,
             bid_qty,
             ask_qty,
-            exchange_ts * 1_000_000,
+            exchange_ts.saturating_mul(1_000_000),
         ))
     }
 
@@ -417,7 +417,7 @@ impl GateMarketData {
             price,
             qty,
             is_buyer_maker,
-            exchange_ts * 1_000_000,
+            exchange_ts.saturating_mul(1_000_000),
         ))
     }
 }

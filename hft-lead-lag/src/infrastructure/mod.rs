@@ -9,5 +9,6 @@
 pub mod exchanges;
 pub mod websocket;
 pub mod rest;
+pub mod logging;
 
 pub use exchanges::*;

@@ -46,6 +46,9 @@
 - **LOC**: ~1300 строк
 - **Модули**: 20+ файлов
 - **Тесты**: 14 passing
+- **REST API**: `/health`, `/api/v1/symbols` (volume + 24h dynamics)
+- **WS API**: `ws://127.0.0.1:8181/ws` (market broadcast)
+- **Централизованные логи**: `project/logs/runtime.log`, `project/logs/summary.log`
 
 ### Документация
 - docs/manifest/MANIFESTO.md
@@ -105,6 +108,14 @@ cargo run
 - Подключение к обеим биржам
 - Получение book ticker обновлений
 - Логирование spread между биржами
+- Доступность REST/WS checkpoint endpoint'ов
+
+### Checkpoint факт (2026-02-18)
+- `cargo test --quiet`: ✅ all passed
+- `/api/v1/symbols`: ✅ `total_symbols=641`, `common_symbols=105`
+- Поля динамики цены: ✅ `price_change_24h_pct` присутствует
+- `ws://127.0.0.1:8181/ws`: ✅ поток market data (sample: `binance HYPEUSDT bid/ask`)
+- `test_connection.sh`: ✅ summary в `logs/summary.log`
 
 ---
 
@@ -120,4 +131,4 @@ cargo run
 
 ---
 
-*Sprint completed: 2026-02-18*
+*Sprint completed: 2026-02-18 (updated with checkpoint hardening)*

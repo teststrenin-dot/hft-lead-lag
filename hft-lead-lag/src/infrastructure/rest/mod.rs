@@ -35,6 +35,7 @@ pub struct Ticker24h {
     pub symbol: String,
     pub quote_volume: f64,  // 24h USD volume
     pub last_price: Option<f64>,
+    pub price_change_24h_pct: Option<f64>,
 }
 
 /// Binance REST API client
@@ -100,11 +101,16 @@ impl BinanceRestClient {
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<f64>().ok())
                     .or_else(|| t.get("last").and_then(|v| v.as_f64()));
+                let price_change_24h_pct = t.get("priceChangePercent")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .or_else(|| t.get("priceChangePercent").and_then(|v| v.as_f64()));
 
                 Some(Ticker24h {
                     symbol,
                     quote_volume,
                     last_price,
+                    price_change_24h_pct,
                 })
             })
             .collect();
@@ -115,16 +121,24 @@ impl BinanceRestClient {
 
     /// Get symbols with 24h volume > min_volume_usd
     pub async fn get_symbols_with_volume(&self, min_volume_usd: f64) -> ExchangeResult<Vec<String>> {
-        let tickers = self.get_24h_tickers().await?;
+        let tickers = self.get_tickers_with_volume(min_volume_usd).await?;
         
         let symbols: Vec<String> = tickers
             .into_iter()
-            .filter(|t| t.quote_volume >= min_volume_usd)
             .map(|t| t.symbol)
             .collect();
 
         debug!("Found {} symbols with volume >= {} USD", symbols.len(), min_volume_usd);
         Ok(symbols)
+    }
+
+    /// Get full ticker snapshots for symbols with 24h volume > min_volume_usd
+    pub async fn get_tickers_with_volume(&self, min_volume_usd: f64) -> ExchangeResult<Vec<Ticker24h>> {
+        let tickers = self.get_24h_tickers().await?;
+        Ok(tickers
+            .into_iter()
+            .filter(|t| t.quote_volume >= min_volume_usd)
+            .collect())
     }
 }
 
@@ -214,11 +228,16 @@ impl GateRestClient {
                 // Gate uses volume_24h_quote for USD volume
                 let quote_volume = t.get("volume_24h_quote")?.as_str()?.parse::<f64>().ok()?;
                 let last_price = t.get("last")?.as_str()?.parse::<f64>().ok();
+                let price_change_24h_pct = t.get("change_percentage")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .or_else(|| t.get("change_percentage").and_then(|v| v.as_f64()));
 
                 Some(Ticker24h {
                     symbol,
                     quote_volume,
                     last_price,
+                    price_change_24h_pct,
                 })
             })
             .collect();
@@ -228,16 +247,24 @@ impl GateRestClient {
 
     /// Get symbols with 24h volume > min_volume_usd
     pub async fn get_symbols_with_volume(&self, min_volume_usd: f64) -> ExchangeResult<Vec<String>> {
-        let tickers = self.get_24h_tickers().await?;
+        let tickers = self.get_tickers_with_volume(min_volume_usd).await?;
         
         let symbols: Vec<String> = tickers
             .into_iter()
-            .filter(|t| t.quote_volume >= min_volume_usd)
             .map(|t| t.symbol)
             .collect();
 
         debug!("Found {} symbols with volume >= {} USD", symbols.len(), min_volume_usd);
         Ok(symbols)
+    }
+
+    /// Get full ticker snapshots for symbols with 24h volume > min_volume_usd
+    pub async fn get_tickers_with_volume(&self, min_volume_usd: f64) -> ExchangeResult<Vec<Ticker24h>> {
+        let tickers = self.get_24h_tickers().await?;
+        Ok(tickers
+            .into_iter()
+            .filter(|t| t.quote_volume >= min_volume_usd)
+            .collect())
     }
 }
 

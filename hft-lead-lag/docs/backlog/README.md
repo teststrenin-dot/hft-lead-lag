@@ -137,6 +137,7 @@
 | INFRA-001 | Logging | Structured logging с tracing | ✅ Done |
 | INFRA-002 | Config management | Загрузка из TOML + env | ✅ Done |
 | INFRA-003 | Error handling | Типизированные ошибки | ✅ Done |
+| INFRA-009 | Centralized log sink | Runtime/test logs в `project/logs` + summary | ✅ Done |
 
 ### P1 — Важно для следующего спринта
 
@@ -163,6 +164,7 @@
 |----|--------|----------|--------|
 | TEST-001 | Unit tests | Покрытие > 80% | ✅ Done (14 tests) |
 | TEST-002 | Integration tests | Тесты с реальными WS | ⬜ Todo |
+| TEST-007 | Checkpoint validation | REST/WS symbols >= $1M + price dynamics | ✅ Done |
 
 ### P1 — Важно для следующего спринта
 
@@ -196,9 +198,9 @@
 
 - **Total items**: 50+
 - **P0 items**: 18
-- **Done**: 14
+- **Done**: 16
 - **Ready for sprint**: 20+
 
 ---
 
-*Last updated: 2026-02-18*
+*Last updated: 2026-02-18 (checkpoint + logging)*

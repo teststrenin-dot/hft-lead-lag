@@ -19,6 +19,7 @@ docs/
 │   └── sprint-003-production.md    # Sprint 3: Production Ready
 └── TASK-*.md                 # Спецификации задач
     └── TASK-001-connectors.md
+    └── TASK-002-screener-leadlag-checkpoints.md
 ```
 
 ---
@@ -28,6 +29,7 @@ docs/
 ### Для разработчиков
 - 📋 [Manifesto](manifest/MANIFESTO.md) — Принципы, архитектура, **инструменты (MCP, Skills, Subagents)**
 - 🔧 [TASK-001](TASK-001-connectors.md) — Спецификация коннекторов
+- 🧪 [TASK-002](TASK-002-screener-leadlag-checkpoints.md) — Screener + Lead-Lag test checkpoints
 - 📦 [Backlog](backlog/README.md) — Бэклог задач
 
 ### Для менеджмента
@@ -48,6 +50,9 @@ docs/
 | Exchange Connectors | ✅ Done | Sprint 1 |
 | Lead-Lag Strategy | ✅ Done | Sprint 1 |
 | Risk Management | ✅ Done | Sprint 1 |
+| REST symbols API (24h vol/dynamics) | ✅ Done | Sprint 1 (post) |
+| WS market broadcast API | ✅ Done | Sprint 1 (post) |
+| Centralized logs (`project/logs`) | ✅ Done | Sprint 1 (post) |
 | Order Management | ⬜ Todo | Sprint 2 |
 | Position Tracking | ⬜ Todo | Sprint 2 |
 | Production Ready | ⬜ Todo | Sprint 3 |
@@ -82,10 +87,24 @@ export GATE_API_SECRET="..."
 cargo run
 ```
 
+### 3.1 Checkpoint API
+```bash
+curl http://127.0.0.1:5000/health
+curl http://127.0.0.1:5000/api/v1/symbols
+# WS stream: ws://127.0.0.1:8181/ws
+```
+
 ### 4. Тесты
 ```bash
 cargo test
+./test_connection.sh
+./test_final.sh
 ```
+
+### 5. Логи
+- Runtime: `logs/runtime.log`
+- Тесты: `logs/test_connection_*.log`, `logs/test_final_*.log`
+- Краткий итог: `logs/summary.log`
 
 ---
 
@@ -108,4 +127,4 @@ cargo test
 
 ---
 
-*Last updated: 2026-02-18*
+*Last updated: 2026-02-18 (task-002 checkpoints added)*

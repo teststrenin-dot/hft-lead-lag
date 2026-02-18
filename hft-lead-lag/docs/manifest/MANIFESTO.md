@@ -114,6 +114,7 @@ API → Application → Domain → Infrastructure
 
 ### Наблюдаемость
 - **tracing** + **tracing-subscriber** — структурированное логирование
+- **tracing-appender** — централизованная запись runtime логов в `logs/runtime.log`
 - **time** — тайминги и метрики
 
 ### Конфигурация
@@ -234,5 +235,6 @@ ApiSecret: 534d0d582a0fa23faf378cf2b0b68cc4c56212b47f1293b93fa335fdf326dfb1
 **Manifest v1.1** | 2026-02-18
 
 ### Changelog
+- **v1.2** — Добавлены runtime REST/WS checkpoint API и централизованный logging в `project/logs/`
 - **v1.1** — Добавлены инструменты разработки (MCP Sequential Thinking, Superpowers Skills, Subagents)
 - **v1.0** — Initial manifest

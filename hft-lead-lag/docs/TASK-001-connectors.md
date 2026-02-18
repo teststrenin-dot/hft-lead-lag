@@ -96,6 +96,9 @@
 - `src/infrastructure/exchanges/gate/mod.rs` — Gate connector
 - `src/infrastructure/exchanges/common.rs` — Общие утилиты (HMAC, парсинг)
 - `src/domain/exchange.rs` — Traits (MarketDataStream, OrderExecutor)
+- `src/api/http_server.rs` — runtime REST endpoint'ы
+- `src/api/ws_server.rs` — runtime WS broadcast endpoint
+- `src/infrastructure/logging.rs` — централизованная инициализация логирования
 
 ### Ключевые решения
 
@@ -148,6 +151,15 @@ test infrastructure::exchanges::common::tests::test_extract_json_i64 ... ok
 test result: ok. 14 passed; 0 failed
 ```
 
+### Checkpoint Validation (REST + WS + Logs)
+- `GET /api/v1/symbols` возвращает symbols с `quote_volume >= 1_000_000` и полем `price_change_24h_pct`
+- `WS /ws` отдает market data события в реальном времени (`exchange`, `symbol`, `bid`, `ask`)
+- Тестовые и runtime логи идут в `project/logs/`:
+  - `logs/runtime.log`
+  - `logs/test_connection_*.log`
+  - `logs/test_final_*.log`
+  - `logs/summary.log`
+
 ---
 
 ## Метрики
@@ -196,4 +208,4 @@ test result: ok. 14 passed; 0 failed
 
 ---
 
-*Task completed: 2026-02-18*
+*Task completed: 2026-02-18 (updated with runtime checkpoint delivery)*

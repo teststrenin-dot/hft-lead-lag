@@ -9,7 +9,7 @@
 ## Sprint Goals
 
 1. ⬜ Auto-reconnect с exponential backoff
-2. ⬜ Health checks и monitoring
+2. 🟡 Health checks и monitoring (baseline `/health` готов)
 3. ⬜ Prometheus metrics
 4. ⬜ Data recording для анализа
 5. ⬜ Graceful shutdown
@@ -23,7 +23,7 @@
 | ID | Задача | Описание | Оценка | Статус |
 |----|--------|----------|--------|--------|
 | CONN-008 | Reconnect logic | Auto-reconnect с backoff | 5 SP | ⬜ Todo |
-| CONN-012 | Health checks | Connection monitoring | 3 SP | ⬜ Todo |
+| CONN-012 | Health checks | Connection monitoring | 3 SP | 🟡 In progress (baseline health endpoint) |
 | INFRA-004 | Metrics | Prometheus metrics | 5 SP | ⬜ Todo |
 | INFRA-006 | Data recording | Запись тиков в data lake | 5 SP | ⬜ Todo |
 

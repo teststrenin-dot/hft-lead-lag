@@ -72,7 +72,7 @@ impl BinanceMarketData {
         Some(BookTicker::new(
             symbol_cache.intern_bytes(&symbol),
             bid_price, ask_price, bid_qty, ask_qty,
-            update_id * 1_000_000,
+            update_id.saturating_mul(1_000_000),
         ))
     }
 
@@ -86,7 +86,7 @@ impl BinanceMarketData {
 
         Some(Trade::new(
             symbol_cache.intern_bytes(&symbol),
-            trade_id, price, qty, is_buyer_maker, exchange_ts * 1_000_000,
+            trade_id, price, qty, is_buyer_maker, exchange_ts.saturating_mul(1_000_000),
         ))
     }
 }
@@ -182,7 +182,7 @@ impl MarketDataStream for BinanceMarketData {
             // NO MUTEX NEEDED! Just send to channel
             tx.send(Message::Text(msg))
                 .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
-            info!("✅ Subscribed to {}", symbol);
+            debug!("Subscribed to {}", symbol);
         } else {
             return Err(ExchangeError::ConnectionClosed("Not connected".into()));
         }
