@@ -246,6 +246,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 "binance",
                                 ticker.bid_price(),
                                 ticker.ask_price(),
+                                ticker.bid_qty(),
+                                ticker.ask_qty(),
                                 ticker.exchange_ts_ns,
                                 ticker.local_ts_ns,
                             );
@@ -288,6 +290,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 "gate",
                                 ticker.bid_price(),
                                 ticker.ask_price(),
+                                ticker.bid_qty(),
+                                ticker.ask_qty(),
                                 ticker.exchange_ts_ns,
                                 ticker.local_ts_ns,
                             );

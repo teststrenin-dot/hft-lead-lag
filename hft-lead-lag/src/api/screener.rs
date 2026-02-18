@@ -10,6 +10,15 @@ use serde::Serialize;
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 
+/// Assumed notional per leg in USD for market impact estimation.
+const ASSUMED_NOTIONAL_USD: f64 = 1_000.0;
+/// Gate taker fee (fraction, not percent).
+const GATE_TAKER_FEE: f64 = 0.000_5; // 0.05 %
+/// Simulated order-to-fill latency in milliseconds.
+const EXECUTION_DELAY_MS: i64 = 10;
+/// Minimum expected edge (bps) to enter — must exceed round-trip fees.
+const MIN_EDGE_BPS: f64 = 10.0; // 2 × 0.05% = 10 bps
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ScreenerRow {
     pub symbol: String,
@@ -23,6 +32,12 @@ pub struct ScreenerRow {
     pub entry_half_life_ms: f64,
     pub avg_gt_p90_ms: f64,
     pub gate_natr_30m_pct: f64,
+    // Shadow trader fields
+    pub shadow_pnl_per_hour_pct: f64,
+    pub shadow_trades_per_hour: f64,
+    pub shadow_avg_trade_pct: f64,
+    pub shadow_win_rate_pct: f64,
+    pub shadow_position: String,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +64,8 @@ impl ScreenerStore {
         exchange: &'static str,
         bid: f64,
         ask: f64,
+        bid_qty: f64,
+        ask_qty: f64,
         timestamp_ns: i64,
         local_receive_ts_ns: i64,
     ) {
@@ -71,6 +88,8 @@ impl ScreenerStore {
         let quote = Quote {
             bid,
             ask,
+            bid_qty,
+            ask_qty,
             ts_ms: exchange_ts_ms,
         };
         match exchange {
@@ -111,13 +130,19 @@ impl ScreenerStore {
             "gate".to_string()
         };
 
-        let reference_mid = ((binance.bid + binance.ask + gate.bid + gate.ask) / 4.0).max(1e-12);
+        // Use the leading exchange's mid as per-coin normalizer (no cross-exchange blending).
+        let leader_mid = if binance.ts_ms >= gate.ts_ms {
+            (binance.bid + binance.ask) / 2.0
+        } else {
+            (gate.bid + gate.ask) / 2.0
+        }
+        .max(1e-12);
 
-        let binance_div_bps = ((binance.bid - gate.ask) / reference_mid) * 10_000.0;
-        let binance_conv_bps = ((binance.ask - gate.bid) / reference_mid) * 10_000.0;
+        let binance_div_bps = ((binance.bid - gate.ask) / leader_mid) * 10_000.0;
+        let binance_conv_bps = ((binance.ask - gate.bid) / leader_mid) * 10_000.0;
 
-        let gate_div_bps = ((gate.bid - binance.ask) / reference_mid) * 10_000.0;
-        let gate_conv_bps = ((gate.ask - binance.bid) / reference_mid) * 10_000.0;
+        let gate_div_bps = ((gate.bid - binance.ask) / leader_mid) * 10_000.0;
+        let gate_conv_bps = ((gate.ask - binance.bid) / leader_mid) * 10_000.0;
 
         state
             .binance_leads
@@ -152,6 +177,9 @@ impl ScreenerStore {
         } else {
             gt_p90_means.iter().sum::<f64>() / gt_p90_means.len() as f64
         };
+
+        // Shadow trader: feed both quotes
+        state.shadow.tick(exchange_ts_ms, &binance, &gate, self.window_ms);
     }
 
     pub fn rows_sorted(&self) -> Vec<ScreenerRow> {
@@ -159,23 +187,36 @@ impl ScreenerStore {
             .symbols
             .iter()
             .filter(|item| !item.value().leader_exchange.is_empty())
-            .map(|item| ScreenerRow {
-                symbol: item.key().clone(),
-                leader_exchange: item.value().leader_exchange.clone(),
-                lag_ms: item.value().lag_ms,
-                ws_drift_ms: item.value().ws_drift_ms,
-                ws_drift_binance_ms: item.value().binance_ws_drift_ms.unwrap_or(0.0),
-                ws_drift_gate_ms: item.value().gate_ws_drift_ms.unwrap_or(0.0),
-                ws_drift_ingress_binance_ms: item.value().binance_ingress_ws_drift_ms.unwrap_or(0.0),
-                ws_drift_ingress_gate_ms: item.value().gate_ingress_ws_drift_ms.unwrap_or(0.0),
-                entry_half_life_ms: item.value().entry_half_life_ms,
-                avg_gt_p90_ms: item.value().avg_gt_p90_ms,
-                gate_natr_30m_pct: 0.0,
+            .map(|item| {
+                let shadow = &item.value().shadow;
+                let stats = shadow.stats();
+                ScreenerRow {
+                    symbol: item.key().clone(),
+                    leader_exchange: item.value().leader_exchange.clone(),
+                    lag_ms: item.value().lag_ms,
+                    ws_drift_ms: item.value().ws_drift_ms,
+                    ws_drift_binance_ms: item.value().binance_ws_drift_ms.unwrap_or(0.0),
+                    ws_drift_gate_ms: item.value().gate_ws_drift_ms.unwrap_or(0.0),
+                    ws_drift_ingress_binance_ms: item.value().binance_ingress_ws_drift_ms.unwrap_or(0.0),
+                    ws_drift_ingress_gate_ms: item.value().gate_ingress_ws_drift_ms.unwrap_or(0.0),
+                    entry_half_life_ms: item.value().entry_half_life_ms,
+                    avg_gt_p90_ms: item.value().avg_gt_p90_ms,
+                    gate_natr_30m_pct: 0.0,
+                    shadow_pnl_per_hour_pct: stats.pnl_per_hour_pct,
+                    shadow_trades_per_hour: stats.trades_per_hour,
+                    shadow_avg_trade_pct: stats.avg_trade_pct,
+                    shadow_win_rate_pct: stats.win_rate_pct,
+                    shadow_position: stats.position.clone(),
+                }
             })
             .collect();
 
         rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
         rows
+    }
+
+    pub fn shadow_debug(&self, symbol: &str) -> Option<ShadowDebug> {
+        self.symbols.get(symbol).map(|s| s.shadow.debug())
     }
 }
 
@@ -189,6 +230,8 @@ impl Default for ScreenerStore {
 struct Quote {
     bid: f64,
     ask: f64,
+    bid_qty: f64,
+    ask_qty: f64,
     ts_ms: i64,
 }
 
@@ -208,6 +251,7 @@ struct SymbolState {
     updated_at_ms: i64,
     binance_leads: CycleTracker,
     gate_leads: CycleTracker,
+    shadow: ShadowTrader,
 }
 
 #[derive(Debug, Default)]
@@ -310,6 +354,342 @@ impl CycleTracker {
             let _ = self.above_p90_samples_ms.pop_front();
         }
     }
+}
+
+/// Post-trade cooldown to prevent overtrading (ms).
+const COOLDOWN_MS: i64 = 5_000;
+/// Warmup duration: shadow trader ignores data until enough history (ms).
+const WARMUP_MS: i64 = 120_000; // 2 minutes
+/// Maximum age of a quote to be considered "fresh" (ms).
+const QUOTE_FRESHNESS_MS: i64 = 1_000;
+
+// ---------------------------------------------------------------------------
+// Shadow Trader — paper-trades ONLY on Gate, uses Binance as signal source.
+//
+// Model: Binance leads, Gate lags. When Gate premium vs Binance reaches P90
+// (extreme divergence), open a position on Gate. Exit when premium reverts
+// to P50. Execution uses Gate bid/ask + market impact from Gate L1 depth.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ShadowDirection {
+    /// Gate overpriced vs Binance → sell Gate
+    Short,
+    /// Gate underpriced vs Binance → buy Gate
+    Long,
+}
+
+#[derive(Debug, Clone)]
+struct ShadowPosition {
+    direction: ShadowDirection,
+    gate_entry_price: f64,
+    #[allow(dead_code)]
+    entry_ts_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ShadowSignal {
+    direction: ShadowDirection,
+    fire_ts_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ShadowTrade {
+    pnl_pct: f64,
+    ts_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ShadowStats {
+    pub pnl_per_hour_pct: f64,
+    pub trades_per_hour: f64,
+    pub avg_trade_pct: f64,
+    pub win_rate_pct: f64,
+    pub position: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ShadowDebug {
+    pub premium_samples: usize,
+    pub current_premium_bps: f64,
+    pub cached_p90: Option<f64>,
+    pub cached_p10: Option<f64>,
+    pub cached_p50: Option<f64>,
+    pub completed_trades_in_window: usize,
+    pub cooldown_remaining_ms: i64,
+    pub warmup_remaining_ms: i64,
+    pub position: String,
+    pub last_5_trades_pnl_pct: Vec<f64>,
+    pub short_edge_bps: f64,
+    pub long_edge_bps: f64,
+    pub min_edge_required_bps: f64,
+}
+
+/// Interval for recalculating P90/P10/P50 thresholds (ms).
+const THRESHOLD_INTERVAL_MS: i64 = 60_000; // 1 minute
+
+#[derive(Debug, Default)]
+struct ShadowTrader {
+    /// Rolling gate premium: (gate.mid − binance.mid) / binance.mid × 10000 bps
+    premium_bps: VecDeque<(i64, f64)>,
+    position: Option<ShadowPosition>,
+    pending_signal: Option<ShadowSignal>,
+    completed_trades: VecDeque<ShadowTrade>,
+    start_ts_ms: Option<i64>,
+    latest_ts_ms: i64,
+    cooldown_until_ms: i64,
+    prev_premium_bps: f64,
+    // Frozen thresholds — recalculated once per THRESHOLD_INTERVAL_MS
+    cached_p90: Option<f64>,
+    cached_p10: Option<f64>,
+    cached_p50: Option<f64>,
+    thresholds_updated_at_ms: i64,
+}
+
+impl ShadowTrader {
+    fn tick(&mut self, ts_ms: i64, binance: &Quote, gate: &Quote, window_ms: i64) {
+        if self.start_ts_ms.is_none() {
+            self.start_ts_ms = Some(ts_ms);
+        }
+        self.latest_ts_ms = ts_ms;
+
+        // Both quotes must be fresh
+        if (ts_ms - binance.ts_ms).unsigned_abs() > QUOTE_FRESHNESS_MS as u64
+            || (ts_ms - gate.ts_ms).unsigned_abs() > QUOTE_FRESHNESS_MS as u64
+        {
+            return;
+        }
+
+        let bn_mid = ((binance.bid + binance.ask) / 2.0).max(1e-12);
+        let gt_mid = (gate.bid + gate.ask) / 2.0;
+        let premium_bps = ((gt_mid - bn_mid) / bn_mid) * 10_000.0;
+
+        self.premium_bps.push_back((ts_ms, premium_bps));
+        self.cleanup(ts_ms, window_ms);
+
+        // 2-minute warmup
+        let elapsed = ts_ms.saturating_sub(self.start_ts_ms.unwrap_or(ts_ms));
+        if elapsed < WARMUP_MS {
+            self.prev_premium_bps = premium_bps;
+            return;
+        }
+
+        // Recalculate frozen thresholds once per minute
+        if ts_ms >= self.thresholds_updated_at_ms + THRESHOLD_INTERVAL_MS {
+            self.cached_p90 = percentile(self.premium_bps.iter().map(|(_, v)| *v), 90.0);
+            self.cached_p10 = percentile(self.premium_bps.iter().map(|(_, v)| *v), 10.0);
+            self.cached_p50 = percentile(self.premium_bps.iter().map(|(_, v)| *v), 50.0);
+            self.thresholds_updated_at_ms = ts_ms;
+        }
+
+        let (p90, p10, p50) = match (self.cached_p90, self.cached_p10, self.cached_p50) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => {
+                self.prev_premium_bps = premium_bps;
+                return;
+            }
+        };
+
+        // Execute pending signal after delay
+        if let Some(ref sig) = self.pending_signal {
+            if ts_ms >= sig.fire_ts_ms + EXECUTION_DELAY_MS {
+                let dir = sig.direction;
+                self.pending_signal = None;
+                self.execute_entry(ts_ms, dir, gate);
+            }
+        }
+
+        // Exit: premium reverted to frozen P50
+        if let Some(ref pos) = self.position {
+            let should_exit = match pos.direction {
+                ShadowDirection::Short => premium_bps <= p50,
+                ShadowDirection::Long => premium_bps >= p50,
+            };
+            if should_exit {
+                self.execute_exit(ts_ms, gate, window_ms);
+            }
+        }
+
+        // Entry: flat, no pending, cooldown elapsed, frozen P90/P10 crossing
+        // Only enter if expected edge (|threshold - P50|) exceeds round-trip fees
+        let short_edge = (p90 - p50).abs();
+        let long_edge = (p50 - p10).abs();
+
+        if self.position.is_none()
+            && self.pending_signal.is_none()
+            && ts_ms >= self.cooldown_until_ms
+        {
+            let short_cross = short_edge >= MIN_EDGE_BPS
+                && premium_bps >= p90
+                && self.prev_premium_bps < p90;
+            let long_cross = long_edge >= MIN_EDGE_BPS
+                && premium_bps <= p10
+                && self.prev_premium_bps > p10;
+
+            let direction = match (short_cross, long_cross) {
+                (true, true) => {
+                    if (premium_bps - p90).abs() >= (premium_bps - p10).abs() {
+                        Some(ShadowDirection::Short)
+                    } else {
+                        Some(ShadowDirection::Long)
+                    }
+                }
+                (true, false) => Some(ShadowDirection::Short),
+                (false, true) => Some(ShadowDirection::Long),
+                _ => None,
+            };
+
+            if let Some(dir) = direction {
+                self.pending_signal = Some(ShadowSignal {
+                    direction: dir,
+                    fire_ts_ms: ts_ms,
+                });
+            }
+        }
+
+        self.prev_premium_bps = premium_bps;
+    }
+
+    fn execute_entry(&mut self, ts_ms: i64, direction: ShadowDirection, gate: &Quote) {
+        let gate_price = match direction {
+            ShadowDirection::Short => apply_impact(gate.bid, gate.bid_qty, gate.bid, true),
+            ShadowDirection::Long => apply_impact(gate.ask, gate.ask_qty, gate.ask, false),
+        };
+        self.position = Some(ShadowPosition {
+            direction,
+            gate_entry_price: gate_price,
+            entry_ts_ms: ts_ms,
+        });
+    }
+
+    fn execute_exit(&mut self, ts_ms: i64, gate: &Quote, window_ms: i64) {
+        let pos = match self.position.take() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let fees = GATE_TAKER_FEE * 2.0; // entry + exit
+        let pnl_pct = match pos.direction {
+            ShadowDirection::Short => {
+                // Sold at entry, buy back now
+                let exit_price = apply_impact(gate.ask, gate.ask_qty, gate.ask, false);
+                ((pos.gate_entry_price - exit_price) / pos.gate_entry_price - fees) * 100.0
+            }
+            ShadowDirection::Long => {
+                // Bought at entry, sell now
+                let exit_price = apply_impact(gate.bid, gate.bid_qty, gate.bid, true);
+                ((exit_price - pos.gate_entry_price) / pos.gate_entry_price - fees) * 100.0
+            }
+        };
+
+        self.completed_trades.push_back(ShadowTrade { pnl_pct, ts_ms });
+        self.cooldown_until_ms = ts_ms + COOLDOWN_MS;
+        let cutoff = ts_ms - window_ms;
+        while let Some(t) = self.completed_trades.front() {
+            if t.ts_ms >= cutoff { break; }
+            self.completed_trades.pop_front();
+        }
+    }
+
+    fn stats(&self) -> ShadowStats {
+        let n = self.completed_trades.len();
+
+        if n == 0 {
+            return ShadowStats {
+                pnl_per_hour_pct: 0.0,
+                trades_per_hour: 0.0,
+                avg_trade_pct: 0.0,
+                win_rate_pct: 0.0,
+                position: self.position_label(),
+            };
+        }
+
+        // Observation period = time since warmup ended, capped to window_ms.
+        // This avoids inflated rates when trades cluster in a short burst.
+        let obs_ms = self.start_ts_ms
+            .map(|s| {
+                let post_warmup = s + WARMUP_MS;
+                (self.latest_ts_ms - post_warmup).max(1).min(TEN_MINUTES_MS) as f64
+            })
+            .unwrap_or(COOLDOWN_MS as f64);
+        let window_hours = obs_ms / 3_600_000.0;
+
+        let total_pnl: f64 = self.completed_trades.iter().map(|t| t.pnl_pct).sum();
+        let wins = self.completed_trades.iter().filter(|t| t.pnl_pct > 0.0).count();
+
+        ShadowStats {
+            pnl_per_hour_pct: total_pnl / window_hours,
+            trades_per_hour: n as f64 / window_hours,
+            avg_trade_pct: total_pnl / n as f64,
+            win_rate_pct: (wins as f64 / n as f64) * 100.0,
+            position: self.position_label(),
+        }
+    }
+
+    fn position_label(&self) -> String {
+        match &self.position {
+            None if self.pending_signal.is_some() => "PENDING".to_string(),
+            None => "FLAT".to_string(),
+            Some(p) => match p.direction {
+                ShadowDirection::Short => "SHORT_GT".to_string(),
+                ShadowDirection::Long => "LONG_GT".to_string(),
+            },
+        }
+    }
+
+    fn cleanup(&mut self, ts_ms: i64, window_ms: i64) {
+        let cutoff = ts_ms - window_ms;
+        while let Some((ts, _)) = self.premium_bps.front() {
+            if *ts >= cutoff { break; }
+            self.premium_bps.pop_front();
+        }
+    }
+
+    fn debug(&self) -> ShadowDebug {
+        let elapsed = self.start_ts_ms
+            .map(|s| self.latest_ts_ms.saturating_sub(s))
+            .unwrap_or(0);
+        let warmup_remaining = (WARMUP_MS - elapsed).max(0);
+        let cooldown_remaining = (self.cooldown_until_ms - self.latest_ts_ms).max(0);
+        let last_5: Vec<f64> = self.completed_trades.iter()
+            .rev().take(5).map(|t| t.pnl_pct).collect();
+        let (short_edge, long_edge) = match (self.cached_p90, self.cached_p10, self.cached_p50) {
+            (Some(p90), Some(p10), Some(p50)) => ((p90 - p50).abs(), (p50 - p10).abs()),
+            _ => (0.0, 0.0),
+        };
+        ShadowDebug {
+            premium_samples: self.premium_bps.len(),
+            current_premium_bps: self.prev_premium_bps,
+            cached_p90: self.cached_p90,
+            cached_p10: self.cached_p10,
+            cached_p50: self.cached_p50,
+            completed_trades_in_window: self.completed_trades.len(),
+            cooldown_remaining_ms: cooldown_remaining,
+            warmup_remaining_ms: warmup_remaining,
+            position: self.position_label(),
+            last_5_trades_pnl_pct: last_5,
+            short_edge_bps: short_edge,
+            long_edge_bps: long_edge,
+            min_edge_required_bps: MIN_EDGE_BPS,
+        }
+    }
+}
+
+/// Market impact from L1 depth overflow (Gate only).
+/// Impact is capped: overflow ratio beyond MAX_OVERFLOW is not executed.
+const MAX_OVERFLOW_RATIO: f64 = 5.0;
+
+fn apply_impact(price: f64, qty: f64, ref_price: f64, is_sell: bool) -> f64 {
+    if qty <= 0.0 || ref_price <= 0.0 {
+        return price;
+    }
+    let order_qty = ASSUMED_NOTIONAL_USD / ref_price;
+    if order_qty <= qty {
+        return price;
+    }
+    let overflow_ratio = (order_qty / qty).min(MAX_OVERFLOW_RATIO);
+    let impact = price * (overflow_ratio - 1.0) * 0.001;
+    if is_sell { price - impact } else { price + impact }
 }
 
 fn percentile(values: impl Iterator<Item = f64>, percentile: f64) -> Option<f64> {

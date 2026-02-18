@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
-use crate::api::screener::{ScreenerRow, ScreenerStore};
+use crate::api::screener::{ScreenerRow, ScreenerStore, ShadowDebug};
 use crate::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 
 const NATR_PERIOD_30M: usize = 30;
@@ -77,6 +77,7 @@ impl HttpServer {
             .route(endpoints::SYMBOLS, get(get_symbols))
             .route(endpoints::SCREENER_DATA, get(get_screener))
             .route(endpoints::SCREENER_PAGE, get(screener_page))
+            .route("/api/v1/shadow/:symbol", get(get_shadow_debug))
             .with_state(state);
 
         let listener = tokio::net::TcpListener::bind(self.bind_address()).await?;
@@ -184,6 +185,13 @@ async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<ScreenerRespo
     })
 }
 
+async fn get_shadow_debug(
+    State(state): State<Arc<HttpState>>,
+    axum::extract::Path(symbol): axum::extract::Path<String>,
+) -> Json<Option<ShadowDebug>> {
+    Json(state.screener.shadow_debug(&symbol))
+}
+
 async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
     let binance = BinanceRestClient::new();
     let gate = GateRestClient::new();
@@ -231,6 +239,11 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             entry_half_life_ms: 0.0,
             avg_gt_p90_ms: 0.0,
             gate_natr_30m_pct: 0.0,
+            shadow_pnl_per_hour_pct: 0.0,
+            shadow_trades_per_hour: 0.0,
+            shadow_avg_trade_pct: 0.0,
+            shadow_win_rate_pct: 0.0,
+            shadow_position: "FLAT".to_string(),
             }
         })
         .collect()
@@ -314,6 +327,11 @@ async fn screener_page() -> Html<&'static str> {
         <th class="num">Entry half-life (ms)</th>
         <th class="num">Avg >P90 time (ms)</th>
         <th class="num">Gate NATR 30m (%)</th>
+        <th>Shadow Pos</th>
+        <th class="num">Shadow PnL/hr (%)</th>
+        <th class="num">Trades/hr</th>
+        <th class="num">Avg trade (%)</th>
+        <th class="num">Win rate (%)</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -338,6 +356,11 @@ async fn screener_page() -> Html<&'static str> {
             <td class="num">${Number(r.entry_half_life_ms).toFixed(2)}</td>
             <td class="num">${Number(r.avg_gt_p90_ms).toFixed(2)}</td>
             <td class="num">${Number(r.gate_natr_30m_pct).toFixed(4)}</td>
+            <td>${r.shadow_position}</td>
+            <td class="num" style="color:${Number(r.shadow_pnl_per_hour_pct)>=0?'#4ade80':'#f87171'}">${Number(r.shadow_pnl_per_hour_pct).toFixed(4)}</td>
+            <td class="num">${Number(r.shadow_trades_per_hour).toFixed(1)}</td>
+            <td class="num" style="color:${Number(r.shadow_avg_trade_pct)>=0?'#4ade80':'#f87171'}">${Number(r.shadow_avg_trade_pct).toFixed(4)}</td>
+            <td class="num">${Number(r.shadow_win_rate_pct).toFixed(1)}</td>
           </tr>
         `).join('');
       } catch (e) {

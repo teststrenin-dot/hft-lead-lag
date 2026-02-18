@@ -92,6 +92,18 @@ impl BookTicker {
         self.ask_price_ticks - self.bid_price_ticks
     }
 
+    /// Get bid quantity as f64
+    #[inline]
+    pub fn bid_qty(&self) -> f64 {
+        ticks_to_decimal(self.bid_qty_ticks)
+    }
+
+    /// Get ask quantity as f64
+    #[inline]
+    pub fn ask_qty(&self) -> f64 {
+        ticks_to_decimal(self.ask_qty_ticks)
+    }
+
     /// Get spread as percentage of mid
     #[inline]
     pub fn spread_pct(&self) -> f64 {
