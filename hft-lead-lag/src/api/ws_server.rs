@@ -16,7 +16,7 @@ use tracing::info;
 
 use crate::infrastructure::rest::{BinanceRestClient, GateRestClient};
 
-const MIN_VOLUME_USD: f64 = 5_000_000.0;
+const MIN_VOLUME_USD: f64 = 1_000_000.0;
 const SNAPSHOT_TIMEOUT_SECONDS: u64 = 2;
 
 #[derive(Debug, Clone, Serialize)]

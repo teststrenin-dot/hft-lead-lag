@@ -10,12 +10,12 @@ use hft_lead_lag::{
 };
 use hft_lead_lag::api::{HttpServer, HttpServerConfig, MarketDataEvent, MarketDataServer, ScreenerStore, WsServerConfig};
 use hft_lead_lag::infrastructure::logging::init_centralized_logging;
-use hft_lead_lag::infrastructure::rest::{BinanceRestClient, GateRestClient};
+use hft_lead_lag::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 use tracing::{error, info, warn};
 use std::time::{Duration, Instant};
 
 /// Minimum 24h USD volume for symbol filtering
-const MIN_VOLUME_USD: f64 = 5_000_000.0;  // 5 million USD
+const MIN_VOLUME_USD: f64 = 1_000_000.0;  // 1 million USD
 const MAX_STRATEGY_SYMBOLS: usize = 8;
 const SUBSCRIBE_DELAY_MS: u64 = 15;
 
@@ -35,25 +35,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let gate_rest = GateRestClient::new();
 
     // Get symbols with sufficient volume from both exchanges
-    let (binance_symbols_result, gate_symbols_result) = tokio::join!(
-        binance_rest.get_symbols_with_volume(MIN_VOLUME_USD),
-        gate_rest.get_symbols_with_volume(MIN_VOLUME_USD)
+    let (binance_tickers_result, gate_tickers_result) = tokio::join!(
+        binance_rest.get_tickers_with_volume(MIN_VOLUME_USD),
+        gate_rest.get_tickers_with_volume(MIN_VOLUME_USD)
     );
 
-    let mut binance_symbols = match binance_symbols_result {
-        Ok(symbols) => symbols,
+    let binance_tickers: Vec<Ticker24h> = match binance_tickers_result {
+        Ok(t) => t,
         Err(e) => {
-            warn!("Failed to get Binance symbols: {}", e);
+            warn!("Failed to get Binance tickers: {}", e);
             Vec::new()
         }
     };
-    let mut gate_symbols = match gate_symbols_result {
-        Ok(symbols) => symbols,
+    let gate_tickers: Vec<Ticker24h> = match gate_tickers_result {
+        Ok(t) => t,
         Err(e) => {
-            warn!("Failed to get Gate symbols: {}", e);
+            warn!("Failed to get Gate tickers: {}", e);
             Vec::new()
         }
     };
+    let mut binance_symbols: Vec<String> = binance_tickers.iter().map(|t| t.symbol.clone()).collect();
+    let mut gate_symbols: Vec<String> = gate_tickers.iter().map(|t| t.symbol.clone()).collect();
+    // Build volume lookup (Gate volume for execution venue)
+    let gate_vol_map: std::collections::HashMap<String, f64> = gate_tickers
+        .iter()
+        .map(|t| (t.symbol.clone(), t.quote_volume))
+        .collect();
     if binance_symbols.is_empty() && !gate_symbols.is_empty() {
         warn!("Using Gate symbol universe as temporary Binance fallback");
         binance_symbols = gate_symbols.clone();
@@ -146,6 +153,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Start external APIs early so checkpoint endpoints are always available.
     let screener = ScreenerStore::default();
+    // Seed 24h volume from Gate REST data
+    let vol_pairs: Vec<(String, f64)> = common_symbols
+        .iter()
+        .map(|s| (s.clone(), gate_vol_map.get(s).copied().unwrap_or(0.0)))
+        .collect();
+    screener.set_volumes(&vol_pairs);
     let http_server = HttpServer::with_runtime(
         HttpServerConfig::default(),
         MIN_VOLUME_USD,

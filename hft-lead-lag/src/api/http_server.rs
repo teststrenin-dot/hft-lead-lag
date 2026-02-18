@@ -247,6 +247,7 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             entry_half_life_ms: 0.0,
             avg_gt_p90_ms: 0.0,
             gate_natr_30m_pct: 0.0,
+            volume_24h_usd: 0.0,
             shadow_pnl_per_hour_pct: 0.0,
             shadow_trades: 0,
             shadow_avg_trade_pct: 0.0,
@@ -365,6 +366,7 @@ async fn screener_page() -> Html<&'static str> {
         <th class="num">Lag</th>
         <th class="num">Drift BN</th>
         <th class="num">Drift GT</th>
+        <th class="num">Vol 24h</th>
         <th class="num">Half-life</th>
         <th class="num">>P90</th>
         <th class="num">NATR%</th>
@@ -395,6 +397,7 @@ async fn screener_page() -> Html<&'static str> {
           <td class="num">${Number(r.lag_ms).toFixed(0)}</td>
           <td class="num">${Number(r.ws_drift_ingress_binance_ms).toFixed(0)}</td>
           <td class="num">${Number(r.ws_drift_ingress_gate_ms).toFixed(0)}</td>
+          <td class="num">${(Number(r.volume_24h_usd)/1e6).toFixed(1)}M</td>
           <td class="num">${Number(r.entry_half_life_ms).toFixed(0)}</td>
           <td class="num">${Number(r.avg_gt_p90_ms).toFixed(0)}</td>
           <td class="num">${Number(r.gate_natr_30m_pct).toFixed(4)}</td>

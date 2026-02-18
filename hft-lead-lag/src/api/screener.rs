@@ -32,6 +32,7 @@ pub struct ScreenerRow {
     pub entry_half_life_ms: f64,
     pub avg_gt_p90_ms: f64,
     pub gate_natr_30m_pct: f64,
+    pub volume_24h_usd: f64,
     // Shadow trader fields
     pub shadow_pnl_per_hour_pct: f64,
     pub shadow_trades: usize,
@@ -56,6 +57,13 @@ impl ScreenerStore {
 
     pub fn window_ms(&self) -> i64 {
         self.window_ms
+    }
+
+    /// Set 24h volume for symbols (called once at startup from REST data).
+    pub fn set_volumes(&self, volumes: &[(String, f64)]) {
+        for (sym, vol) in volumes {
+            self.symbols.entry(sym.clone()).or_default().volume_24h_usd = *vol;
+        }
     }
 
     pub fn update(
@@ -202,6 +210,7 @@ impl ScreenerStore {
                     entry_half_life_ms: item.value().entry_half_life_ms,
                     avg_gt_p90_ms: item.value().avg_gt_p90_ms,
                     gate_natr_30m_pct: 0.0,
+                    volume_24h_usd: item.value().volume_24h_usd,
                     shadow_pnl_per_hour_pct: stats.pnl_per_hour_pct,
                     shadow_trades: stats.trades_in_window,
                     shadow_avg_trade_pct: stats.avg_trade_pct,
@@ -259,6 +268,7 @@ struct SymbolState {
     entry_half_life_ms: f64,
     avg_gt_p90_ms: f64,
     updated_at_ms: i64,
+    volume_24h_usd: f64,
     binance_leads: CycleTracker,
     gate_leads: CycleTracker,
     shadow: ShadowTrader,
