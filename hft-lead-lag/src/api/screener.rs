@@ -42,17 +42,13 @@ impl ScreenerStore {
         exchange: &'static str,
         bid: f64,
         ask: f64,
-        timestamp_ns: i64,
+        _timestamp_ns: i64,
     ) {
         if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || ask <= 0.0 {
             return;
         }
 
-        let ts_ms = if timestamp_ns > 0 {
-            timestamp_ns / 1_000_000
-        } else {
-            now_ms()
-        };
+        let ts_ms = now_ms();
 
         let mut state = self
             .symbols

@@ -4,13 +4,12 @@
 //! Reference: https://www.gate.io/docs/developers/futures/ws/en/
 
 use bytes::Bytes;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
 use tracing::{info, warn, error, debug};
-use std::sync::Arc;
 
 use crate::domain::{
     ExchangeId, ExchangeError, ExchangeResult,
@@ -27,12 +26,10 @@ use crate::infrastructure::exchanges::common::{
 /// Gate.io Futures WebSocket endpoint
 const GATE_WS_ENDPOINT: &str = "wss://fx-ws.gateio.ws/v4/ws/usdt";
 
-type WsSender = Arc<Mutex<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>;
-
 /// Gate.io Futures market data connector
 pub struct GateMarketData {
-    /// WebSocket connection
-    ws: Option<WsSender>,
+    /// WebSocket writer channel
+    ws_tx: Option<mpsc::UnboundedSender<Message>>,
     /// Receiver for incoming messages
     msg_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     /// Symbol cache for interning
@@ -49,7 +46,7 @@ pub struct GateMarketData {
 impl GateMarketData {
     pub fn new() -> Self {
         Self {
-            ws: None,
+            ws_tx: None,
             msg_rx: None,
             symbol_cache: SymbolCache::new(),
             next_subscription_id: 1,
@@ -83,7 +80,7 @@ impl GateMarketData {
     /// Build subscription message for book ticker
     fn build_book_ticker_subscription(contracts: &[&str]) -> String {
         format!(
-            r#"{{"time":{},"channel":"futures.book_ticker","event":"subscribe","data":{}}}"#,
+            r#"{{"time":{},"channel":"futures.book_ticker","event":"subscribe","payload":{}}}"#,
             timestamp_ms() / 1000,
             serde_json::to_string(contracts).unwrap_or("[]".to_string())
         )
@@ -92,7 +89,7 @@ impl GateMarketData {
     /// Build subscription message for trades
     fn build_trade_subscription(contracts: &[&str]) -> String {
         format!(
-            r#"{{"time":{},"channel":"futures.trades","event":"subscribe","data":{}}}"#,
+            r#"{{"time":{},"channel":"futures.trades","event":"subscribe","payload":{}}}"#,
             timestamp_ms() / 1000,
             serde_json::to_string(contracts).unwrap_or("[]".to_string())
         )
@@ -104,8 +101,10 @@ impl GateMarketData {
         let contract = extract_json_string_field(data, "c")
             .or_else(|| extract_json_string_field(data, "contract"))?;
         
-        // Convert Gate format (BTC_USD) to standard format (BTCUSDT)
-        let symbol_str = String::from_utf8_lossy(&contract).replace("_USD", "USDT");
+        // Convert Gate format (BTC_USDT / BTC_USD) to standard format (BTCUSDT)
+        let symbol_str = String::from_utf8_lossy(&contract)
+            .replace("_USDT", "USDT")
+            .replace("_USD", "USDT");
         let symbol = Bytes::from(symbol_str);
 
         // Extract bid/ask - Gate nests them in "b" and "a" objects
@@ -163,7 +162,9 @@ impl GateMarketData {
         let contract = extract_json_string_field(data, "c")
             .or_else(|| extract_json_string_field(data, "contract"))?;
         
-        let symbol_str = String::from_utf8_lossy(&contract).replace("_USD", "USDT");
+        let symbol_str = String::from_utf8_lossy(&contract)
+            .replace("_USDT", "USDT")
+            .replace("_USD", "USDT");
         let symbol = Bytes::from(symbol_str);
         
         let trade_id = extract_json_i64_field(data, "i")?;
@@ -207,9 +208,10 @@ impl MarketDataStream for GateMarketData {
             .await
             .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
 
+        let (write_half, read_half) = futures_util::stream::StreamExt::split(ws_stream);
+        let (ws_tx, mut ws_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) =
+            mpsc::unbounded_channel();
         let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let ws = Arc::new(Mutex::new(ws_stream));
-        let ws_reader = ws.clone();
 
         // Spawn message reader task
         let auth_payload = if let (Some(key), Some(secret)) = (&self.api_key, &self.api_secret) {
@@ -219,18 +221,13 @@ impl MarketDataStream for GateMarketData {
         };
 
         let is_auth = self.api_key.is_some() && self.api_secret.is_some();
+        let pong_tx = ws_tx.clone();
         
         tokio::spawn(async move {
-            use futures_util::{StreamExt, SinkExt};
-            let mut ws_guard = ws_reader.lock().await;
-            
-            // Send auth first if credentials provided
-            if let Some(payload) = auth_payload {
-                debug!("Sending Gate.io auth payload");
-                let _ = ws_guard.send(Message::Text(payload)).await;
-            }
+            use futures_util::StreamExt;
+            let mut read = read_half;
 
-            while let Some(msg_result) = ws_guard.next().await {
+            while let Some(msg_result) = read.next().await {
                 match msg_result {
                     Ok(msg) => match msg {
                         Message::Text(text) => {
@@ -244,7 +241,7 @@ impl MarketDataStream for GateMarketData {
                             break;
                         }
                         Message::Ping(data) => {
-                            let _ = ws_guard.send(Message::Pong(data)).await;
+                            let _ = pong_tx.send(Message::Pong(data));
                         }
                         Message::Pong(_) => {}
                         _ => {}
@@ -257,7 +254,23 @@ impl MarketDataStream for GateMarketData {
             }
         });
 
-        self.ws = Some(ws);
+        tokio::spawn(async move {
+            use futures_util::SinkExt;
+            let mut write = write_half;
+            while let Some(msg) = ws_rx.recv().await {
+                if write.send(msg).await.is_err() {
+                    error!("Gate.io WebSocket write error");
+                    break;
+                }
+            }
+        });
+
+        if let Some(payload) = auth_payload {
+            debug!("Sending Gate.io auth payload");
+            let _ = ws_tx.send(Message::Text(payload));
+        }
+
+        self.ws_tx = Some(ws_tx);
         self.msg_rx = Some(msg_rx);
         self.is_authenticated = is_auth;
 
@@ -266,35 +279,30 @@ impl MarketDataStream for GateMarketData {
     }
 
     async fn disconnect(&mut self) -> ExchangeResult<()> {
-        if let Some(ws) = &self.ws {
-            use futures_util::SinkExt;
-            let mut ws_guard = ws.lock().await;
-            let _ = ws_guard.send(Message::Close(None)).await;
+        if let Some(tx) = &self.ws_tx {
+            let _ = tx.send(Message::Close(None));
         }
         self.msg_rx.take();
-        self.ws = None;
+        self.ws_tx = None;
         info!("Disconnected from Gate.io Futures");
         Ok(())
     }
 
     fn is_connected(&self) -> bool {
-        self.ws.is_some()
+        self.ws_tx.is_some()
     }
 
     async fn subscribe_book_ticker(&mut self, symbol: &str) -> ExchangeResult<SubscriptionId> {
         let subscription_id = self.next_subscription_id;
         self.next_subscription_id += 1;
 
-        // Convert symbol format (BTCUSDT -> BTC_USD for Gate)
-        let contract = symbol.replace("USDT", "_USD");
+        // Convert symbol format (BTCUSDT -> BTC_USDT for Gate)
+        let contract = symbol.replace("USDT", "_USDT");
         
         let msg = Self::build_book_ticker_subscription(&[&contract]);
         
-        if let Some(ws) = &self.ws {
-            use futures_util::SinkExt;
-            let mut ws_guard = ws.lock().await;
-            ws_guard.send(Message::Text(msg))
-                .await
+        if let Some(tx) = &self.ws_tx {
+            tx.send(Message::Text(msg))
                 .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
         } else {
             return Err(ExchangeError::ConnectionClosed("Not connected".into()));
@@ -308,14 +316,11 @@ impl MarketDataStream for GateMarketData {
         let subscription_id = self.next_subscription_id;
         self.next_subscription_id += 1;
 
-        let contract = symbol.replace("USDT", "_USD");
+        let contract = symbol.replace("USDT", "_USDT");
         let msg = Self::build_trade_subscription(&[&contract]);
         
-        if let Some(ws) = &self.ws {
-            use futures_util::SinkExt;
-            let mut ws_guard = ws.lock().await;
-            ws_guard.send(Message::Text(msg))
-                .await
+        if let Some(tx) = &self.ws_tx {
+            tx.send(Message::Text(msg))
                 .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
         } else {
             return Err(ExchangeError::ConnectionClosed("Not connected".into()));
@@ -371,18 +376,31 @@ impl MarketDataStream for GateMarketData {
 impl GateMarketData {
     /// Static parser to avoid borrow conflicts
     fn parse_book_ticker_static(data: &[u8], symbol_cache: &SymbolCache, _local_ts_ns: i64) -> Option<BookTicker> {
-        let contract = extract_json_string_field(data, "c")
-            .or_else(|| extract_json_string_field(data, "contract"))?;
+        let contract = extract_json_string_field(data, "s")
+            .or_else(|| extract_json_string_field(data, "contract"))
+            .or_else(|| extract_json_string_field(data, "c"))?;
         
-        let symbol_str = String::from_utf8_lossy(&contract).replace("_USD", "USDT");
+        let symbol_str = String::from_utf8_lossy(&contract)
+            .replace("_USDT", "USDT")
+            .replace("_USD", "USDT");
         let symbol = Bytes::from(symbol_str);
 
-        let bid_price = Self::extract_nested_price(data, "b", "p")?;
-        let bid_qty = Self::extract_nested_qty(data, "b", "s")?;
-        let ask_price = Self::extract_nested_price(data, "a", "p")?;
-        let ask_qty = Self::extract_nested_qty(data, "a", "s")?;
+        let bid_price = extract_json_string_field(data, "b")
+            .and_then(|p| price_to_ticks(&p))?;
+        let ask_price = extract_json_string_field(data, "a")
+            .and_then(|p| price_to_ticks(&p))?;
+        let bid_qty = extract_json_string_field(data, "B")
+            .and_then(|q| qty_to_ticks(&q))
+            .or_else(|| extract_json_i64_field(data, "B").map(|v| v.saturating_mul(100_000_000)))
+            .unwrap_or(0);
+        let ask_qty = extract_json_string_field(data, "A")
+            .and_then(|q| qty_to_ticks(&q))
+            .or_else(|| extract_json_i64_field(data, "A").map(|v| v.saturating_mul(100_000_000)))
+            .unwrap_or(0);
         
-        let exchange_ts = extract_json_i64_field(data, "t").unwrap_or(0);
+        let exchange_ts = extract_json_i64_field(data, "t")
+            .or_else(|| extract_json_i64_field(data, "time_ms"))
+            .unwrap_or(0);
 
         Some(BookTicker::new(
             symbol_cache.intern_bytes(&symbol),
@@ -399,7 +417,9 @@ impl GateMarketData {
         let contract = extract_json_string_field(data, "c")
             .or_else(|| extract_json_string_field(data, "contract"))?;
         
-        let symbol_str = String::from_utf8_lossy(&contract).replace("_USD", "USDT");
+        let symbol_str = String::from_utf8_lossy(&contract)
+            .replace("_USDT", "USDT")
+            .replace("_USD", "USDT");
         let symbol = Bytes::from(symbol_str);
         
         let trade_id = extract_json_i64_field(data, "i")?;
@@ -491,10 +511,10 @@ mod tests {
     #[test]
     fn test_symbol_conversion() {
         let symbol = "BTCUSDT";
-        let contract = symbol.replace("USDT", "_USD");
-        assert_eq!(contract, "BTC_USD");
+        let contract = symbol.replace("USDT", "_USDT");
+        assert_eq!(contract, "BTC_USDT");
         
-        let back = contract.replace("_USD", "USDT");
+        let back = contract.replace("_USDT", "USDT");
         assert_eq!(back, "BTCUSDT");
     }
 }

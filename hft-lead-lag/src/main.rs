@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 /// Minimum 24h USD volume for symbol filtering
 const MIN_VOLUME_USD: f64 = 1_000_000.0;  // 1 million USD
-const MAX_STRATEGY_SYMBOLS: usize = 20;
+const MAX_STRATEGY_SYMBOLS: usize = 8;
+const SUBSCRIBE_DELAY_MS: u64 = 250;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -138,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 error!("Binance subscribe error {}: {}", symbol, e);
             }
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
     }
     info!(
         "Binance subscription summary: ok={} err={}",
@@ -165,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 break;
             }
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
     }
     info!(
         "Gate subscription summary: ok={} err={}",
