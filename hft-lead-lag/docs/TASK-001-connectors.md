@@ -54,7 +54,7 @@
 - HTTP: `GET /health`, `GET /api/v1/symbols`, `GET /api/v1/screener`, `GET /screener`
 - WS: `ws://127.0.0.1:8181/ws`
 
-Volume filter в symbols/screener runtime: `10_000_000 USD`.
+Volume filter в symbols/screener runtime: `1_000_000 USD`.
 
 ---
 

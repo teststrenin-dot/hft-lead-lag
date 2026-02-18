@@ -83,6 +83,8 @@
 | STRAT-001 | Spread calculation | Расчет spread между биржами | ✅ Done |
 | STRAT-002 | Signal generation | Генерация lead-lag сигналов | ✅ Done |
 | STRAT-003 | Threshold config | Настройка trigger spread | ✅ Done |
+| STRAT-009 | Shadow Trader | Paper trading engine with L1 market impact | ✅ Done |
+| STRAT-010 | Median Lag Metric | Robust P50 rolling window lag | ✅ Done |
 
 ### P1 — Важно для следующего спринта
 
@@ -139,6 +141,8 @@
 | INFRA-003 | Error handling | Типизированные ошибки | ✅ Done |
 | INFRA-009 | Centralized log sink | Runtime/test logs в `project/logs` + summary | ✅ Done |
 | INFRA-010 | WS ingress timestamp hardening | Receive-time stamping + startup backlog drain + screener load optimization | ✅ Done |
+| INFRA-011 | Web Screener UI | Tabular UI with sorting and filtering | ✅ Done |
+| INFRA-012 | Real-time Chart | uPlot embedded chart with trade zones | ✅ Done |
 
 ### P1 — Важно для следующего спринта
 

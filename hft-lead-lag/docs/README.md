@@ -14,7 +14,7 @@
 | Screener ingress drift метрики | ✅ Done |
 | Startup timestamp drift hardening | ✅ Done |
 | Shadow Trader (paper trading) | ✅ Done |
-| Real-time chart (`/chart`) | ✅ Done |
+| Real-time chart (embedded in `/screener`) | ✅ Done |
 | Order management | ⬜ Planned |
 | Production hardening (reconnect/metrics/alerts) | ⬜ Planned |
 
@@ -72,14 +72,15 @@ curl http://127.0.0.1:5000/api/v1/screener
 
 ### `GET /api/v1/symbols`
 Возвращает символы Binance/Gate после volume-фильтра:
-- `min_volume_usd = 10_000_000`
+- `min_volume_usd = 1_000_000`
 - `common_symbols` = пересечение символов двух бирж.
+- исключены `BTCUSDT`, `ETHUSDT`, `SOLUSDT` (blacklisted).
 
 ### `GET /api/v1/screener`
 Возвращает строки скринера:
 - `symbol`
 - `leader_exchange`
-- `lag_ms`
+- `lag_ms`: Медиана (P50) абсолютной разницы timestamps за последние 5 минут.
 - `ws_drift_ms`
 - `ws_drift_binance_ms`
 - `ws_drift_gate_ms`
@@ -89,20 +90,20 @@ curl http://127.0.0.1:5000/api/v1/screener
 - `avg_gt_p90_ms`
 - `gate_natr_30m_pct`
 - Shadow trader fields: `shadow_position`, `shadow_pnl_per_hour_pct`, `shadow_trades`, `shadow_avg_trade_pct`, `shadow_win_rate_pct`
+- `volume_24h_usd`: Объем торгов на Gate за 24ч.
 
 ### `GET /screener`
-Веб-таблица поверх `/api/v1/screener` (polling 1 раз в секунду).
-
-### `GET /chart`
-Real-time uPlot график для shadow trader:
-- Premium (bps) линия — отклонение Gate от Binance
-- P90/P10 bands — зоны входа (short/long)
-- P50 линия — зона выхода
-- Маркеры сделок (entry gold, exit purple)
-- Selector для выбора монеты, auto-refresh 1 раз/сек
+Веб-таблица поверх `/api/v1/screener` с встроенным real-time графиком.
+- Polling таблицы: 1 раз в секунду.
+- График: uPlot поверх WebSocket, 4 линии (Gate Bid/Ask, Binance Bid/Ask).
+- Визуализация сделок: Trade Zones (зеленая/красная заливка).
+- Сортировка колонок кликом по заголовку.
 
 ### `GET /api/v1/chart/:symbol`
-JSON данные для графика: downsampled premium timeseries (~600 точек), пороги, список сделок.
+JSON данные для инициализации графика:
+- Downsampled premium timeseries.
+- Текущие пороги P90/P10/P50.
+- Список последних сделок для отрисовки зон.
 
 ### `GET /api/v1/shadow/:symbol`
 Debug данные shadow trader: premium samples, cached thresholds, edge, trades, position.
