@@ -11,14 +11,10 @@ use serde::Serialize;
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
 
-/// Assumed notional per leg in USD for market impact estimation.
-const ASSUMED_NOTIONAL_USD: f64 = 1_000.0;
 /// Gate taker fee (fraction, not percent).
 const GATE_TAKER_FEE: f64 = 0.000_5; // 0.05 %
 /// Simulated order-to-fill latency in milliseconds.
-const EXECUTION_DELAY_MS: i64 = 10;
-/// Minimum expected edge (bps) to enter — must exceed round-trip fees.
-const MIN_EDGE_BPS: f64 = 10.0; // 2 × 0.05% = 10 bps
+const FILL_DELAY_MS: i64 = 7;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScreenerRow {
@@ -402,7 +398,7 @@ const QUOTE_FRESHNESS_MS: i64 = 1_000;
 // Strategy: Binance leads, Gate lags. When Binance mid spikes ≥ SPIKE_THRESHOLD
 // in a short window, enter on Gate in the same direction. Exit when Gate catches
 // up (target profit reached), or on timeout / stop-loss.
-// All execution is paper-traded on Gate bid/ask + market impact.
+// All execution is paper-traded on Gate bid/ask with 7ms fill delay.
 // ---------------------------------------------------------------------------
 
 /// Minimum Binance mid move (bps) to trigger entry.
@@ -507,11 +503,22 @@ struct MidSample {
     gate_mid: f64,
 }
 
+#[derive(Debug, Clone)]
+struct PendingOrder {
+    direction: ShadowDirection,
+    fire_ts_ms: i64,
+    is_exit: bool,
+    /// Only for exit: snapshot of position at exit request time
+    exit_pos: Option<ShadowPosition>,
+    spike_bps: f64,
+}
+
 #[derive(Debug, Default)]
 struct ShadowTrader {
     /// Rolling mid-price samples for spike detection and charting
     mid_samples: VecDeque<MidSample>,
     position: Option<ShadowPosition>,
+    pending: Option<PendingOrder>,
     completed_trades: VecDeque<ShadowTrade>,
     spike_history: VecDeque<SpikeEvent>,
     start_ts_ms: Option<i64>,
@@ -545,18 +552,43 @@ impl ShadowTrader {
             return;
         }
 
+        // --- Execute pending orders after FILL_DELAY_MS ---
+        if let Some(ref pending) = self.pending.clone() {
+            if ts_ms >= pending.fire_ts_ms + FILL_DELAY_MS {
+                if pending.is_exit {
+                    // Fill exit at current Gate bid/ask
+                    if let Some(pos) = pending.exit_pos.clone() {
+                        let reason = "target"; // we only know reason from the trigger
+                        self.fill_exit(ts_ms, gate, window_ms, pos);
+                    }
+                } else {
+                    // Fill entry at current Gate bid/ask
+                    let gate_price = match pending.direction {
+                        ShadowDirection::Long => gate.ask,
+                        ShadowDirection::Short => gate.bid,
+                    };
+                    self.position = Some(ShadowPosition {
+                        direction: pending.direction,
+                        gate_entry_price: gate_price,
+                        entry_ts_ms: ts_ms,
+                        binance_mid_at_entry: bn_mid,
+                    });
+                }
+                self.pending = None;
+            }
+            return; // while pending, don't do anything else
+        }
+
         // --- Exit logic (check before entry) ---
         if let Some(pos) = self.position.clone() {
             let hold_ms = ts_ms - pos.entry_ts_ms;
 
             let unrealized_bps = match pos.direction {
                 ShadowDirection::Long => {
-                    let exit_price = apply_impact(gate.bid, gate.bid_qty, gate.bid, true);
-                    ((exit_price - pos.gate_entry_price) / pos.gate_entry_price) * 10_000.0
+                    ((gate.bid - pos.gate_entry_price) / pos.gate_entry_price) * 10_000.0
                 }
                 ShadowDirection::Short => {
-                    let exit_price = apply_impact(gate.ask, gate.ask_qty, gate.ask, false);
-                    ((pos.gate_entry_price - exit_price) / pos.gate_entry_price) * 10_000.0
+                    ((pos.gate_entry_price - gate.ask) / pos.gate_entry_price) * 10_000.0
                 }
             };
 
@@ -568,19 +600,20 @@ impl ShadowTrader {
             let stopped_out = unrealized_bps <= -STOP_LOSS_BPS;
 
             if gate_moved_enough || timed_out || stopped_out {
-                let reason = if gate_moved_enough {
-                    "target"
-                } else if stopped_out {
-                    "stop_loss"
-                } else {
-                    "timeout"
-                };
-                self.execute_exit(ts_ms, gate, window_ms, reason, pos);
+                // Queue exit with 7ms delay
+                self.position = None;
+                self.pending = Some(PendingOrder {
+                    direction: pos.direction,
+                    fire_ts_ms: ts_ms,
+                    is_exit: true,
+                    exit_pos: Some(pos),
+                    spike_bps: 0.0,
+                });
             }
         }
 
         // --- Spike detection & entry ---
-        if self.position.is_none() && ts_ms >= self.cooldown_until_ms {
+        if self.position.is_none() && self.pending.is_none() && ts_ms >= self.cooldown_until_ms {
             if let Some((direction, spike_bps)) = self.detect_spike(ts_ms, bn_mid) {
                 // Record spike
                 self.spike_history.push_back(SpikeEvent {
@@ -589,16 +622,13 @@ impl ShadowTrader {
                     spike_bps,
                 });
 
-                // Enter on Gate in the same direction as Binance spike
-                let gate_price = match direction {
-                    ShadowDirection::Long => apply_impact(gate.ask, gate.ask_qty, gate.ask, false),
-                    ShadowDirection::Short => apply_impact(gate.bid, gate.bid_qty, gate.bid, true),
-                };
-                self.position = Some(ShadowPosition {
+                // Queue entry with 7ms delay
+                self.pending = Some(PendingOrder {
                     direction,
-                    gate_entry_price: gate_price,
-                    entry_ts_ms: ts_ms,
-                    binance_mid_at_entry: bn_mid,
+                    fire_ts_ms: ts_ms,
+                    is_exit: false,
+                    exit_pos: None,
+                    spike_bps,
                 });
             }
         }
@@ -626,28 +656,26 @@ impl ShadowTrader {
         }
     }
 
-    fn execute_exit(
+    fn fill_exit(
         &mut self,
         ts_ms: i64,
         gate: &Quote,
         window_ms: i64,
-        reason: &'static str,
         pos: ShadowPosition,
     ) {
-        self.position = None;
         let fees = GATE_TAKER_FEE * 2.0; // entry + exit
 
         let (pnl_pct, catchup_pct) = match pos.direction {
             ShadowDirection::Long => {
-                let exit_price = apply_impact(gate.bid, gate.bid_qty, gate.bid, true);
+                let exit_price = gate.bid;
                 let raw_pnl = (exit_price - pos.gate_entry_price) / pos.gate_entry_price;
-                let catchup = ((exit_price - pos.gate_entry_price) / pos.gate_entry_price) * 100.0;
+                let catchup = raw_pnl * 100.0;
                 ((raw_pnl - fees) * 100.0, catchup)
             }
             ShadowDirection::Short => {
-                let exit_price = apply_impact(gate.ask, gate.ask_qty, gate.ask, false);
+                let exit_price = gate.ask;
                 let raw_pnl = (pos.gate_entry_price - exit_price) / pos.gate_entry_price;
-                let catchup = ((pos.gate_entry_price - exit_price) / pos.gate_entry_price) * 100.0;
+                let catchup = raw_pnl * 100.0;
                 ((raw_pnl - fees) * 100.0, catchup)
             }
         };
@@ -659,8 +687,8 @@ impl ShadowTrader {
             ts_ms,
             direction: pos.direction,
             entry_ts_ms: pos.entry_ts_ms,
-            exit_reason: reason,
-            spike_bps: 0.0, // will be enriched from spike_history if needed
+            exit_reason: "filled",
+            spike_bps: 0.0,
             catchup_pct,
             catchup_ms,
         });
@@ -716,6 +744,9 @@ impl ShadowTrader {
     }
 
     fn position_label(&self) -> String {
+        if self.pending.is_some() {
+            return "PENDING".to_string();
+        }
         match &self.position {
             None => "FLAT".to_string(),
             Some(p) => match p.direction {
@@ -803,23 +834,6 @@ impl ShadowTrader {
             entry_ts_ms: self.position.as_ref().map(|p| p.entry_ts_ms),
         }
     }
-}
-
-/// Market impact from L1 depth overflow (Gate only).
-/// Impact is capped: overflow ratio beyond MAX_OVERFLOW is not executed.
-const MAX_OVERFLOW_RATIO: f64 = 5.0;
-
-fn apply_impact(price: f64, qty: f64, ref_price: f64, is_sell: bool) -> f64 {
-    if qty <= 0.0 || ref_price <= 0.0 {
-        return price;
-    }
-    let order_qty = ASSUMED_NOTIONAL_USD / ref_price;
-    if order_qty <= qty {
-        return price;
-    }
-    let overflow_ratio = (order_qty / qty).min(MAX_OVERFLOW_RATIO);
-    let impact = price * (overflow_ratio - 1.0) * 0.001;
-    if is_sell { price - impact } else { price + impact }
 }
 
 fn percentile(values: impl Iterator<Item = f64>, pct: f64) -> Option<f64> {
