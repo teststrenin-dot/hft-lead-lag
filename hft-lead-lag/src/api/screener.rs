@@ -34,7 +34,7 @@ pub struct ScreenerRow {
     pub gate_natr_30m_pct: f64,
     // Shadow trader fields
     pub shadow_pnl_per_hour_pct: f64,
-    pub shadow_trades_per_hour: f64,
+    pub shadow_trades: usize,
     pub shadow_avg_trade_pct: f64,
     pub shadow_win_rate_pct: f64,
     pub shadow_position: String,
@@ -203,7 +203,7 @@ impl ScreenerStore {
                     avg_gt_p90_ms: item.value().avg_gt_p90_ms,
                     gate_natr_30m_pct: 0.0,
                     shadow_pnl_per_hour_pct: stats.pnl_per_hour_pct,
-                    shadow_trades_per_hour: stats.trades_per_hour,
+                    shadow_trades: stats.trades_in_window,
                     shadow_avg_trade_pct: stats.avg_trade_pct,
                     shadow_win_rate_pct: stats.win_rate_pct,
                     shadow_position: stats.position.clone(),
@@ -402,7 +402,7 @@ struct ShadowTrade {
 #[derive(Debug, Clone, Serialize)]
 pub struct ShadowStats {
     pub pnl_per_hour_pct: f64,
-    pub trades_per_hour: f64,
+    pub trades_in_window: usize,
     pub avg_trade_pct: f64,
     pub win_rate_pct: f64,
     pub position: String,
@@ -482,6 +482,18 @@ impl ShadowTrader {
             self.thresholds_updated_at_ms = ts_ms;
         }
 
+        // Execute pending signal after delay (before threshold unwrap so it
+        // can't get stuck if thresholds temporarily become None)
+        let mut just_entered = false;
+        if let Some(ref sig) = self.pending_signal {
+            if ts_ms >= sig.fire_ts_ms + EXECUTION_DELAY_MS {
+                let dir = sig.direction;
+                self.pending_signal = None;
+                self.execute_entry(ts_ms, dir, gate);
+                just_entered = true;
+            }
+        }
+
         let (p90, p10, p50) = match (self.cached_p90, self.cached_p10, self.cached_p50) {
             (Some(a), Some(b), Some(c)) => (a, b, c),
             _ => {
@@ -490,23 +502,16 @@ impl ShadowTrader {
             }
         };
 
-        // Execute pending signal after delay
-        if let Some(ref sig) = self.pending_signal {
-            if ts_ms >= sig.fire_ts_ms + EXECUTION_DELAY_MS {
-                let dir = sig.direction;
-                self.pending_signal = None;
-                self.execute_entry(ts_ms, dir, gate);
-            }
-        }
-
-        // Exit: premium reverted to frozen P50
-        if let Some(ref pos) = self.position {
-            let should_exit = match pos.direction {
-                ShadowDirection::Short => premium_bps <= p50,
-                ShadowDirection::Long => premium_bps >= p50,
-            };
-            if should_exit {
-                self.execute_exit(ts_ms, gate, window_ms);
+        // Exit: premium reverted to frozen P50 (skip on the tick we just entered)
+        if !just_entered {
+            if let Some(ref pos) = self.position {
+                let should_exit = match pos.direction {
+                    ShadowDirection::Short => premium_bps <= p50,
+                    ShadowDirection::Long => premium_bps >= p50,
+                };
+                if should_exit {
+                    self.execute_exit(ts_ms, gate, window_ms);
+                }
             }
         }
 
@@ -597,7 +602,7 @@ impl ShadowTrader {
         if n == 0 {
             return ShadowStats {
                 pnl_per_hour_pct: 0.0,
-                trades_per_hour: 0.0,
+                trades_in_window: 0,
                 avg_trade_pct: 0.0,
                 win_rate_pct: 0.0,
                 position: self.position_label(),
@@ -605,7 +610,6 @@ impl ShadowTrader {
         }
 
         // Observation period = time since warmup ended, capped to window_ms.
-        // This avoids inflated rates when trades cluster in a short burst.
         let obs_ms = self.start_ts_ms
             .map(|s| {
                 let post_warmup = s + WARMUP_MS;
@@ -619,7 +623,7 @@ impl ShadowTrader {
 
         ShadowStats {
             pnl_per_hour_pct: total_pnl / window_hours,
-            trades_per_hour: n as f64 / window_hours,
+            trades_in_window: n,
             avg_trade_pct: total_pnl / n as f64,
             win_rate_pct: (wins as f64 / n as f64) * 100.0,
             position: self.position_label(),
