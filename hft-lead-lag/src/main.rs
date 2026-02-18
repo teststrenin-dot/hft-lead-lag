@@ -135,18 +135,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     // Subscribe to screener symbols for live WS ticks.
-    let mut binance_subscribed = 0usize;
-    let mut binance_subscribe_errors = 0usize;
-    for symbol in &screener_symbols {
-        match binance.subscribe_book_ticker(symbol).await {
-            Ok(_) => binance_subscribed += 1,
+    let (binance_subscribed, binance_subscribe_errors) =
+        match binance.subscribe_book_tickers_batch(&screener_symbols).await {
+            Ok(count) => (count, 0usize),
             Err(e) => {
-                binance_subscribe_errors += 1;
-                error!("Binance subscribe error {}: {}", symbol, e);
+                error!("Binance batch subscribe error: {}", e);
+                (0usize, screener_symbols.len())
             }
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
-    }
+        };
     info!(
         "Binance subscription summary: ok={} err={}",
         binance_subscribed, binance_subscribe_errors

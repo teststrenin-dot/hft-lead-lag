@@ -89,6 +89,29 @@ impl BinanceMarketData {
             trade_id, price, qty, is_buyer_maker, exchange_ts.saturating_mul(1_000_000),
         ))
     }
+
+    /// Subscribe to many symbols using chunked requests to respect WS rate limits.
+    pub async fn subscribe_book_tickers_batch(&mut self, symbols: &[String]) -> ExchangeResult<usize> {
+        if symbols.is_empty() {
+            return Ok(0);
+        }
+        let tx = self
+            .ws_tx
+            .as_ref()
+            .ok_or_else(|| ExchangeError::ConnectionClosed("Not connected".into()))?;
+
+        let mut subscribed = 0usize;
+        for chunk in symbols.chunks(80) {
+            let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            let msg = Self::build_book_ticker_subscription(&refs);
+            tx.send(Message::Text(msg))
+                .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
+            subscribed += chunk.len();
+            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        }
+
+        Ok(subscribed)
+    }
 }
 
 impl Default for BinanceMarketData {
