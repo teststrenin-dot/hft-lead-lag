@@ -559,11 +559,11 @@ impl ShadowTrader {
         }
 
         // --- Execute pending orders after FILL_DELAY_MS ---
-        if let Some(ref pending) = self.pending.clone() {
+        if let Some(pending) = self.pending.take() {
             if ts_ms >= pending.fire_ts_ms + FILL_DELAY_MS {
                 if pending.is_exit {
                     // Fill exit at current Gate bid/ask
-                    if let Some(pos) = pending.exit_pos.clone() {
+                    if let Some(pos) = pending.exit_pos {
                         self.fill_exit(ts_ms, gate, window_ms, pos, pending.exit_reason);
                     }
                 } else {
@@ -580,13 +580,14 @@ impl ShadowTrader {
                         spike_bps: pending.spike_bps,
                     });
                 }
-                self.pending = None;
+            } else {
+                self.pending = Some(pending); // put it back, not yet time
             }
             return; // while pending, don't do anything else
         }
 
         // --- Exit logic (check before entry) ---
-        if let Some(pos) = self.position.clone() {
+        if let Some(pos) = self.position.as_ref() {
             let hold_ms = ts_ms - pos.entry_ts_ms;
 
             let unrealized_bps = match pos.direction {
@@ -610,7 +611,7 @@ impl ShadowTrader {
                     else if stopped_out { "stop_loss" }
                     else { "timeout" };
                 // Queue exit with 7ms delay
-                self.position = None;
+                let pos = self.position.take().unwrap();
                 self.pending = Some(PendingOrder {
                     direction: pos.direction,
                     fire_ts_ms: ts_ms,

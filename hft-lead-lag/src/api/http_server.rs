@@ -549,6 +549,12 @@ async fn screener_page() -> Html<&'static str> {
         }
         // Exit dot at price level (only for completed trades)
         if (!z.open && z.exit_price) {
+          // Exit vertical line
+          ctx.strokeStyle = isLong ? 'rgba(74,222,128,0.5)' : 'rgba(248,113,113,0.5)';
+          ctx.setLineDash([3, 3]);
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(x1, top); ctx.lineTo(x1, bot); ctx.stroke();
+          ctx.setLineDash([]);
           const yExit = u.valToPos(z.exit_price, 'y', true);
           ctx.beginPath(); ctx.arc(x1, yExit, 5, 0, 2 * Math.PI);
           ctx.fillStyle = (z.pnl >= 0) ? '#4ade80' : '#f87171';
