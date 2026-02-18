@@ -348,10 +348,10 @@ async fn screener_page() -> Html<&'static str> {
       <span class="info" id="chart-info"></span>
     </div>
     <div class="legend">
-      <span><span class="dot" style="background:#3fb950"></span>Bid spread (sell GT)</span>
-      <span><span class="dot" style="background:#f85149"></span>Ask spread (buy GT)</span>
-      <span><span class="dot" style="background:#facc15;opacity:0.5"></span>P90/P10</span>
-      <span><span class="dot" style="background:#6b7280;opacity:0.5"></span>P50</span>
+      <span><span class="dot" style="background:#3fb950"></span>Gate bid</span>
+      <span><span class="dot" style="background:#f85149"></span>Gate ask</span>
+      <span><span class="dot" style="background:#58a6ff"></span>BN bid</span>
+      <span><span class="dot" style="background:#f0883e"></span>BN ask</span>
     </div>
     <div id="chart-wrap"></div>
     <div class="trades-list" id="trades-info"></div>
@@ -416,20 +416,18 @@ async fn screener_page() -> Html<&'static str> {
     renderTable();
   }
 
-  // --- Chart: bid/ask spread in bps via WS ---
+  // --- Chart: 4 raw bid/ask lines via WS ---
   const MAX_PTS = 36000;
-  let tsBuf = [], bidSpread = [], askSpread = [];
+  let tsBuf = [], gtBid = [], gtAsk = [], bnBid = [], bnAsk = [];
   let uplot = null, dirty = false, ws = null;
   let shadowZones = [];
   let openZone = null;
-  let thresholds = { p90: null, p10: null, p50: null };
 
   function clearChart() {
-    tsBuf = []; bidSpread = []; askSpread = [];
+    tsBuf = []; gtBid = []; gtAsk = []; bnBid = []; bnAsk = [];
     lastGate = { bid: NaN, ask: NaN };
     lastBn = { bid: NaN, ask: NaN };
     shadowZones = []; openZone = null;
-    thresholds = { p90: null, p10: null, p50: null };
     dirty = true;
   }
 
@@ -452,16 +450,15 @@ async fn screener_page() -> Html<&'static str> {
         lastBn.bid = d.bid; lastBn.ask = d.ask;
       }
       if (isNaN(lastGate.bid) || isNaN(lastBn.bid)) return;
-      // bid spread: sell on Gate bid vs buy on Binance ask → (gt.bid - bn.ask)/bn.ask * 10000
-      const bs = (lastGate.bid - lastBn.ask) / lastBn.ask * 10000;
-      // ask spread: buy on Gate ask vs sell on Binance bid → (gt.ask - bn.bid)/bn.bid * 10000
-      const as_ = (lastGate.ask - lastBn.bid) / lastBn.bid * 10000;
       tsBuf.push(ts);
-      bidSpread.push(bs);
-      askSpread.push(as_);
+      gtBid.push(lastGate.bid);
+      gtAsk.push(lastGate.ask);
+      bnBid.push(lastBn.bid);
+      bnAsk.push(lastBn.ask);
       if (tsBuf.length > MAX_PTS) {
         const trim = tsBuf.length - MAX_PTS;
-        tsBuf.splice(0, trim); bidSpread.splice(0, trim); askSpread.splice(0, trim);
+        tsBuf.splice(0, trim); gtBid.splice(0, trim); gtAsk.splice(0, trim);
+        bnBid.splice(0, trim); bnAsk.splice(0, trim);
       }
       dirty = true;
     };
@@ -473,27 +470,11 @@ async fn screener_page() -> Html<&'static str> {
     if (uplot) { uplot.destroy(); uplot = null; }
     const w = window.innerWidth - 32;
     const h = Math.min(window.innerHeight * 0.38, 360);
-    const drawOverlays = (u) => {
+    const drawZones = (u) => {
       const ctx = u.ctx;
-      const xs = u.scales.x, ys = u.scales.y;
-      if (xs.min == null || ys.min == null) return;
+      const xs = u.scales.x;
+      if (xs.min == null) return;
       const top = u.bbox.top, bot = top + u.bbox.height;
-      const left = u.bbox.left, right = left + u.bbox.width;
-      // Draw threshold horizontal lines
-      const drawH = (val, color, dash) => {
-        if (val == null) return;
-        const y = u.valToPos(val, 'y', true);
-        if (y < top || y > bot) return;
-        ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 1;
-        if (dash) ctx.setLineDash(dash);
-        ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
-        ctx.restore();
-      };
-      drawH(thresholds.p90, 'rgba(250,204,21,0.6)', [4,3]);
-      drawH(thresholds.p10, 'rgba(250,204,21,0.6)', [4,3]);
-      drawH(thresholds.p50, 'rgba(107,114,128,0.6)', [6,3]);
-      drawH(0, 'rgba(107,114,128,0.3)', null);
-      // Draw trade zones
       const all = shadowZones.slice();
       if (openZone) all.push({ ...openZone, exit_s: xs.max });
       for (const z of all) {
@@ -511,37 +492,38 @@ async fn screener_page() -> Html<&'static str> {
       width: w, height: h,
       cursor: { show: true, drag: { x: false, y: false } },
       scales: { x: { time: true }, y: { auto: true } },
-      hooks: { draw: [drawOverlays] },
+      hooks: { draw: [drawZones] },
       axes: [
         { stroke: '#6b7280', grid: { stroke: '#1f2937' }, ticks: { stroke: '#374151' }, font: '10px system-ui', size: 36 },
-        { stroke: '#6b7280', grid: { stroke: '#1f2937' }, ticks: { stroke: '#374151' }, font: '10px system-ui', size: 60,
-          values: (u, vals) => vals.map(v => v.toFixed(1) + ' bps') }
+        { stroke: '#6b7280', grid: { stroke: '#1f2937' }, ticks: { stroke: '#374151' }, font: '10px system-ui', size: 60 }
       ],
       series: [
         {},
-        { label: 'Bid spread', stroke: '#3fb950', width: 1.5, points: { show: false } },
-        { label: 'Ask spread', stroke: '#f85149', width: 1.5, points: { show: false } },
+        { label: 'Gate bid', stroke: '#3fb950', width: 1.5, points: { show: false } },
+        { label: 'Gate ask', stroke: '#f85149', width: 1.5, points: { show: false } },
+        { label: 'BN bid',   stroke: '#58a6ff', width: 1, dash: [3,2], points: { show: false } },
+        { label: 'BN ask',   stroke: '#f0883e', width: 1, dash: [3,2], points: { show: false } },
       ]
     };
     const el = document.getElementById('chart-wrap');
     el.innerHTML = '';
-    uplot = new uPlot(opts, [new Float64Array(0), [], []], el);
+    uplot = new uPlot(opts, [new Float64Array(0), [], [], [], []], el);
   }
 
-  // 15fps chart render — human-visible updates don't need 60fps
+  // 15fps chart render
   let lastRenderTs = 0;
   function renderLoop(ts) {
     if (dirty && uplot && tsBuf.length > 1 && ts - lastRenderTs > 66) {
       lastRenderTs = ts;
       uplot.setData([
         new Float64Array(tsBuf),
-        new Float64Array(bidSpread),
-        new Float64Array(askSpread),
+        new Float64Array(gtBid),
+        new Float64Array(gtAsk),
+        new Float64Array(bnBid),
+        new Float64Array(bnAsk),
       ]);
       const n = tsBuf.length;
-      const bs = bidSpread[n-1], as_ = askSpread[n-1];
-      document.getElementById('chart-info').textContent =
-        `${n} pts | bid spread: ${bs!=null?bs.toFixed(2):'?'} bps | ask spread: ${as_!=null?as_.toFixed(2):'?'} bps`;
+      document.getElementById('chart-info').textContent = `${n} pts | gate: ${lastGate.bid.toFixed(4)}/${lastGate.ask.toFixed(4)} | bn: ${lastBn.bid.toFixed(4)}/${lastBn.ask.toFixed(4)}`;
       dirty = false;
     }
     requestAnimationFrame(renderLoop);
@@ -555,7 +537,6 @@ async fn screener_page() -> Html<&'static str> {
         fetch(`/api/v1/chart/${selectedSym}`),
         fetch(`/api/v1/shadow/${selectedSym}`)
       ]);
-      // Update trade zones + thresholds from chart data
       if (chartRes.ok) {
         const c = await chartRes.json();
         if (c) {
@@ -569,11 +550,9 @@ async fn screener_page() -> Html<&'static str> {
           } else {
             openZone = null;
           }
-          thresholds.p90 = c.p90; thresholds.p10 = c.p10; thresholds.p50 = c.p50;
           dirty = true;
         }
       }
-      // Update debug info
       if (shadowRes.ok) {
         const d = await shadowRes.json();
         if (d) {
