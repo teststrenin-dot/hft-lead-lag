@@ -161,9 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 (0usize, screener_symbols.len())
             }
         };
+    let binance_ws_sockets = (screener_symbols.len() + 1) / 2;
     info!(
-        "Binance subscription summary: ok={} err={}",
-        binance_subscribed, binance_subscribe_errors
+        "Binance subscription summary: ok={} err={} sockets={} symbols_per_ws=2",
+        binance_subscribed, binance_subscribe_errors, binance_ws_sockets
     );
 
     // Subscribe Gate to screener symbols as well.

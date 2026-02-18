@@ -24,8 +24,10 @@ use crate::infrastructure::exchanges::common::{
 const BINANCE_WS_ENDPOINT: &str = "wss://fstream.binance.com/ws";
 
 pub struct BinanceMarketData {
-    /// WebSocket sender channel - no mutex needed!
-    ws_tx: Option<mpsc::UnboundedSender<Message>>,
+    /// WebSocket sender channels (2 symbols per socket in batch mode)
+    ws_txs: Vec<mpsc::UnboundedSender<Message>>,
+    /// Shared fan-in channel for all WS reader tasks
+    msg_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
     /// Receiver for incoming messages
     msg_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     symbol_cache: SymbolCache,
@@ -36,7 +38,8 @@ pub struct BinanceMarketData {
 impl BinanceMarketData {
     pub fn new() -> Self {
         Self {
-            ws_tx: None,
+            ws_txs: Vec::new(),
+            msg_tx: None,
             msg_rx: None,
             symbol_cache: SymbolCache::new(),
             next_subscription_id: 1,
@@ -92,25 +95,107 @@ impl BinanceMarketData {
         ))
     }
 
+    async fn spawn_ws_worker(
+        msg_tx: mpsc::UnboundedSender<Vec<u8>>,
+    ) -> ExchangeResult<mpsc::UnboundedSender<Message>> {
+        let request = BINANCE_WS_ENDPOINT
+            .into_client_request()
+            .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
+
+        let (ws_stream, _) = connect_async(request)
+            .await
+            .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
+
+        let (write_half, read_half) = futures_util::stream::StreamExt::split(ws_stream);
+        let (ws_tx, mut ws_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) =
+            mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut read = read_half;
+
+            while let Some(msg_result) = read.next().await {
+                match msg_result {
+                    Ok(Message::Text(text)) => {
+                        let _ = msg_tx.send(text.into_bytes());
+                    }
+                    Ok(Message::Binary(bin)) => {
+                        let _ = msg_tx.send(bin);
+                    }
+                    Ok(Message::Close(frame)) => {
+                        warn!("WS closed: {:?}", frame);
+                        break;
+                    }
+                    Ok(Message::Ping(_data)) => {
+                        debug!("Ping received");
+                    }
+                    Ok(Message::Pong(_)) => {
+                        debug!("Pong received");
+                    }
+                    Err(e) => {
+                        error!("WS read error: {}", e);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            use futures_util::SinkExt;
+            let mut write = write_half;
+
+            while let Some(msg) = ws_rx.recv().await {
+                if write.send(msg).await.is_err() {
+                    error!("WS write error - connection lost");
+                    break;
+                }
+            }
+        });
+
+        Ok(ws_tx)
+    }
+
     /// Subscribe to many symbols using chunked requests to respect WS rate limits.
     pub async fn subscribe_book_tickers_batch(&mut self, symbols: &[String]) -> ExchangeResult<usize> {
         if symbols.is_empty() {
             return Ok(0);
         }
-        let tx = self
-            .ws_tx
+        let shared_msg_tx = self
+            .msg_tx
             .as_ref()
+            .cloned()
             .ok_or_else(|| ExchangeError::ConnectionClosed("Not connected".into()))?;
 
+        const SYMBOLS_PER_WS: usize = 2;
+        let required_ws_count = (symbols.len() + SYMBOLS_PER_WS - 1) / SYMBOLS_PER_WS;
+        while self.ws_txs.len() < required_ws_count {
+            let ws = Self::spawn_ws_worker(shared_msg_tx.clone()).await?;
+            self.ws_txs.push(ws);
+            tokio::time::sleep(tokio::time::Duration::from_millis(120)).await;
+        }
+
         let mut subscribed = 0usize;
-        for chunk in symbols.chunks(80) {
+        for (socket_idx, chunk) in symbols.chunks(SYMBOLS_PER_WS).enumerate() {
             let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
             let msg = Self::build_book_ticker_subscription(&refs);
-            tx.send(Message::Text(msg))
-                .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
+            if self.ws_txs[socket_idx].send(Message::Text(msg.clone())).is_err() {
+                let replacement = Self::spawn_ws_worker(shared_msg_tx.clone()).await?;
+                self.ws_txs[socket_idx] = replacement;
+                self.ws_txs[socket_idx]
+                    .send(Message::Text(msg))
+                    .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
+            }
             subscribed += chunk.len();
-            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(90)).await;
         }
+
+        info!(
+            "Binance socket allocation: symbols={} sockets={} symbols_per_ws={}",
+            symbols.len(),
+            required_ws_count,
+            SYMBOLS_PER_WS
+        );
 
         Ok(subscribed)
     }
@@ -129,72 +214,30 @@ impl MarketDataStream for BinanceMarketData {
     }
 
     async fn connect(&mut self) -> ExchangeResult<()> {
-        let request = BINANCE_WS_ENDPOINT
-            .into_client_request()
-            .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
-
-        let (ws_stream, _) = connect_async(request)
-            .await
-            .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
-
-        // CRITICAL FIX: Split WebSocket into independent read/write halves
-        // Using futures_util::stream::StreamExt::split() for thread-safe splitting
-        let (write_half, read_half) = futures_util::stream::StreamExt::split(ws_stream);
-
-        // Channel for sending messages to WebSocket
-        let (ws_tx, mut ws_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) = mpsc::unbounded_channel();
-        // Channel for receiving parsed messages
-        let (msg_tx, msg_rx): (mpsc::UnboundedSender<Vec<u8>>, mpsc::UnboundedReceiver<Vec<u8>>) = mpsc::unbounded_channel();
-
-        // Reader task - owns read_half, receives messages from exchange
-        tokio::spawn(async move {
-            use futures_util::StreamExt;
-            let mut read = read_half;
-            
-            while let Some(msg_result) = read.next().await {
-                match msg_result {
-                    Ok(Message::Text(text)) => { let _ = msg_tx.send(text.into_bytes()); }
-                    Ok(Message::Binary(bin)) => { let _ = msg_tx.send(bin); }
-                    Ok(Message::Close(frame)) => { warn!("WS closed: {:?}", frame); break; }
-                    Ok(Message::Ping(_data)) => { debug!("Ping received"); }
-                    Ok(Message::Pong(_)) => { debug!("Pong received"); }
-                    Err(e) => { error!("WS read error: {}", e); break; }
-                    _ => {}
-                }
-            }
-        });
-
-        // Writer task - owns write_half, sends messages to exchange
-        tokio::spawn(async move {
-            use futures_util::SinkExt;
-            let mut write = write_half;
-            
-            while let Some(msg) = ws_rx.recv().await {
-                if write.send(msg).await.is_err() {
-                    error!("WS write error - connection lost");
-                    break;
-                }
-            }
-        });
-
-        self.ws_tx = Some(ws_tx);
+        let (msg_tx, msg_rx): (mpsc::UnboundedSender<Vec<u8>>, mpsc::UnboundedReceiver<Vec<u8>>) =
+            mpsc::unbounded_channel();
+        let primary_ws = Self::spawn_ws_worker(msg_tx.clone()).await?;
+        self.ws_txs.clear();
+        self.ws_txs.push(primary_ws);
+        self.msg_tx = Some(msg_tx);
         self.msg_rx = Some(msg_rx);
         info!("Connected to Binance Futures WebSocket");
         Ok(())
     }
 
     async fn disconnect(&mut self) -> ExchangeResult<()> {
-        if let Some(tx) = &self.ws_tx {
+        for tx in &self.ws_txs {
             let _ = tx.send(Message::Close(None));
         }
+        self.ws_txs.clear();
+        self.msg_tx = None;
         self.msg_rx.take();
-        self.ws_tx = None;
         info!("Disconnected from Binance Futures");
         Ok(())
     }
 
     fn is_connected(&self) -> bool {
-        self.ws_tx.is_some()
+        !self.ws_txs.is_empty()
     }
 
     async fn subscribe_book_ticker(&mut self, symbol: &str) -> ExchangeResult<SubscriptionId> {
@@ -203,7 +246,7 @@ impl MarketDataStream for BinanceMarketData {
 
         let msg = Self::build_book_ticker_subscription(&[symbol]);
         
-        if let Some(tx) = &self.ws_tx {
+        if let Some(tx) = self.ws_txs.first() {
             // NO MUTEX NEEDED! Just send to channel
             tx.send(Message::Text(msg))
                 .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
@@ -221,9 +264,11 @@ impl MarketDataStream for BinanceMarketData {
 
         let msg = Self::build_book_ticker_subscription(&[symbol]);
         
-        if let Some(tx) = &self.ws_tx {
+        if let Some(tx) = self.ws_txs.first() {
             tx.send(Message::Text(msg))
                 .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
+        } else {
+            return Err(ExchangeError::ConnectionClosed("Not connected".into()));
         }
 
         Ok(subscription_id)

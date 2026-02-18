@@ -54,7 +54,7 @@ docs/
 | WS market broadcast API | ✅ Done | Sprint 1 (post) |
 | Web Screener (`/screener`, `/api/v1/screener`) | ✅ Done (MVP) | Sprint 1 (post) |
 | Screener live coverage (`common_symbols`) | ✅ Done | Sprint 1 (post) |
-| Screener metrics (`ws_drift_ms`, `entry_half_life_ms`, `avg_gt_p90_ms`, `gate_natr_30m_pct`) | ✅ Done | TASK-002 |
+| Screener metrics (`ws_drift_binance_ms`, `ws_drift_gate_ms`, `entry_half_life_ms`, `avg_gt_p90_ms`, `gate_natr_30m_pct`) | ✅ Done | TASK-002 |
 | Lead-Lag P90/P50 runtime logic | 🟡 In progress | TASK-002 |
 | Centralized logs (`project/logs`) | ✅ Done | Sprint 1 (post) |
 | Order Management | ⬜ Todo | Sprint 2 |

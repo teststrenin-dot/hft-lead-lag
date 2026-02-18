@@ -230,6 +230,8 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             },
             lag_ms: 0.0,
             ws_drift_ms: 0.0,
+            ws_drift_binance_ms: 0.0,
+            ws_drift_gate_ms: 0.0,
             entry_half_life_ms: 0.0,
             avg_gt_p90_ms: 0.0,
             gate_natr_30m_pct: 0.0,
@@ -310,7 +312,8 @@ async fn screener_page() -> Html<&'static str> {
         <th>Coin</th>
         <th>Leader</th>
         <th class="num">Lag (ms)</th>
-        <th class="num">WS drift (ms)</th>
+        <th class="num">WS drift Binance (ms)</th>
+        <th class="num">WS drift Gate (ms)</th>
         <th class="num">Entry half-life (ms)</th>
         <th class="num">Avg >P90 time (ms)</th>
         <th class="num">Gate NATR 30m (%)</th>
@@ -331,7 +334,8 @@ async fn screener_page() -> Html<&'static str> {
             <td>${r.symbol}</td>
             <td>${r.leader_exchange}</td>
             <td class="num">${Number(r.lag_ms).toFixed(2)}</td>
-            <td class="num">${Number(r.ws_drift_ms).toFixed(2)}</td>
+            <td class="num">${Number(r.ws_drift_binance_ms).toFixed(2)}</td>
+            <td class="num">${Number(r.ws_drift_gate_ms).toFixed(2)}</td>
             <td class="num">${Number(r.entry_half_life_ms).toFixed(2)}</td>
             <td class="num">${Number(r.avg_gt_p90_ms).toFixed(2)}</td>
             <td class="num">${Number(r.gate_natr_30m_pct).toFixed(4)}</td>
