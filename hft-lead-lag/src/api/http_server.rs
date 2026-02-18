@@ -253,6 +253,9 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             shadow_avg_trade_pct: 0.0,
             shadow_win_rate_pct: 0.0,
             shadow_position: "FLAT".to_string(),
+            shadow_spikes_detected: 0,
+            shadow_avg_catchup_pct: 0.0,
+            shadow_avg_lag_ms: 0.0,
             }
         })
         .collect()

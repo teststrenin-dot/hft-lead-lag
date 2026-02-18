@@ -40,6 +40,9 @@ pub struct ScreenerRow {
     pub shadow_avg_trade_pct: f64,
     pub shadow_win_rate_pct: f64,
     pub shadow_position: String,
+    pub shadow_spikes_detected: usize,
+    pub shadow_avg_catchup_pct: f64,
+    pub shadow_avg_lag_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +225,9 @@ impl ScreenerStore {
                     shadow_avg_trade_pct: stats.avg_trade_pct,
                     shadow_win_rate_pct: stats.win_rate_pct,
                     shadow_position: stats.position.clone(),
+                    shadow_spikes_detected: stats.spikes_detected,
+                    shadow_avg_catchup_pct: stats.avg_catchup_pct,
+                    shadow_avg_lag_ms: stats.avg_catchup_lag_ms,
                 }
             })
             .collect();
@@ -384,25 +390,33 @@ impl CycleTracker {
 }
 
 /// Post-trade cooldown to prevent overtrading (ms).
-const COOLDOWN_MS: i64 = 5_000;
+const COOLDOWN_MS: i64 = 3_000;
 /// Warmup duration: shadow trader ignores data until enough history (ms).
-const WARMUP_MS: i64 = 120_000; // 2 minutes
+const WARMUP_MS: i64 = 30_000; // 30 seconds — just need a few seconds of baseline
 /// Maximum age of a quote to be considered "fresh" (ms).
 const QUOTE_FRESHNESS_MS: i64 = 1_000;
 
 // ---------------------------------------------------------------------------
-// Shadow Trader — paper-trades ONLY on Gate, uses Binance as signal source.
+// Shadow Trader — spike-follow model.
 //
-// Model: Binance leads, Gate lags. When Gate premium vs Binance reaches P90
-// (extreme divergence), open a position on Gate. Exit when premium reverts
-// to P50. Execution uses Gate bid/ask + market impact from Gate L1 depth.
+// Strategy: Binance leads, Gate lags. When Binance mid spikes ≥ SPIKE_THRESHOLD
+// in a short window, enter on Gate in the same direction. Exit when Gate catches
+// up (target profit reached), or on timeout / stop-loss.
+// All execution is paper-traded on Gate bid/ask + market impact.
 // ---------------------------------------------------------------------------
+
+/// Minimum Binance mid move (bps) to trigger entry.
+const SPIKE_THRESHOLD_BPS: f64 = 30.0; // 0.30%
+/// Time window to measure Binance spike (ms).
+const SPIKE_WINDOW_MS: i64 = 500;
+/// Maximum time to hold a position waiting for Gate catchup (ms).
+const MAX_HOLD_MS: i64 = 30_000; // 30 seconds
+/// Stop-loss threshold (bps) — cut if position goes against us.
+const STOP_LOSS_BPS: f64 = 20.0; // 0.20%
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ShadowDirection {
-    /// Gate overpriced vs Binance → sell Gate
     Short,
-    /// Gate underpriced vs Binance → buy Gate
     Long,
 }
 
@@ -411,13 +425,8 @@ struct ShadowPosition {
     direction: ShadowDirection,
     gate_entry_price: f64,
     entry_ts_ms: i64,
-    entry_premium_bps: f64,
-}
-
-#[derive(Debug, Clone)]
-struct ShadowSignal {
-    direction: ShadowDirection,
-    fire_ts_ms: i64,
+    /// Binance mid at entry — used to measure catchup
+    binance_mid_at_entry: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -426,8 +435,17 @@ struct ShadowTrade {
     ts_ms: i64,
     direction: ShadowDirection,
     entry_ts_ms: i64,
-    entry_premium_bps: f64,
-    exit_premium_bps: f64,
+    exit_reason: &'static str,
+    spike_bps: f64,
+    catchup_pct: f64,
+    catchup_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct SpikeEvent {
+    ts_ms: i64,
+    direction: ShadowDirection,
+    spike_bps: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -436,18 +454,17 @@ pub struct ChartTrade {
     pub exit_ts_ms: i64,
     pub direction: String,
     pub pnl_pct: f64,
-    pub entry_premium_bps: f64,
-    pub exit_premium_bps: f64,
+    pub exit_reason: String,
+    pub spike_bps: f64,
+    pub catchup_pct: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChartData {
     pub symbol: String,
     pub ts: Vec<f64>,
-    pub premium_bps: Vec<f64>,
-    pub p90: Option<f64>,
-    pub p10: Option<f64>,
-    pub p50: Option<f64>,
+    pub binance_mid: Vec<f64>,
+    pub gate_mid: Vec<f64>,
     pub trades: Vec<ChartTrade>,
     pub position: String,
     pub entry_price: Option<f64>,
@@ -461,45 +478,45 @@ pub struct ShadowStats {
     pub avg_trade_pct: f64,
     pub win_rate_pct: f64,
     pub position: String,
+    pub spikes_detected: usize,
+    pub avg_catchup_pct: f64,
+    pub avg_catchup_lag_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ShadowDebug {
-    pub premium_samples: usize,
-    pub last_premium_bps: f64,
-    pub cached_p90: Option<f64>,
-    pub cached_p10: Option<f64>,
-    pub cached_p50: Option<f64>,
+    pub binance_mid_samples: usize,
+    pub last_binance_mid: f64,
+    pub last_gate_mid: f64,
     pub completed_trades_in_window: usize,
     pub cooldown_remaining_ms: i64,
     pub warmup_remaining_ms: i64,
     pub position: String,
     pub entry_price: Option<f64>,
     pub last_5_trades_pnl_pct: Vec<f64>,
-    pub short_edge_bps: f64,
-    pub long_edge_bps: f64,
-    pub min_edge_required_bps: f64,
+    pub spike_threshold_bps: f64,
+    pub spikes_in_window: usize,
+    pub max_hold_ms: i64,
+    pub stop_loss_bps: f64,
 }
 
-/// Interval for recalculating P90/P10/P50 thresholds (ms).
-const THRESHOLD_INTERVAL_MS: i64 = 60_000; // 1 minute
+#[derive(Debug, Clone)]
+struct MidSample {
+    ts_ms: i64,
+    binance_mid: f64,
+    gate_mid: f64,
+}
 
 #[derive(Debug, Default)]
 struct ShadowTrader {
-    /// Rolling gate premium: (gate.mid − binance.mid) / binance.mid × 10000 bps
-    premium_bps: VecDeque<(i64, f64)>,
+    /// Rolling mid-price samples for spike detection and charting
+    mid_samples: VecDeque<MidSample>,
     position: Option<ShadowPosition>,
-    pending_signal: Option<ShadowSignal>,
     completed_trades: VecDeque<ShadowTrade>,
+    spike_history: VecDeque<SpikeEvent>,
     start_ts_ms: Option<i64>,
     latest_ts_ms: i64,
     cooldown_until_ms: i64,
-    prev_premium_bps: f64,
-    // Frozen thresholds — recalculated once per THRESHOLD_INTERVAL_MS
-    cached_p90: Option<f64>,
-    cached_p10: Option<f64>,
-    cached_p50: Option<f64>,
-    thresholds_updated_at_ms: i64,
 }
 
 impl ShadowTrader {
@@ -517,154 +534,139 @@ impl ShadowTrader {
         }
 
         let bn_mid = ((binance.bid + binance.ask) / 2.0).max(1e-12);
-        let gt_mid = (gate.bid + gate.ask) / 2.0;
-        let premium_bps = ((gt_mid - bn_mid) / bn_mid) * 10_000.0;
+        let gt_mid = ((gate.bid + gate.ask) / 2.0).max(1e-12);
 
+        self.mid_samples.push_back(MidSample { ts_ms, binance_mid: bn_mid, gate_mid: gt_mid });
         self.cleanup(ts_ms, window_ms);
 
-        // 2-minute warmup
+        // Warmup
         let elapsed = ts_ms.saturating_sub(self.start_ts_ms.unwrap_or(ts_ms));
         if elapsed < WARMUP_MS {
-            self.premium_bps.push_back((ts_ms, premium_bps));
-            self.prev_premium_bps = premium_bps;
             return;
         }
 
-        // Recalculate frozen thresholds once per minute (before adding current sample)
-        if ts_ms >= self.thresholds_updated_at_ms + THRESHOLD_INTERVAL_MS {
-            self.cached_p90 = percentile(self.premium_bps.iter().map(|(_, v)| *v), 90.0);
-            self.cached_p10 = percentile(self.premium_bps.iter().map(|(_, v)| *v), 10.0);
-            self.cached_p50 = percentile(self.premium_bps.iter().map(|(_, v)| *v), 50.0);
-            self.thresholds_updated_at_ms = ts_ms;
-        }
+        // --- Exit logic (check before entry) ---
+        if let Some(pos) = self.position.clone() {
+            let hold_ms = ts_ms - pos.entry_ts_ms;
 
-        self.premium_bps.push_back((ts_ms, premium_bps));
-
-        // Execute pending signal after delay — revalidate edge before filling
-        let mut just_entered = false;
-        if let Some(ref sig) = self.pending_signal {
-            if ts_ms >= sig.fire_ts_ms + EXECUTION_DELAY_MS {
-                let dir = sig.direction;
-                let still_valid = match (dir, self.cached_p90, self.cached_p10, self.cached_p50) {
-                    (ShadowDirection::Short, Some(p90), _, Some(p50)) => {
-                        premium_bps >= p90 && (p90 - p50).abs() >= MIN_EDGE_BPS
-                    }
-                    (ShadowDirection::Long, _, Some(p10), Some(p50)) => {
-                        premium_bps <= p10 && (p50 - p10).abs() >= MIN_EDGE_BPS
-                    }
-                    _ => false,
-                };
-                self.pending_signal = None;
-                if still_valid {
-                    self.execute_entry(ts_ms, dir, gate, premium_bps);
-                    just_entered = true;
+            let unrealized_bps = match pos.direction {
+                ShadowDirection::Long => {
+                    let exit_price = apply_impact(gate.bid, gate.bid_qty, gate.bid, true);
+                    ((exit_price - pos.gate_entry_price) / pos.gate_entry_price) * 10_000.0
                 }
-            }
-        }
-
-        let (p90, p10, p50) = match (self.cached_p90, self.cached_p10, self.cached_p50) {
-            (Some(a), Some(b), Some(c)) => (a, b, c),
-            _ => {
-                self.prev_premium_bps = premium_bps;
-                return;
-            }
-        };
-
-        // Exit: premium reverted to frozen P50 (skip on the tick we just entered)
-        if !just_entered {
-            if let Some(ref pos) = self.position {
-                let should_exit = match pos.direction {
-                    ShadowDirection::Short => premium_bps <= p50,
-                    ShadowDirection::Long => premium_bps >= p50,
-                };
-                if should_exit {
-                    self.execute_exit(ts_ms, gate, window_ms, premium_bps);
+                ShadowDirection::Short => {
+                    let exit_price = apply_impact(gate.ask, gate.ask_qty, gate.ask, false);
+                    ((pos.gate_entry_price - exit_price) / pos.gate_entry_price) * 10_000.0
                 }
-            }
-        }
-
-        // Entry: flat, no pending, cooldown elapsed, frozen P90/P10 crossing
-        // Only enter if expected edge (|threshold - P50|) exceeds round-trip fees
-        let short_edge = (p90 - p50).abs();
-        let long_edge = (p50 - p10).abs();
-
-        if self.position.is_none()
-            && self.pending_signal.is_none()
-            && ts_ms >= self.cooldown_until_ms
-        {
-            let short_cross = short_edge >= MIN_EDGE_BPS
-                && premium_bps >= p90
-                && self.prev_premium_bps < p90;
-            let long_cross = long_edge >= MIN_EDGE_BPS
-                && premium_bps <= p10
-                && self.prev_premium_bps > p10;
-
-            let direction = match (short_cross, long_cross) {
-                (true, true) => {
-                    if (premium_bps - p90).abs() >= (premium_bps - p10).abs() {
-                        Some(ShadowDirection::Short)
-                    } else {
-                        Some(ShadowDirection::Long)
-                    }
-                }
-                (true, false) => Some(ShadowDirection::Short),
-                (false, true) => Some(ShadowDirection::Long),
-                _ => None,
             };
 
-            if let Some(dir) = direction {
-                self.pending_signal = Some(ShadowSignal {
-                    direction: dir,
-                    fire_ts_ms: ts_ms,
+            // Gate caught up: profitable exit
+            let gate_moved_enough = unrealized_bps >= SPIKE_THRESHOLD_BPS;
+            // Timeout
+            let timed_out = hold_ms >= MAX_HOLD_MS;
+            // Stop-loss
+            let stopped_out = unrealized_bps <= -STOP_LOSS_BPS;
+
+            if gate_moved_enough || timed_out || stopped_out {
+                let reason = if gate_moved_enough {
+                    "target"
+                } else if stopped_out {
+                    "stop_loss"
+                } else {
+                    "timeout"
+                };
+                self.execute_exit(ts_ms, gate, window_ms, reason, pos);
+            }
+        }
+
+        // --- Spike detection & entry ---
+        if self.position.is_none() && ts_ms >= self.cooldown_until_ms {
+            if let Some((direction, spike_bps)) = self.detect_spike(ts_ms, bn_mid) {
+                // Record spike
+                self.spike_history.push_back(SpikeEvent {
+                    ts_ms,
+                    direction,
+                    spike_bps,
+                });
+
+                // Enter on Gate in the same direction as Binance spike
+                let gate_price = match direction {
+                    ShadowDirection::Long => apply_impact(gate.ask, gate.ask_qty, gate.ask, false),
+                    ShadowDirection::Short => apply_impact(gate.bid, gate.bid_qty, gate.bid, true),
+                };
+                self.position = Some(ShadowPosition {
+                    direction,
+                    gate_entry_price: gate_price,
+                    entry_ts_ms: ts_ms,
+                    binance_mid_at_entry: bn_mid,
                 });
             }
         }
-
-        self.prev_premium_bps = premium_bps;
     }
 
-    fn execute_entry(&mut self, ts_ms: i64, direction: ShadowDirection, gate: &Quote, premium_bps: f64) {
-        let gate_price = match direction {
-            ShadowDirection::Short => apply_impact(gate.bid, gate.bid_qty, gate.bid, true),
-            ShadowDirection::Long => apply_impact(gate.ask, gate.ask_qty, gate.ask, false),
-        };
-        self.position = Some(ShadowPosition {
-            direction,
-            gate_entry_price: gate_price,
-            entry_ts_ms: ts_ms,
-            entry_premium_bps: premium_bps,
-        });
+    /// Detect if Binance mid spiked ≥ threshold within SPIKE_WINDOW_MS.
+    fn detect_spike(&self, now_ms: i64, current_mid: f64) -> Option<(ShadowDirection, f64)> {
+        let cutoff = now_ms - SPIKE_WINDOW_MS;
+        // Find the oldest sample within spike window
+        let baseline = self.mid_samples.iter()
+            .find(|s| s.ts_ms >= cutoff)?;
+
+        if baseline.binance_mid <= 0.0 {
+            return None;
+        }
+
+        let move_bps = ((current_mid - baseline.binance_mid) / baseline.binance_mid) * 10_000.0;
+
+        if move_bps >= SPIKE_THRESHOLD_BPS {
+            Some((ShadowDirection::Long, move_bps))
+        } else if move_bps <= -SPIKE_THRESHOLD_BPS {
+            Some((ShadowDirection::Short, move_bps.abs()))
+        } else {
+            None
+        }
     }
 
-    fn execute_exit(&mut self, ts_ms: i64, gate: &Quote, window_ms: i64, premium_bps: f64) {
-        let pos = match self.position.take() {
-            Some(p) => p,
-            None => return,
-        };
-
+    fn execute_exit(
+        &mut self,
+        ts_ms: i64,
+        gate: &Quote,
+        window_ms: i64,
+        reason: &'static str,
+        pos: ShadowPosition,
+    ) {
+        self.position = None;
         let fees = GATE_TAKER_FEE * 2.0; // entry + exit
-        let pnl_pct = match pos.direction {
-            ShadowDirection::Short => {
-                // Sold at entry, buy back now
-                let exit_price = apply_impact(gate.ask, gate.ask_qty, gate.ask, false);
-                ((pos.gate_entry_price - exit_price) / pos.gate_entry_price - fees) * 100.0
-            }
+
+        let (pnl_pct, catchup_pct) = match pos.direction {
             ShadowDirection::Long => {
-                // Bought at entry, sell now
                 let exit_price = apply_impact(gate.bid, gate.bid_qty, gate.bid, true);
-                ((exit_price - pos.gate_entry_price) / pos.gate_entry_price - fees) * 100.0
+                let raw_pnl = (exit_price - pos.gate_entry_price) / pos.gate_entry_price;
+                let catchup = ((exit_price - pos.gate_entry_price) / pos.gate_entry_price) * 100.0;
+                ((raw_pnl - fees) * 100.0, catchup)
+            }
+            ShadowDirection::Short => {
+                let exit_price = apply_impact(gate.ask, gate.ask_qty, gate.ask, false);
+                let raw_pnl = (pos.gate_entry_price - exit_price) / pos.gate_entry_price;
+                let catchup = ((pos.gate_entry_price - exit_price) / pos.gate_entry_price) * 100.0;
+                ((raw_pnl - fees) * 100.0, catchup)
             }
         };
+
+        let catchup_ms = ts_ms - pos.entry_ts_ms;
 
         self.completed_trades.push_back(ShadowTrade {
             pnl_pct,
             ts_ms,
             direction: pos.direction,
             entry_ts_ms: pos.entry_ts_ms,
-            entry_premium_bps: pos.entry_premium_bps,
-            exit_premium_bps: premium_bps,
+            exit_reason: reason,
+            spike_bps: 0.0, // will be enriched from spike_history if needed
+            catchup_pct,
+            catchup_ms,
         });
         self.cooldown_until_ms = ts_ms + COOLDOWN_MS;
+
+        // Trim old trades
         let cutoff = ts_ms - window_ms;
         while let Some(t) = self.completed_trades.front() {
             if t.ts_ms >= cutoff { break; }
@@ -682,20 +684,24 @@ impl ShadowTrader {
                 avg_trade_pct: 0.0,
                 win_rate_pct: 0.0,
                 position: self.position_label(),
+                spikes_detected: self.spike_history.len(),
+                avg_catchup_pct: 0.0,
+                avg_catchup_lag_ms: 0.0,
             };
         }
 
-        // Observation period = time since warmup ended, capped to window_ms.
         let obs_ms = self.start_ts_ms
             .map(|s| {
                 let post_warmup = s + WARMUP_MS;
-                (self.latest_ts_ms - post_warmup).max(1).min(TEN_MINUTES_MS) as f64
+                (self.latest_ts_ms - post_warmup).clamp(1, TEN_MINUTES_MS) as f64
             })
-            .unwrap_or(COOLDOWN_MS as f64);
+            .unwrap_or(1.0);
         let window_hours = obs_ms / 3_600_000.0;
 
         let total_pnl: f64 = self.completed_trades.iter().map(|t| t.pnl_pct).sum();
         let wins = self.completed_trades.iter().filter(|t| t.pnl_pct > 0.0).count();
+        let avg_catchup: f64 = self.completed_trades.iter().map(|t| t.catchup_pct).sum::<f64>() / n as f64;
+        let avg_lag: f64 = self.completed_trades.iter().map(|t| t.catchup_ms as f64).sum::<f64>() / n as f64;
 
         ShadowStats {
             pnl_per_hour_pct: total_pnl / window_hours,
@@ -703,12 +709,14 @@ impl ShadowTrader {
             avg_trade_pct: total_pnl / n as f64,
             win_rate_pct: (wins as f64 / n as f64) * 100.0,
             position: self.position_label(),
+            spikes_detected: self.spike_history.len(),
+            avg_catchup_pct: avg_catchup,
+            avg_catchup_lag_ms: avg_lag,
         }
     }
 
     fn position_label(&self) -> String {
         match &self.position {
-            None if self.pending_signal.is_some() => "PENDING".to_string(),
             None => "FLAT".to_string(),
             Some(p) => match p.direction {
                 ShadowDirection::Short => "SHORT_GT".to_string(),
@@ -719,9 +727,13 @@ impl ShadowTrader {
 
     fn cleanup(&mut self, ts_ms: i64, window_ms: i64) {
         let cutoff = ts_ms - window_ms;
-        while let Some((ts, _)) = self.premium_bps.front() {
-            if *ts >= cutoff { break; }
-            self.premium_bps.pop_front();
+        while let Some(s) = self.mid_samples.front() {
+            if s.ts_ms >= cutoff { break; }
+            self.mid_samples.pop_front();
+        }
+        while let Some(s) = self.spike_history.front() {
+            if s.ts_ms >= cutoff { break; }
+            self.spike_history.pop_front();
         }
     }
 
@@ -733,38 +745,38 @@ impl ShadowTrader {
         let cooldown_remaining = (self.cooldown_until_ms - self.latest_ts_ms).max(0);
         let last_5: Vec<f64> = self.completed_trades.iter()
             .rev().take(5).map(|t| t.pnl_pct).collect();
-        let (short_edge, long_edge) = match (self.cached_p90, self.cached_p10, self.cached_p50) {
-            (Some(p90), Some(p10), Some(p50)) => ((p90 - p50).abs(), (p50 - p10).abs()),
-            _ => (0.0, 0.0),
-        };
+        let last_bn = self.mid_samples.back().map(|s| s.binance_mid).unwrap_or(0.0);
+        let last_gt = self.mid_samples.back().map(|s| s.gate_mid).unwrap_or(0.0);
+
         ShadowDebug {
-            premium_samples: self.premium_bps.len(),
-            last_premium_bps: self.prev_premium_bps,
-            cached_p90: self.cached_p90,
-            cached_p10: self.cached_p10,
-            cached_p50: self.cached_p50,
+            binance_mid_samples: self.mid_samples.len(),
+            last_binance_mid: last_bn,
+            last_gate_mid: last_gt,
             completed_trades_in_window: self.completed_trades.len(),
             cooldown_remaining_ms: cooldown_remaining,
             warmup_remaining_ms: warmup_remaining,
             position: self.position_label(),
             entry_price: self.position.as_ref().map(|p| p.gate_entry_price),
             last_5_trades_pnl_pct: last_5,
-            short_edge_bps: short_edge,
-            long_edge_bps: long_edge,
-            min_edge_required_bps: MIN_EDGE_BPS,
+            spike_threshold_bps: SPIKE_THRESHOLD_BPS,
+            spikes_in_window: self.spike_history.len(),
+            max_hold_ms: MAX_HOLD_MS,
+            stop_loss_bps: STOP_LOSS_BPS,
         }
     }
 
     fn chart_data(&self, symbol: &str) -> ChartData {
-        // Downsample premium_bps to max ~600 points (1 per second for 10 min)
-        let len = self.premium_bps.len();
+        // Downsample to max ~600 points
+        let len = self.mid_samples.len();
         let step = (len / 600).max(1);
         let mut ts = Vec::with_capacity(len / step + 1);
-        let mut vals = Vec::with_capacity(len / step + 1);
-        for (i, (t, v)) in self.premium_bps.iter().enumerate() {
+        let mut bn_vals = Vec::with_capacity(len / step + 1);
+        let mut gt_vals = Vec::with_capacity(len / step + 1);
+        for (i, s) in self.mid_samples.iter().enumerate() {
             if i % step == 0 {
-                ts.push(*t as f64 / 1000.0); // seconds for uPlot
-                vals.push(*v);
+                ts.push(s.ts_ms as f64 / 1000.0);
+                bn_vals.push(s.binance_mid);
+                gt_vals.push(s.gate_mid);
             }
         }
         let trades: Vec<ChartTrade> = self.completed_trades.iter().map(|t| ChartTrade {
@@ -775,17 +787,16 @@ impl ShadowTrader {
                 ShadowDirection::Long => "LONG".to_string(),
             },
             pnl_pct: t.pnl_pct,
-            entry_premium_bps: t.entry_premium_bps,
-            exit_premium_bps: t.exit_premium_bps,
+            exit_reason: t.exit_reason.to_string(),
+            spike_bps: t.spike_bps,
+            catchup_pct: t.catchup_pct,
         }).collect();
 
         ChartData {
             symbol: symbol.to_string(),
             ts,
-            premium_bps: vals,
-            p90: self.cached_p90,
-            p10: self.cached_p10,
-            p50: self.cached_p50,
+            binance_mid: bn_vals,
+            gate_mid: gt_vals,
             trades,
             position: self.position_label(),
             entry_price: self.position.as_ref().map(|p| p.gate_entry_price),
