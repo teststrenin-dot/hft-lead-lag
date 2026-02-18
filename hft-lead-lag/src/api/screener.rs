@@ -53,7 +53,8 @@ impl ScreenerStore {
             return;
         }
 
-        let ts_ms = now_ms();
+        let local_ts_ms = now_ms();
+        let exchange_ts_ms = normalize_exchange_ts_ms(timestamp_ns).unwrap_or(local_ts_ms);
 
         let mut state = self
             .symbols
@@ -61,8 +62,12 @@ impl ScreenerStore {
             .or_insert_with(SymbolState::default);
 
         let state = state.value_mut();
-        let ws_drift = calculate_ws_drift_ms(ts_ms, timestamp_ns);
-        let quote = Quote { bid, ask, ts_ms };
+        let ws_drift = calculate_ws_drift_ms(local_ts_ms, timestamp_ns);
+        let quote = Quote {
+            bid,
+            ask,
+            ts_ms: exchange_ts_ms,
+        };
         match exchange {
             "binance" => {
                 state.binance = Some(quote);
@@ -81,13 +86,13 @@ impl ScreenerStore {
         refresh_ws_drift(state);
 
         let (Some(binance), Some(gate)) = (state.binance.clone(), state.gate.clone()) else {
-            state.updated_at_ms = ts_ms;
+            state.updated_at_ms = exchange_ts_ms;
             state.leader_exchange = exchange.to_string();
             state.lag_ms = 0.0;
             return;
         };
 
-        state.updated_at_ms = ts_ms;
+        state.updated_at_ms = exchange_ts_ms;
         state.lag_ms = (binance.ts_ms - gate.ts_ms).unsigned_abs() as f64;
         state.leader_exchange = if binance.ts_ms >= gate.ts_ms {
             "binance".to_string()
@@ -105,10 +110,10 @@ impl ScreenerStore {
 
         state
             .binance_leads
-            .update(ts_ms, binance_div_bps, binance_conv_bps, self.window_ms);
+            .update(exchange_ts_ms, binance_div_bps, binance_conv_bps, self.window_ms);
         state
             .gate_leads
-            .update(ts_ms, gate_div_bps, gate_conv_bps, self.window_ms);
+            .update(exchange_ts_ms, gate_div_bps, gate_conv_bps, self.window_ms);
 
         let mut means = Vec::with_capacity(2);
         if let Some(v) = state.binance_leads.average_half_life_ms() {
