@@ -28,7 +28,7 @@
   - `Avg >P90 time, ms` (`avg_gt_p90_ms`, alias: `entry_w_ms`)
   - `Gate NATR 30m, %` (`gate_natr_30m_pct`)
 - Сортировка по `lag_ms` **по убыванию** (от наибольшей к меньшей) по умолчанию.
-- В выборке только инструменты с `24h quote_volume >= 1_000_000 USD`.
+- В выборке только инструменты с `24h quote_volume >= 10_000_000 USD`.
 - Определение `entry_half_life_ms`: среднее время от события расхождения `P90` (entry trigger) до события схождения `P50` (exit trigger) в скользящем окне `p=10m`.
 - Определение `entry_w_ms`: среднее время нахождения в зоне `spread_bid_ask >= P90` в окне `p=10m` (длительность окна, где лимитный вход потенциально может быть исполнен).
 
@@ -46,7 +46,7 @@
    Каждая строка содержит `symbol`, `leader_exchange`, `lag_ms`, `ws_drift_binance_ms`, `ws_drift_gate_ms`, `entry_half_life_ms`, `avg_gt_p90_ms`, `gate_natr_30m_pct`.
 
 2. **SCREENER-CP-02 / Volume filter**  
-   В выдаче нет символов с `quote_volume < 1_000_000`.
+   В выдаче нет символов с `quote_volume < 10_000_000`.
 
 3. **SCREENER-CP-03 / Сортировка**  
    `lag_ms[i] >= lag_ms[i+1]` для всей таблицы.

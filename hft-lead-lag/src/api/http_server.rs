@@ -41,7 +41,7 @@ pub struct HttpServer {
 
 impl HttpServer {
     pub fn new(config: HttpServerConfig) -> Self {
-        Self::with_min_volume(config, 1_000_000.0)
+        Self::with_min_volume(config, 10_000_000.0)
     }
 
     pub fn with_min_volume(config: HttpServerConfig, min_volume_usd: f64) -> Self {

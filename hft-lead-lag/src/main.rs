@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 use std::time::{Duration, Instant};
 
 /// Minimum 24h USD volume for symbol filtering
-const MIN_VOLUME_USD: f64 = 1_000_000.0;  // 1 million USD
+const MIN_VOLUME_USD: f64 = 10_000_000.0;  // 10 million USD
 const MAX_STRATEGY_SYMBOLS: usize = 8;
 const SUBSCRIBE_DELAY_MS: u64 = 15;
 
