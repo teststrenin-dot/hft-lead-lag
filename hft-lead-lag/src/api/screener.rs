@@ -312,23 +312,23 @@ fn now_ms() -> i64 {
 }
 
 fn refresh_ws_drift(state: &mut SymbolState) {
-    let mut sum = 0.0;
-    let mut count = 0usize;
+    let mut best: Option<f64> = None;
     if let Some(v) = state.binance_ws_drift_ms {
-        sum += v;
-        count += 1;
+        best = Some(v);
     }
     if let Some(v) = state.gate_ws_drift_ms {
-        sum += v;
-        count += 1;
+        best = match best {
+            Some(current) if current.abs() <= v.abs() => Some(current),
+            _ => Some(v),
+        };
     }
-    state.ws_drift_ms = if count == 0 { 0.0 } else { sum / count as f64 };
+    state.ws_drift_ms = best.unwrap_or(0.0);
 }
 
 fn calculate_ws_drift_ms(local_ts_ms: i64, raw_exchange_ts_ns: i64) -> Option<f64> {
     let exchange_ts_ms = normalize_exchange_ts_ms(raw_exchange_ts_ns)?;
     let drift_ms = local_ts_ms.saturating_sub(exchange_ts_ms) as f64;
-    if drift_ms.abs() <= 24.0 * 60.0 * 60.0 * 1000.0 {
+    if drift_ms.abs() <= 30_000.0 {
         Some(drift_ms)
     } else {
         None

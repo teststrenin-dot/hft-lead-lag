@@ -35,20 +35,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let gate_rest = GateRestClient::new();
 
     // Get symbols with sufficient volume from both exchanges
-    let (binance_symbols, gate_symbols) = tokio::join!(
+    let (binance_symbols_result, gate_symbols_result) = tokio::join!(
         binance_rest.get_symbols_with_volume(MIN_VOLUME_USD),
         gate_rest.get_symbols_with_volume(MIN_VOLUME_USD)
     );
 
-    let binance_symbols = binance_symbols.unwrap_or_else(|e| {
-        warn!("Failed to get Binance symbols: {}", e);
-        vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
-    });
-
-    let gate_symbols = gate_symbols.unwrap_or_else(|e| {
-        warn!("Failed to get Gate symbols: {}", e);
-        vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
-    });
+    let mut binance_symbols = match binance_symbols_result {
+        Ok(symbols) => symbols,
+        Err(e) => {
+            warn!("Failed to get Binance symbols: {}", e);
+            Vec::new()
+        }
+    };
+    let mut gate_symbols = match gate_symbols_result {
+        Ok(symbols) => symbols,
+        Err(e) => {
+            warn!("Failed to get Gate symbols: {}", e);
+            Vec::new()
+        }
+    };
+    if binance_symbols.is_empty() && !gate_symbols.is_empty() {
+        warn!("Using Gate symbol universe as temporary Binance fallback");
+        binance_symbols = gate_symbols.clone();
+    }
+    if gate_symbols.is_empty() && !binance_symbols.is_empty() {
+        warn!("Using Binance symbol universe as temporary Gate fallback");
+        gate_symbols = binance_symbols.clone();
+    }
+    if binance_symbols.is_empty() && gate_symbols.is_empty() {
+        warn!("No symbols from REST; using BTC/ETH fallback");
+        binance_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        gate_symbols = binance_symbols.clone();
+    }
 
     info!("Binance symbols with 24h vol >= ${:.0}M: {}", MIN_VOLUME_USD / 1_000_000.0, binance_symbols.len());
     info!("Gate symbols with 24h vol >= ${:.0}M: {}", MIN_VOLUME_USD / 1_000_000.0, gate_symbols.len());
