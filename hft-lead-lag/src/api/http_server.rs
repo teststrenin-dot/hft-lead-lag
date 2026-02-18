@@ -528,44 +528,19 @@ async fn screener_page() -> Html<&'static str> {
         // Shaded zone
         ctx.fillStyle = isLong ? 'rgba(74,222,128,0.10)' : 'rgba(248,113,113,0.10)';
         ctx.fillRect(x0, top, x1 - x0, bot - top);
-        // Entry vertical line
-        ctx.strokeStyle = isLong ? 'rgba(74,222,128,0.5)' : 'rgba(248,113,113,0.5)';
-        ctx.setLineDash([3, 3]);
-        ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(x0, top); ctx.lineTo(x0, bot); ctx.stroke();
-        ctx.setLineDash([]);
-        // Entry dot at price level
+        // Entry dot on the price line
         if (z.entry_price) {
-          const yEntry = u.valToPos(z.entry_price, 'y', true);
-          ctx.beginPath(); ctx.arc(x0, yEntry, 5, 0, 2 * Math.PI);
+          const y = u.valToPos(z.entry_price, 'y', true);
+          ctx.beginPath(); ctx.arc(x0, y, 3, 0, 2 * Math.PI);
           ctx.fillStyle = isLong ? '#4ade80' : '#f87171';
           ctx.fill();
-          ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
-          // Entry label
-          ctx.fillStyle = '#e5e7eb';
-          ctx.font = 'bold 9px system-ui';
-          ctx.textAlign = 'left';
-          ctx.fillText(isLong ? '▲ L' : '▼ S', x0 + 8, yEntry + 3);
         }
-        // Exit dot at price level (only for completed trades)
+        // Exit dot on the price line
         if (!z.open && z.exit_price) {
-          // Exit vertical line
-          ctx.strokeStyle = isLong ? 'rgba(74,222,128,0.5)' : 'rgba(248,113,113,0.5)';
-          ctx.setLineDash([3, 3]);
-          ctx.lineWidth = 1;
-          ctx.beginPath(); ctx.moveTo(x1, top); ctx.lineTo(x1, bot); ctx.stroke();
-          ctx.setLineDash([]);
-          const yExit = u.valToPos(z.exit_price, 'y', true);
-          ctx.beginPath(); ctx.arc(x1, yExit, 5, 0, 2 * Math.PI);
-          ctx.fillStyle = (z.pnl >= 0) ? '#4ade80' : '#f87171';
+          const y = u.valToPos(z.exit_price, 'y', true);
+          ctx.beginPath(); ctx.arc(x1, y, 3, 0, 2 * Math.PI);
+          ctx.fillStyle = isLong ? '#4ade80' : '#f87171';
           ctx.fill();
-          ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
-          // PnL + reason label
-          ctx.fillStyle = (z.pnl >= 0) ? '#4ade80' : '#f87171';
-          ctx.font = '9px system-ui';
-          ctx.textAlign = 'right';
-          const lbl = (z.pnl >= 0 ? '+' : '') + z.pnl.toFixed(3) + '% ' + (z.reason || '');
-          ctx.fillText(lbl, x1 - 8, yExit - 8);
         }
       }
     };
