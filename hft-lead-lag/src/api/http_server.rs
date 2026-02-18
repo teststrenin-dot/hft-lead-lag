@@ -386,10 +386,13 @@ async fn screener_page() -> Html<&'static str> {
         <th class="num" data-key="avg_gt_p90_ms" onclick="sortBy('avg_gt_p90_ms')">>P90</th>
         <th class="num" data-key="gate_natr_30m_pct" onclick="sortBy('gate_natr_30m_pct')">NATR%</th>
         <th data-key="shadow_position" onclick="sortBy('shadow_position')">Pos</th>
+        <th class="num" data-key="shadow_spikes_detected" onclick="sortBy('shadow_spikes_detected')">Spikes</th>
         <th class="num" data-key="shadow_pnl_per_hour_pct" onclick="sortBy('shadow_pnl_per_hour_pct')">PnL/hr%</th>
         <th class="num" data-key="shadow_trades" onclick="sortBy('shadow_trades')">Trd</th>
         <th class="num" data-key="shadow_avg_trade_pct" onclick="sortBy('shadow_avg_trade_pct')">Avg%</th>
         <th class="num" data-key="shadow_win_rate_pct" onclick="sortBy('shadow_win_rate_pct')">Win%</th>
+        <th class="num" data-key="shadow_avg_catchup_pct" onclick="sortBy('shadow_avg_catchup_pct')">Catch%</th>
+        <th class="num" data-key="shadow_avg_lag_ms" onclick="sortBy('shadow_avg_lag_ms')">Lag ms</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -436,10 +439,13 @@ async fn screener_page() -> Html<&'static str> {
           <td class="num">${Number(r.avg_gt_p90_ms).toFixed(0)}</td>
           <td class="num">${Number(r.gate_natr_30m_pct).toFixed(4)}</td>
           <td>${r.shadow_position}</td>
+          <td class="num">${r.shadow_spikes_detected}</td>
           <td class="num" style="color:${Number(r.shadow_pnl_per_hour_pct)>=0?'#4ade80':'#f87171'}">${Number(r.shadow_pnl_per_hour_pct).toFixed(4)}</td>
           <td class="num">${r.shadow_trades}</td>
           <td class="num" style="color:${Number(r.shadow_avg_trade_pct)>=0?'#4ade80':'#f87171'}">${Number(r.shadow_avg_trade_pct).toFixed(4)}</td>
           <td class="num">${Number(r.shadow_win_rate_pct).toFixed(1)}</td>
+          <td class="num">${Number(r.shadow_avg_catchup_pct).toFixed(3)}</td>
+          <td class="num">${Number(r.shadow_avg_lag_ms).toFixed(0)}</td>
         </tr>
       `).join('');
     } catch (e) { document.getElementById('meta').textContent = 'error'; }
@@ -518,11 +524,31 @@ async fn screener_page() -> Html<&'static str> {
         const x0 = u.valToPos(Math.max(z.entry_s, xs.min), 'x', true);
         const x1 = u.valToPos(Math.min(z.exit_s, xs.max), 'x', true);
         if (x1 <= x0) continue;
-        ctx.fillStyle = z.dir === 'LONG' ? 'rgba(74,222,128,0.12)' : 'rgba(248,113,113,0.12)';
+        // Shaded zone
+        ctx.fillStyle = z.dir === 'LONG' ? 'rgba(74,222,128,0.10)' : 'rgba(248,113,113,0.10)';
         ctx.fillRect(x0, top, x1 - x0, bot - top);
-        ctx.strokeStyle = z.dir === 'LONG' ? 'rgba(74,222,128,0.5)' : 'rgba(248,113,113,0.5)';
-        ctx.lineWidth = 1;
+        // Entry vertical line
+        ctx.strokeStyle = z.dir === 'LONG' ? 'rgba(74,222,128,0.7)' : 'rgba(248,113,113,0.7)';
+        ctx.lineWidth = 1.5;
         ctx.beginPath(); ctx.moveTo(x0, top); ctx.lineTo(x0, bot); ctx.stroke();
+        // Entry dot
+        const yMid = top + (bot - top) * 0.5;
+        ctx.beginPath(); ctx.arc(x0, yMid, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = z.dir === 'LONG' ? '#4ade80' : '#f87171';
+        ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+        // Exit dot (only for completed trades)
+        if (!z.open) {
+          ctx.beginPath(); ctx.arc(x1, yMid, 5, 0, 2 * Math.PI);
+          ctx.fillStyle = (z.pnl >= 0) ? '#4ade80' : '#f87171';
+          ctx.fill();
+          ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+          // PnL label at exit
+          ctx.fillStyle = (z.pnl >= 0) ? '#4ade80' : '#f87171';
+          ctx.font = '10px system-ui';
+          ctx.textAlign = 'center';
+          ctx.fillText((z.pnl >= 0 ? '+' : '') + z.pnl.toFixed(3) + '%', x1, yMid - 10);
+        }
       }
     };
     const opts = {
@@ -580,10 +606,12 @@ async fn screener_page() -> Html<&'static str> {
           shadowZones = (c.trades || []).map(t => ({
             entry_s: t.entry_ts_ms / 1000,
             exit_s: t.exit_ts_ms / 1000,
-            dir: t.direction
+            dir: t.direction,
+            pnl: t.pnl_pct,
+            open: false
           }));
-          if (c.position !== 'FLAT' && c.entry_ts_ms) {
-            openZone = { entry_s: c.entry_ts_ms / 1000, dir: c.position.replace('LONG_GT','LONG').replace('SHORT_GT','SHORT') };
+          if (c.position !== 'FLAT' && c.position !== 'PENDING' && c.entry_ts_ms) {
+            openZone = { entry_s: c.entry_ts_ms / 1000, dir: c.position.replace('LONG_GT','LONG').replace('SHORT_GT','SHORT'), pnl: 0, open: true };
           } else {
             openZone = null;
           }
@@ -595,7 +623,7 @@ async fn screener_page() -> Html<&'static str> {
         if (d) {
           const el = document.getElementById('trades-info');
           const parts = [];
-          parts.push(`${d.position} | edge: short=${d.short_edge_bps.toFixed(1)} long=${d.long_edge_bps.toFixed(1)} bps`);
+          parts.push(`${d.position} | spikes: ${d.spikes_in_window} | threshold: ${d.spike_threshold_bps}bps | hold: ${d.max_hold_ms}ms | SL: ${d.stop_loss_bps}bps`);
           if (d.last_5_trades_pnl_pct.length > 0) {
             parts.push('last trades: ' + d.last_5_trades_pnl_pct.map(
               p => `<span class="${p>=0?'win':'loss'}">${p.toFixed(4)}%</span>`
