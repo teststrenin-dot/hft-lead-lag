@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 /// Minimum 24h USD volume for symbol filtering
 const MIN_VOLUME_USD: f64 = 1_000_000.0;  // 1 million USD
 const MAX_STRATEGY_SYMBOLS: usize = 8;
-const SUBSCRIBE_DELAY_MS: u64 = 250;
+const SUBSCRIBE_DELAY_MS: u64 = 15;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     info!("Common symbols: {}", common_symbols.len());
 
-    // Strategy runs on a bounded subset; WS snapshot covers full symbol universe.
+    // Strategy checks run on a bounded subset.
     let mut strategy_symbols: Vec<String> = common_symbols
         .iter()
         .take(MAX_STRATEGY_SYMBOLS)
@@ -71,10 +71,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         warn!("No common symbols found! Using fallback...");
         strategy_symbols.extend_from_slice(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     }
+    let screener_symbols: Vec<String> = if common_symbols.is_empty() {
+        strategy_symbols.clone()
+    } else {
+        common_symbols.clone()
+    };
 
     info!(
-        "Strategy symbols: {} | WS coverage Binance={} Gate={}",
+        "Strategy symbols: {} | Screener symbols: {} | WS coverage Binance={} Gate={}",
         strategy_symbols.len(),
+        screener_symbols.len(),
         binance_symbols.len(),
         gate_symbols.len()
     );
@@ -128,10 +134,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
-    // Subscribe to strategy symbols for live WS ticks.
+    // Subscribe to screener symbols for live WS ticks.
     let mut binance_subscribed = 0usize;
     let mut binance_subscribe_errors = 0usize;
-    for symbol in &strategy_symbols {
+    for symbol in &screener_symbols {
         match binance.subscribe_book_ticker(symbol).await {
             Ok(_) => binance_subscribed += 1,
             Err(e) => {
@@ -146,10 +152,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         binance_subscribed, binance_subscribe_errors
     );
 
-    // Subscribe Gate only to strategy symbols; full symbol universe is served via WS snapshot.
+    // Subscribe Gate to screener symbols as well.
     let mut gate_subscribed = 0usize;
     let mut gate_subscribe_errors = 0usize;
-    for symbol in &strategy_symbols {
+    let mut gate_subscribe_timeouts = 0usize;
+    for symbol in &screener_symbols {
         match tokio::time::timeout(
             tokio::time::Duration::from_millis(500),
             gate.subscribe_book_ticker(symbol),
@@ -162,15 +169,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 error!("Gate subscribe error {}: {}", symbol, e);
             }
             Err(_) => {
+                gate_subscribe_timeouts += 1;
                 warn!("Gate subscription timeout on {}; proceeding with available streams", symbol);
-                break;
+                continue;
             }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
     }
     info!(
-        "Gate subscription summary: ok={} err={}",
-        gate_subscribed, gate_subscribe_errors
+        "Gate subscription summary: ok={} err={} timeout={}",
+        gate_subscribed, gate_subscribe_errors, gate_subscribe_timeouts
     );
 
     // Initialize lead-lag strategy
