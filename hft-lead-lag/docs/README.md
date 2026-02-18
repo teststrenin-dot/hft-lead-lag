@@ -54,7 +54,8 @@ docs/
 | WS market broadcast API | ✅ Done | Sprint 1 (post) |
 | Web Screener (`/screener`, `/api/v1/screener`) | ✅ Done (MVP) | Sprint 1 (post) |
 | Screener live coverage (`common_symbols`) | ✅ Done | Sprint 1 (post) |
-| Lead-Lag P90/P50 + `entry_w_ms` runtime metrics | 🟡 In progress | TASK-002 |
+| Screener metrics (`entry_half_life_ms`, `avg_gt_p90_ms`, `gate_natr_30m_pct`) | ✅ Done | TASK-002 |
+| Lead-Lag P90/P50 runtime logic | 🟡 In progress | TASK-002 |
 | Centralized logs (`project/logs`) | ✅ Done | Sprint 1 (post) |
 | Order Management | ⬜ Todo | Sprint 2 |
 | Position Tracking | ⬜ Todo | Sprint 2 |
@@ -132,4 +133,4 @@ cargo test
 
 ---
 
-*Last updated: 2026-02-18 (screener coverage fix + task-002 progress)*
+*Last updated: 2026-02-18 (screener p90-time + Gate NATR metrics)*

@@ -1,14 +1,20 @@
 //! HTTP server for monitoring and control
 
 use axum::{Json, Router, extract::State, response::Html, routing::get};
+use dashmap::DashMap;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 use crate::api::screener::{ScreenerRow, ScreenerStore};
 use crate::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
+
+const NATR_PERIOD_30M: usize = 30;
+const NATR_CACHE_TTL_MS: i64 = 15 * 60 * 1000;
+const NATR_FETCH_LIMIT_PER_REQUEST: usize = 6;
+const NATR_FETCH_TIMEOUT_MS: u64 = 500;
 
 /// HTTP server configuration
 #[derive(Debug, Clone)]
@@ -63,6 +69,7 @@ impl HttpServer {
         let state = Arc::new(HttpState {
             min_volume_usd: self.min_volume_usd,
             screener: self.screener.clone(),
+            natr_cache: Arc::new(DashMap::new()),
         });
 
         let app = Router::new()
@@ -83,6 +90,13 @@ impl HttpServer {
 struct HttpState {
     min_volume_usd: f64,
     screener: ScreenerStore,
+    natr_cache: Arc<DashMap<String, CachedNatr>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedNatr {
+    value_pct: Option<f64>,
+    updated_at_ms: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,6 +183,7 @@ async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<ScreenerRespo
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.symbol.cmp(&b.symbol))
     });
+    enrich_gate_natr_30m(&mut rows, &state.natr_cache).await;
 
     Json(ScreenerResponse {
         generated_at_ms: now_ms(),
@@ -215,8 +230,56 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             },
             lag_ms: 0.0,
             entry_half_life_ms: 0.0,
+            avg_gt_p90_ms: 0.0,
+            gate_natr_30m_pct: 0.0,
         })
         .collect()
+}
+
+async fn enrich_gate_natr_30m(
+    rows: &mut [ScreenerRow],
+    cache: &Arc<DashMap<String, CachedNatr>>,
+) {
+    let now = now_ms();
+    let mut to_fetch: Vec<(usize, String)> = Vec::new();
+
+    for (idx, row) in rows.iter_mut().enumerate() {
+        if let Some(cached) = cache.get(&row.symbol) {
+            if now.saturating_sub(cached.updated_at_ms) <= NATR_CACHE_TTL_MS {
+                row.gate_natr_30m_pct = cached.value_pct.unwrap_or(0.0);
+                continue;
+            }
+        }
+
+        if to_fetch.len() < NATR_FETCH_LIMIT_PER_REQUEST {
+            to_fetch.push((idx, row.symbol.clone()));
+        }
+    }
+
+    for (idx, symbol) in to_fetch {
+        let client = GateRestClient::new();
+        let value = match tokio::time::timeout(
+            Duration::from_millis(NATR_FETCH_TIMEOUT_MS),
+            client.get_natr_30m(&symbol, NATR_PERIOD_30M),
+        )
+        .await
+        {
+            Ok(Ok(Some(v))) if v.is_finite() && v >= 0.0 => Some(v),
+            Ok(Ok(Some(_))) => Some(0.0),
+            Ok(Ok(None)) => None,
+            Ok(Err(_)) => None,
+            Err(_) => None,
+        };
+
+        cache.insert(
+            symbol.clone(),
+            CachedNatr {
+                value_pct: value,
+                updated_at_ms: now,
+            },
+        );
+        rows[idx].gate_natr_30m_pct = value.unwrap_or(0.0);
+    }
 }
 
 async fn screener_page() -> Html<&'static str> {
@@ -247,6 +310,8 @@ async fn screener_page() -> Html<&'static str> {
         <th>Leader</th>
         <th class="num">Lag (ms)</th>
         <th class="num">Entry half-life (ms)</th>
+        <th class="num">Avg >P90 time (ms)</th>
+        <th class="num">Gate NATR 30m (%)</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -265,6 +330,8 @@ async fn screener_page() -> Html<&'static str> {
             <td>${r.leader_exchange}</td>
             <td class="num">${Number(r.lag_ms).toFixed(2)}</td>
             <td class="num">${Number(r.entry_half_life_ms).toFixed(2)}</td>
+            <td class="num">${Number(r.avg_gt_p90_ms).toFixed(2)}</td>
+            <td class="num">${Number(r.gate_natr_30m_pct).toFixed(4)}</td>
           </tr>
         `).join('');
       } catch (e) {

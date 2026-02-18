@@ -266,12 +266,119 @@ impl GateRestClient {
             .filter(|t| t.quote_volume >= min_volume_usd)
             .collect())
     }
+
+    /// Get Gate NATR (%) on 30m candles for a symbol.
+    pub async fn get_natr_30m(&self, symbol: &str, period: usize) -> ExchangeResult<Option<f64>> {
+        if period == 0 || !symbol.ends_with("USDT") {
+            return Ok(None);
+        }
+
+        let base = symbol.trim_end_matches("USDT");
+        let primary_contract = format!("{}_USDT", base);
+        if let Some(v) = self
+            .get_natr_30m_by_contract(&primary_contract, period)
+            .await?
+        {
+            return Ok(Some(v));
+        }
+
+        let alt_contract = format!("{}_USDTT", base);
+        if alt_contract != primary_contract {
+            return self.get_natr_30m_by_contract(&alt_contract, period).await;
+        }
+        Ok(None)
+    }
+
+    async fn get_natr_30m_by_contract(
+        &self,
+        contract: &str,
+        period: usize,
+    ) -> ExchangeResult<Option<f64>> {
+        let limit = period.saturating_add(1).max(2);
+        let url = format!(
+            "https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={contract}&interval=30m&limit={limit}"
+        );
+        debug!("GET {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| crate::domain::ExchangeError::Internal(e.to_string()))?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let mut candles: Vec<GateCandle> = response
+            .json()
+            .await
+            .map_err(|e| crate::domain::ExchangeError::Internal(e.to_string()))?;
+        if candles.len() < 2 {
+            return Ok(None);
+        }
+
+        candles.sort_by_key(|c| c.t);
+        let sample_count = period.min(candles.len().saturating_sub(1));
+        if sample_count == 0 {
+            return Ok(None);
+        }
+
+        let start = candles.len().saturating_sub(sample_count);
+        let mut tr_sum = 0.0;
+        for i in start..candles.len() {
+            let candle = &candles[i];
+            let Some(high) = value_to_f64(&candle.h) else {
+                return Ok(None);
+            };
+            let Some(low) = value_to_f64(&candle.l) else {
+                return Ok(None);
+            };
+            let Some(close) = value_to_f64(&candle.c) else {
+                return Ok(None);
+            };
+            let prev_close = value_to_f64(&candles[i - 1].c).unwrap_or(close);
+
+            let tr = (high - low)
+                .max((high - prev_close).abs())
+                .max((low - prev_close).abs());
+            tr_sum += tr;
+        }
+
+        let atr = tr_sum / sample_count as f64;
+        let Some(last) = candles.last() else {
+            return Ok(None);
+        };
+        let Some(last_close) = value_to_f64(&last.c) else {
+            return Ok(None);
+        };
+        if last_close <= 0.0 {
+            return Ok(None);
+        }
+
+        Ok(Some((atr / last_close) * 100.0))
+    }
 }
 
 impl Default for GateRestClient {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GateCandle {
+    t: i64,
+    h: serde_json::Value,
+    l: serde_json::Value,
+    c: serde_json::Value,
+}
+
+fn value_to_f64(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_str()
+        .and_then(|s| s.parse::<f64>().ok())
+        .or_else(|| value.as_f64())
 }
 
 #[cfg(test)]

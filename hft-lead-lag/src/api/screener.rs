@@ -16,6 +16,8 @@ pub struct ScreenerRow {
     pub leader_exchange: String,
     pub lag_ms: f64,
     pub entry_half_life_ms: f64,
+    pub avg_gt_p90_ms: f64,
+    pub gate_natr_30m_pct: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +108,19 @@ impl ScreenerStore {
         } else {
             means.iter().sum::<f64>() / means.len() as f64
         };
+
+        let mut gt_p90_means = Vec::with_capacity(2);
+        if let Some(v) = state.binance_leads.average_above_p90_ms() {
+            gt_p90_means.push(v);
+        }
+        if let Some(v) = state.gate_leads.average_above_p90_ms() {
+            gt_p90_means.push(v);
+        }
+        state.avg_gt_p90_ms = if gt_p90_means.is_empty() {
+            0.0
+        } else {
+            gt_p90_means.iter().sum::<f64>() / gt_p90_means.len() as f64
+        };
     }
 
     pub fn rows_sorted(&self) -> Vec<ScreenerRow> {
@@ -118,6 +133,8 @@ impl ScreenerStore {
                 leader_exchange: item.value().leader_exchange.clone(),
                 lag_ms: item.value().lag_ms,
                 entry_half_life_ms: item.value().entry_half_life_ms,
+                avg_gt_p90_ms: item.value().avg_gt_p90_ms,
+                gate_natr_30m_pct: 0.0,
             })
             .collect();
 
@@ -151,6 +168,7 @@ struct SymbolState {
     leader_exchange: String,
     lag_ms: f64,
     entry_half_life_ms: f64,
+    avg_gt_p90_ms: f64,
     updated_at_ms: i64,
     binance_leads: CycleTracker,
     gate_leads: CycleTracker,
@@ -161,7 +179,9 @@ struct CycleTracker {
     divergence_bps: VecDeque<(i64, f64)>,
     convergence_bps: VecDeque<(i64, f64)>,
     half_life_samples_ms: VecDeque<(i64, f64)>,
+    above_p90_samples_ms: VecDeque<(i64, f64)>,
     open_entry_ts_ms: Option<i64>,
+    open_above_p90_ts_ms: Option<i64>,
 }
 
 impl CycleTracker {
@@ -176,6 +196,18 @@ impl CycleTracker {
         let Some(p50_convergence) = percentile(self.convergence_bps.iter().map(|(_, v)| *v), 50.0) else {
             return;
         };
+
+        if divergence_bps >= p90_divergence {
+            if self.open_above_p90_ts_ms.is_none() {
+                self.open_above_p90_ts_ms = Some(ts_ms);
+            }
+        } else if let Some(zone_entry_ts) = self.open_above_p90_ts_ms.take() {
+            if ts_ms >= zone_entry_ts {
+                let zone_duration_ms = (ts_ms - zone_entry_ts).max(0) as f64;
+                self.above_p90_samples_ms
+                    .push_back((ts_ms, zone_duration_ms));
+            }
+        }
 
         if self.open_entry_ts_ms.is_none() && divergence_bps >= p90_divergence {
             self.open_entry_ts_ms = Some(ts_ms);
@@ -203,6 +235,18 @@ impl CycleTracker {
         Some(sum / self.half_life_samples_ms.len() as f64)
     }
 
+    fn average_above_p90_ms(&self) -> Option<f64> {
+        if self.above_p90_samples_ms.is_empty() {
+            return None;
+        }
+        let sum = self
+            .above_p90_samples_ms
+            .iter()
+            .map(|(_, v)| *v)
+            .sum::<f64>();
+        Some(sum / self.above_p90_samples_ms.len() as f64)
+    }
+
     fn cleanup(&mut self, ts_ms: i64, window_ms: i64) {
         let cutoff = ts_ms - window_ms;
         while let Some((ts, _)) = self.divergence_bps.front() {
@@ -222,6 +266,12 @@ impl CycleTracker {
                 break;
             }
             let _ = self.half_life_samples_ms.pop_front();
+        }
+        while let Some((ts, _)) = self.above_p90_samples_ms.front() {
+            if *ts >= cutoff {
+                break;
+            }
+            let _ = self.above_p90_samples_ms.pop_front();
         }
     }
 }

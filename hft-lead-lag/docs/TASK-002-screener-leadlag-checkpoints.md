@@ -23,7 +23,8 @@
   - `Кто лид` (`leader_exchange`: `binance` / `gate`)
   - `Время отставания, ms` (`lag_ms`)
   - `Half-life entry window, ms` (`entry_half_life_ms`)
-  - `Entry w, ms` (`entry_w_ms`)
+  - `Avg >P90 time, ms` (`avg_gt_p90_ms`, alias: `entry_w_ms`)
+  - `Gate NATR 30m, %` (`gate_natr_30m_pct`)
 - Сортировка по `lag_ms` **по убыванию** (от наибольшей к меньшей) по умолчанию.
 - В выборке только инструменты с `24h quote_volume >= 1_000_000 USD`.
 - Определение `entry_half_life_ms`: среднее время от события расхождения `P90` (entry trigger) до события схождения `P50` (exit trigger) в скользящем окне `p=10m`.
@@ -34,12 +35,13 @@
 - ✅ Реализованы `/screener` и `/api/v1/screener`.
 - ✅ Исправлено ограничение live-потока «только 8 монет»: скринер подписывается на весь `common_symbols`, Binance подписка батчами.
 - ✅ В runtime-проверке после фикса: `total_rows=536`, `non_zero_lag_rows=104`.
-- ⬜ Runtime-вычисление `entry_w_ms` в API/UI еще не завершено.
+- ✅ Runtime-метрика `avg_gt_p90_ms` (`entry_w_ms`) добавлена в API/UI.
+- ✅ Runtime-метрика `gate_natr_30m_pct` (Gate futures candles, period=30, interval=30m) добавлена в API/UI.
 
 ### Тестируемые checkpoint’ы (Задача #1)
 
 1. **SCREENER-CP-01 / Структура данных**  
-   Каждая строка содержит `symbol`, `leader_exchange`, `lag_ms`, `entry_half_life_ms`, `entry_w_ms`.
+   Каждая строка содержит `symbol`, `leader_exchange`, `lag_ms`, `entry_half_life_ms`, `avg_gt_p90_ms`, `gate_natr_30m_pct`.
 
 2. **SCREENER-CP-02 / Volume filter**  
    В выдаче нет символов с `quote_volume < 1_000_000`.
@@ -57,7 +59,10 @@
    `entry_half_life_ms` считается как `AVG(t_p50_convergence - t_p90_divergence)` по валидным циклам в окне `p=10m`, значение неотрицательное.
 
 7. **SCREENER-CP-07 / Entry-w корректность**  
-   `entry_w_ms` считается как `AVG(duration(spread_bid_ask >= P90))` по завершенным интервалам в окне `p=10m`, значение неотрицательное.
+   `avg_gt_p90_ms` (`entry_w_ms`) считается как `AVG(duration(spread_bid_ask >= P90))` по завершенным интервалам в окне `p=10m`, значение неотрицательное.
+
+8. **SCREENER-CP-08 / NATR корректность**  
+   `gate_natr_30m_pct` считается по Gate futures candles (`interval=30m`, `period=30`) как `ATR(30)/Close*100`, значение неотрицательное.
 
 ---
 
