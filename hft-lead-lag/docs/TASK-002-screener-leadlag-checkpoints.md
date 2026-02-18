@@ -1,129 +1,95 @@
-# Task: Web Screener + Lead-Lag Logic (Test Checkpoints)
+# TASK-002: Web Screener + Lead-Lag Checkpoints
 
-**Статус**: 🟡 In progress (2026-02-18: Screener MVP + live coverage fix)  
-**Приоритет**: P0  
-**Порядок выполнения**:
-1. **Задача #1** — Web Screener
-2. **Задача #2** — Lead-Lag logic
+**Приоритет:** P0  
+**Статус:** 🟡 Partially complete
+
+- ✅ Web Screener (API + UI + runtime метрики) — реализован.
+- 🟡 Полная торговая логика на percentile-триггерах (P90/P50 execution flow) — в backlog.
 
 ---
 
 ## Цель
 
-Сделать простой веб-скринер и формализовать lead-lag логику так, чтобы поведение можно было проверить через четкие тестовые checkpoint’ы.
+Сделать проверяемый screener для lead-lag наблюдения и зафиксировать checkpoint-правила для runtime валидации.
 
 ---
 
-## Задача #1: Web Screener (самый простой UI)
+## 1) Web Screener (реализовано)
 
-### Что должно быть в скринере
+### Endpoint'ы
+- `GET /api/v1/screener` — JSON со строками метрик.
+- `GET /screener` — веб-таблица поверх API.
 
-- Таблица метрик с колонками:
-  - `Монета` (`symbol`)
-  - `Кто лид` (`leader_exchange`: `binance` / `gate`)
-  - `Время отставания, ms` (`lag_ms`)
-  - `WS drift Binance, ms` (`ws_drift_binance_ms` = `local_receive_ts_ms - exchange_server_ts_ms(binance)`)
-  - `WS drift Gate, ms` (`ws_drift_gate_ms` = `local_receive_ts_ms - exchange_server_ts_ms(gate)`)
-  - `Half-life entry window, ms` (`entry_half_life_ms`)
-  - `Avg >P90 time, ms` (`avg_gt_p90_ms`, alias: `entry_w_ms`)
-  - `Gate NATR 30m, %` (`gate_natr_30m_pct`)
-- Сортировка по `lag_ms` **по убыванию** (от наибольшей к меньшей) по умолчанию.
-- В выборке только инструменты с `24h quote_volume >= 10_000_000 USD`.
-- В таблицу попадают только `common symbols` (символ есть на Binance и Gate после volume-фильтра).
-- `lag_ms` считается по биржевым timestamp’ам (exchange time), не по локальному времени процесса.
-- Определение `entry_half_life_ms`: среднее время от события расхождения `P90` (entry trigger) до события схождения `P50` (exit trigger) в скользящем окне `p=10m`.
-- Определение `entry_w_ms`: среднее время нахождения в зоне `spread_bid_ask >= P90` в окне `p=10m` (длительность окна, где лимитный вход потенциально может быть исполнен).
+### Текущие колонки UI
+- `Coin` (`symbol`)
+- `Leader` (`leader_exchange`)
+- `Lag (ms)` (`lag_ms`)
+- `WS drift ingress Binance (ms)` (`ws_drift_ingress_binance_ms`)
+- `WS drift ingress Gate (ms)` (`ws_drift_ingress_gate_ms`)
+- `Entry half-life (ms)` (`entry_half_life_ms`)
+- `Avg >P90 time (ms)` (`avg_gt_p90_ms`)
+- `Gate NATR 30m (%)` (`gate_natr_30m_pct`)
 
-### Фактический статус на 2026-02-18
+### Источники и фильтры
+- Только `common symbols` (после пересечения Binance/Gate).
+- Volume фильтр: `quote_volume >= 10_000_000 USD`.
+- Период для half-life / avg>p90: скользящее окно `10m`.
 
-- ✅ Реализованы `/screener` и `/api/v1/screener`.
-- ✅ Исправлено ограничение live-потока «только 8 монет»: скринер подписывается на весь `common_symbols`, Binance подписка батчами.
-- ✅ В runtime-проверке после фикса: `total_rows=536`, `non_zero_lag_rows=104`.
-- ✅ Runtime-метрика `avg_gt_p90_ms` (`entry_w_ms`) добавлена в API/UI.
-- ✅ Runtime-метрика `gate_natr_30m_pct` (Gate futures candles, period=30, interval=30m) добавлена в API/UI.
+### Актуальные runtime детали
+- `local_ts_ns` для drift фиксируется на ingress WS-reader.
+- Startup backlog очищается перед входом в основной loop.
+- `/api/v1/screener` использует REST fallback только когда live rows отсутствуют.
+- UI polling `/screener`: 1 запрос в секунду.
 
-### Тестируемые checkpoint’ы (Задача #1)
+---
 
-1. **SCREENER-CP-01 / Структура данных**  
-   Каждая строка содержит `symbol`, `leader_exchange`, `lag_ms`, `ws_drift_binance_ms`, `ws_drift_gate_ms`, `entry_half_life_ms`, `avg_gt_p90_ms`, `gate_natr_30m_pct`.
+## 2) Checkpoints (актуальная версия)
+
+1. **SCREENER-CP-01 / Поля строки**  
+   В выдаче присутствуют поля:
+   `symbol`, `leader_exchange`, `lag_ms`,
+   `ws_drift_ingress_binance_ms`, `ws_drift_ingress_gate_ms`,
+   `entry_half_life_ms`, `avg_gt_p90_ms`, `gate_natr_30m_pct`.
 
 2. **SCREENER-CP-02 / Volume filter**  
-   В выдаче нет символов с `quote_volume < 10_000_000`.
+   В runtime universe нет символов с `quote_volume < 10_000_000`.
 
-3. **SCREENER-CP-03 / Сортировка**  
-   `lag_ms[i] >= lag_ms[i+1]` для всей таблицы.
+3. **SCREENER-CP-03 / Стабильная выдача для UI**  
+   API отдает детерминированно отсортированные строки по `symbol` (ASC).
 
 4. **SCREENER-CP-04 / Валидность lag**  
    `lag_ms >= 0`, `leader_exchange ∈ {binance, gate}`.
 
-5. **SCREENER-CP-05 / Время отклика**  
-   Получение данных для UI в пределах рабочего бюджета (операционный целевой SLA: до ~5s в checkpoint-режиме).
+5. **SCREENER-CP-05 / Drift semantics**  
+   `ws_drift_ingress_*` рассчитывается как `ingress_receive_ts_ms - exchange_ts_ms`.
 
-6. **SCREENER-CP-06 / Half-life корректность**  
-   `entry_half_life_ms` считается как `AVG(t_p50_convergence - t_p90_divergence)` по валидным циклам в окне `p=10m`, значение неотрицательное.
+6. **SCREENER-CP-06 / Half-life semantics**  
+   `entry_half_life_ms` = среднее по завершенным циклам `P90 -> P50` в окне 10 минут.
 
-7. **SCREENER-CP-07 / Entry-w корректность**  
-   `avg_gt_p90_ms` (`entry_w_ms`) считается как `AVG(duration(spread_bid_ask >= P90))` по завершенным интервалам в окне `p=10m`, значение неотрицательное.
+7. **SCREENER-CP-07 / P90-zone duration semantics**  
+   `avg_gt_p90_ms` = средняя длительность нахождения в зоне `>= P90` в окне 10 минут.
 
-8. **SCREENER-CP-08 / NATR корректность**  
-   `gate_natr_30m_pct` считается по Gate futures candles (`interval=30m`, `period=30`) как `ATR(30)/Close*100`, значение неотрицательное.
-
-9. **SCREENER-CP-09 / WS drift корректность**  
-   `ws_drift_binance_ms` и `ws_drift_gate_ms` считаются отдельно как `local_receive_ts_ms - exchange_server_ts_ms` по каждой бирже (если timestamp валиден), метрики выводятся в API/UI.
+8. **SCREENER-CP-08 / Gate NATR semantics**  
+   `gate_natr_30m_pct` вычисляется из Gate candles (`interval=30m`, `period=30`) и неотрицателен.
 
 ---
 
-## Задача #2: Lead-Lag Logic (правила входа/выхода)
+## 3) Интерпретация метрик
 
-### Параметры
-
-- Период `p` = **10 скользящих минут**.
-- Percentile-уровни в окне `p`:
-  - `Entry threshold` = `P90`
-  - `Exit threshold` = `P50`
-
-### Определения спредов
-
-Для пары лидер/лаггер:
-
-- `spread_bid_ask = bid(leader) - ask(lagger)`  
-- `spread_ask_bid = ask(leader) - bid(lagger)`
-
-### Правила
-
-1. **Вход (на раскоре bid/ask P90)**  
-   Вход в позицию, когда `spread_bid_ask >= P90(spread_bid_ask, window=10m)`.
-
-2. **Выход (на ask/bid P50)**  
-   Выход из позиции, когда `spread_ask_bid <= P50(spread_ask_bid, window=10m)`.
-
-3. **Обратное направление — аналогично**  
-   Для реверса (когда лидером становится вторая биржа) применяются те же правила симметрично.
-
-### Тестируемые checkpoint’ы (Задача #2)
-
-1. **LEADLAG-CP-01 / Rolling window**  
-   Percentile считается строго по последним 10 минутам.
-
-2. **LEADLAG-CP-02 / Entry trigger**  
-   Сигнал входа срабатывает только при достижении/превышении `P90` по `spread_bid_ask`.
-
-3. **LEADLAG-CP-03 / Exit trigger**  
-   Сигнал выхода срабатывает при возврате к `P50` по `spread_ask_bid`.
-
-4. **LEADLAG-CP-04 / Reverse symmetry**  
-   Для обратного направления правила идентичны.
-
-5. **LEADLAG-CP-05 / Проверяемость решения**  
-   Для каждого сигнала доступны: `symbol`, `leader`, `lag_ms`, `entry_percentile`, `exit_percentile`, `window_start/end`.
+- Высокий `lag_ms` при низком ingress drift не обязательно означает сетевую проблему процесса.
+- Обычно это отражает разный темп обновлений котировок на биржах и момент "последнего свежего тика" в каждой стороне.
 
 ---
 
-## Подход разработки
+## 4) Что осталось по TASK-002
 
-- Для реализации используем **superpowers** (планирование/дебаг/верификация) и **сабагентов** (исследование/ревью/проверка гипотез).
-- Разработка ведется последовательно по задачам: сначала Screener, затем Lead-Lag logic.
+### Не завершено
+- Полный execution-контур, где entry/exit решения стратегии строятся напрямую от rolling percentile триггеров (`P90/P50`) как торговый state machine.
+
+### Текущее состояние стратегии
+- Базовые lead-lag сигналы присутствуют,
+- но execution-пайплайн percentile-based версии требует отдельной реализации.
 
 ---
 
-*Created: 2026-02-18*
+*Updated: 2026-02-18*

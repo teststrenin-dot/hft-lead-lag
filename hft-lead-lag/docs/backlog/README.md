@@ -138,6 +138,7 @@
 | INFRA-002 | Config management | Загрузка из TOML + env | ✅ Done |
 | INFRA-003 | Error handling | Типизированные ошибки | ✅ Done |
 | INFRA-009 | Centralized log sink | Runtime/test logs в `project/logs` + summary | ✅ Done |
+| INFRA-010 | WS ingress timestamp hardening | Receive-time stamping + startup backlog drain + screener load optimization | ✅ Done |
 
 ### P1 — Важно для следующего спринта
 
@@ -162,7 +163,7 @@
 
 | ID | Задача | Описание | Статус |
 |----|--------|----------|--------|
-| TEST-001 | Unit tests | Покрытие > 80% | ✅ Done (14 tests) |
+| TEST-001 | Unit tests | Базовый unit-набор для ключевых модулей | ✅ Done (14 tests) |
 | TEST-002 | Integration tests | Тесты с реальными WS | ⬜ Todo |
 | TEST-007 | Checkpoint validation | REST/WS symbols >= $1M + price dynamics | ✅ Done |
 
@@ -197,10 +198,10 @@
 ## Метрики бэклога
 
 - **Total items**: 50+
-- **P0 items**: 18
-- **Done**: 16
+- **P0 items**: 18+
+- **Done**: регулярно обновляется по sprint/task документам
 - **Ready for sprint**: 20+
 
 ---
 
-*Last updated: 2026-02-18 (checkpoint + logging)*
+*Last updated: 2026-02-18 (runtime drift hardening + docs refresh)*

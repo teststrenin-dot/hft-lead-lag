@@ -1,211 +1,80 @@
-# Task: HFT Lead-Lag Exchange Connectors
+# TASK-001: Exchange Connectors (Binance + Gate)
 
-**Статус**: ✅ Completed (2026-02-18)
-
-**Спринт**: Sprint 1
-
-**Исполнители**: Development Team
+**Статус:** ✅ Completed  
+**Спринт:** Sprint 1 + post-sprint hardening
 
 ---
 
-## Краткое описание
+## Цель
 
-Разработка WebSocket-first коннекторов для Binance Futures и Gate.io Futures для получения market data (book ticker, trades) с минимальной задержкой.
-
----
-
-## Требования
-
-### Функциональные
-- [x] Подключение к Binance Futures WebSocket
-- [x] Подключение к Gate.io Futures WebSocket  
-- [x] Подписка на book ticker stream
-- [x] Подписка на trade stream
-- [x] Парсинг сообщений (zero-copy)
-- [x] Аутентификация Gate.io (futures.login)
-
-### Нефункциональные
-- [x] Zero-allocation hot path
-- [x] Symbol interning
-- [x] Fixed-point arithmetic (i64 ticks)
-- [x] Fast build (< 30s debug)
-- [x] Test coverage > 60%
+Построить WebSocket-first коннекторы для Binance Futures и Gate Futures:
+- получение `book_ticker`/`trades`,
+- единая модель данных,
+- минимизация задержки и аллокаций.
 
 ---
 
-## Спецификация
+## Реализовано
 
-### Binance Futures
+### 1) Подключение и подписки
+- Binance: `wss://fstream.binance.com/ws`
+- Gate: `wss://fx-ws.gateio.ws/v4/ws/usdt`
+- Подписки на `book_ticker` и `trades`.
 
-**Endpoint**: `wss://fstream.binance.com/ws`
+### 2) Нормализация данных
+- fixed-point представление цен/объемов (`i64` ticks, 1e-8),
+- нормализация символов (`BTC_USDT -> BTCUSDT`),
+- общий `BookTicker`/`Trade` для стратегии и API слоя.
 
-**Подписки**:
-```json
-{
-  "method": "SUBSCRIBE",
-  "params": ["btcusdt@bookTicker", "ethusdt@bookTicker"],
-  "id": 1234567890
-}
-```
+### 3) Timestamp pipeline (важно)
+После post-sprint hardening:
+- timestamp ingress фиксируется в reader-задаче сразу при получении WS кадра,
+- по каналу передается `(payload, receive_ts_ns)`,
+- `BookTicker::new`/`Trade::new` получают `local_ts_ns` извне,
+- устранен искусственный drift, который возникал при timestamp в момент позднего парсинга.
 
-**Формат сообщения**:
-```json
-{
-  "e": "bookTicker",
-  "u": 400900217,
-  "s": "BTCUSDT",
-  "b": "50000.00",
-  "B": "1.5",
-  "a": "50000.50",
-  "A": "2.0"
-}
-```
-
-### Gate.io Futures
-
-**Endpoint**: `wss://fx-ws.gateio.ws/v4/ws/usdt`
-
-**Аутентификация**:
-```json
-{
-  "time": 1234567890,
-  "channel": "futures.login",
-  "event": "api",
-  "sign_method": "HMAC_SHA512",
-  "key": "your_api_key",
-  "sign": "hmac_signature"
-}
-```
-
-**Подписки**:
-```json
-{
-  "time": 1234567890,
-  "channel": "futures.book_ticker",
-  "event": "subscribe",
-  "data": ["BTC_USD", "ETH_USD"]
-}
-```
+### 4) Startup hardening
+- перед основным event loop выполняется drain накопленных startup сообщений,
+- это убирает искажение первых метрик после долгой фазы подписок.
 
 ---
 
-## Реализация
+## Файлы реализации
 
-### Файлы
-- `src/infrastructure/exchanges/binance/mod.rs` — Binance connector
-- `src/infrastructure/exchanges/gate/mod.rs` — Gate connector
-- `src/infrastructure/exchanges/common.rs` — Общие утилиты (HMAC, парсинг)
-- `src/domain/exchange.rs` — Traits (MarketDataStream, OrderExecutor)
-- `src/api/http_server.rs` — runtime REST endpoint'ы
-- `src/api/ws_server.rs` — runtime WS broadcast endpoint
-- `src/infrastructure/logging.rs` — централизованная инициализация логирования
-
-### Ключевые решения
-
-#### 1. Fixed-Point Arithmetic
-```rust
-pub type PriceTicks = i64;  // 1e-8 precision
-
-pub fn ticks_to_decimal(ticks: PriceTicks) -> f64 {
-    ticks as f64 / 100_000_000.0
-}
-
-pub fn decimal_to_ticks(decimal: f64) -> PriceTicks {
-    (decimal * 100_000_000.0) as i64
-}
-```
-
-#### 2. Symbol Interning
-```rust
-pub struct SymbolCache {
-    cache: Arc<DashMap<String, Arc<str>>>,
-}
-
-// Одна аллокация на символ, дальше Arc clones
-let symbol = cache.intern("BTCUSDT");
-```
-
-#### 3. Zero-Copy JSON Parsing
-```rust
-pub fn extract_json_string_field(json: &[u8], field: &str) -> Option<Bytes> {
-    // Парсинг без аллокаций
-    // Возвращает Bytes для zero-copy обработки
-}
-```
-
----
-
-## Тесты
-
-```bash
-$ cargo test
-
-running 14 tests
-test infrastructure::exchanges::binance::tests::test_build_book_ticker_subscription ... ok
-test infrastructure::exchanges::binance::tests::test_parse_book_ticker ... ok
-test infrastructure::exchanges::gate::tests::test_build_auth_payload ... ok
-test infrastructure::exchanges::common::tests::test_hmac_sha256 ... ok
-test infrastructure::exchanges::common::tests::test_extract_json_string ... ok
-test infrastructure::exchanges::common::tests::test_extract_json_i64 ... ok
-...
-test result: ok. 14 passed; 0 failed
-```
-
-### Checkpoint Validation (REST + WS + Logs)
-- `GET /api/v1/symbols` возвращает symbols с `quote_volume >= 1_000_000` и полем `price_change_24h_pct`
-- `WS /ws` отдает market data события в реальном времени (`exchange`, `symbol`, `bid`, `ask`)
-- Тестовые и runtime логи идут в `project/logs/`:
-  - `logs/runtime.log`
-  - `logs/test_connection_*.log`
-  - `logs/test_final_*.log`
-  - `logs/summary.log`
-
----
-
-## Метрики
-
-| Метрика | Значение |
-|---------|----------|
-| LOC | ~1300 |
-| Модули | 20+ |
-| Тесты | 14 passing |
-| Build time (debug) | ~15s |
-| Test coverage | ~60% |
-
----
-
-## Зависимости
-
-### Крейты
-- `tokio` — async runtime
-- `tokio-tungstenite` — WebSocket
-- `hmac` + `sha2` — криптография
-- `bytes` — zero-copy buffers
-- `serde_json` — JSON
-- `fast-float` — быстрый парсинг чисел
-
-### Внешние
-- Binance Futures API
-- Gate.io Futures API
-
----
-
-## Ссылки
-
-### Документация
-- [Binance Futures API](https://binance-docs.github.io/apidocs/futures/en/)
-- [Gate.io Futures WebSocket](https://www.gate.io/docs/developers/futures/ws/en/)
-
-### Внутренние
-- [docs/manifest/MANIFESTO.md](../manifest/MANIFESTO.md) — Архитектурные принципы
-- [docs/backlog/README.md](../backlog/README.md) — Бэклог
-- [docs/sprints/sprint-001-connectors.md](../sprints/sprint-001-connectors.md) — Sprint 1
-
-### Код
 - `src/infrastructure/exchanges/binance/mod.rs`
 - `src/infrastructure/exchanges/gate/mod.rs`
-- `src/domain/exchange.rs`
+- `src/infrastructure/exchanges/common.rs`
+- `src/domain/messages.rs`
+- `src/main.rs` (startup drain)
 
 ---
 
-*Task completed: 2026-02-18 (updated with runtime checkpoint delivery)*
+## Runtime surface
+
+- HTTP: `GET /health`, `GET /api/v1/symbols`, `GET /api/v1/screener`, `GET /screener`
+- WS: `ws://127.0.0.1:8181/ws`
+
+Volume filter в symbols/screener runtime: `10_000_000 USD`.
+
+---
+
+## Проверка
+
+```bash
+cargo build
+cargo test
+```
+
+На текущем состоянии: тесты проходят (`14 passed` + doc-tests).
+
+---
+
+## Ограничения (не входило в TASK-001)
+
+- полноценная order execution логика,
+- продакшен reconnect/observability стек,
+- расширенная интеграционная нагрузочная валидация.
+
+---
+
+*Updated: 2026-02-18*

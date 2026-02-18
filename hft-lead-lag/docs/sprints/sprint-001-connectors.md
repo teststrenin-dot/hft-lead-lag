@@ -1,6 +1,7 @@
 # Sprint 1: Exchange Connectors MVP
 
-**Даты**: 2026-02-18 — 2026-02-25 (1 неделя)
+**Даты**: 2026-02-18 — 2026-02-25 (1 неделя)  
+**Post-sprint hardening**: 2026-02-18 (runtime drift fixes)
 
 **Цель**: Базовая connectivity для Binance и Gate — получение market data через WebSocket.
 
@@ -36,6 +37,7 @@
 | INFRA-001 | Logging | Structured logging с tracing | src/lib.rs |
 | INFRA-002 | Config management | Загрузка из TOML + env | src/config/mod.rs |
 | INFRA-003 | Error handling | Типизированные ошибки | src/domain/exchange.rs |
+| INFRA-010 | Ingress timestamp hardening | receive-time stamping + startup drain + screener load-safe fallback | src/infrastructure/exchanges/*, src/main.rs, src/api/http_server.rs |
 | TEST-001 | Unit tests | Покрытие > 80% | cargo test (14 passing) |
 
 ---
@@ -116,6 +118,7 @@ cargo run
 - Поля динамики цены: ✅ `price_change_24h_pct` присутствует
 - `ws://127.0.0.1:8181/ws`: ✅ поток market data (sample: `binance HYPEUSDT bid/ask`)
 - `test_connection.sh`: ✅ summary в `logs/summary.log`
+- Ingress drift probe: ✅ `ws_drift_ingress_*` стабилизирован после hardening
 
 ---
 
@@ -131,4 +134,4 @@ cargo run
 
 ---
 
-*Sprint completed: 2026-02-18 (updated with checkpoint hardening)*
+*Sprint completed: 2026-02-18 (updated with runtime drift hardening)*

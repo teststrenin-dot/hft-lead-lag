@@ -166,17 +166,13 @@ async fn get_symbols(
 
 async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<ScreenerResponse> {
     let live_rows = state.screener.rows_sorted();
-    let mut by_symbol: HashMap<String, ScreenerRow> = fallback_screener_rows(state.min_volume_usd)
-        .await
-        .into_iter()
-        .map(|row| (row.symbol.clone(), row))
-        .collect();
-
-    for row in live_rows {
-        by_symbol.insert(row.symbol.clone(), row);
-    }
-
-    let mut rows: Vec<ScreenerRow> = by_symbol.into_values().collect();
+    // Fallback REST snapshot is only needed when live WS data is not available yet.
+    // Calling it on every screener poll adds avoidable load and can delay WS readers.
+    let mut rows: Vec<ScreenerRow> = if live_rows.is_empty() {
+        fallback_screener_rows(state.min_volume_usd).await
+    } else {
+        live_rows
+    };
     rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
     enrich_gate_natr_30m(&mut rows, &state.natr_cache).await;
 
@@ -349,7 +345,7 @@ async fn screener_page() -> Html<&'static str> {
       }
     }
     render();
-    setInterval(render, 500);
+    setInterval(render, 1000);
   </script>
 </body>
 </html>"#,

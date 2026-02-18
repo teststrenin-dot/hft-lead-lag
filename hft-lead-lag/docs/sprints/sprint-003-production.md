@@ -114,7 +114,8 @@ pub struct HealthStatus {
 
 ### Start
 ```bash
-./hft-lead-lag --config config.toml
+cd /root/turbo/hft-lead-lag
+cargo run --quiet
 ```
 
 ### Stop
@@ -131,25 +132,30 @@ kill -KILL <pid>
 **Проблема**: Нет connection к Binance
 ```bash
 # Проверить логи
-journalctl -u hft-lead-lag -f
+tail -f logs/runtime.log
 
 # Проверить network
 curl https://fapi.binance.com
 
 # Перезапустить
-systemctl restart hft-lead-lag
+# остановить текущий PID и запустить снова
+ps -eo pid,args | awk '$2 ~ /target\\/debug\\/hft-lead-lag$/ {print $1}'
 ```
 
 **Проблема**: Высокий spread
 ```bash
-# Проверить метрики
-curl http://localhost:9090/metrics | grep spread
+# Проверить screener API
+curl http://127.0.0.1:5000/api/v1/screener
 
-# Проверить latency
+# Проверить network
 ping fapi.binance.com
 ping fx-ws.gateio.ws
 ```
 
+**Проблема**: Высокий lag при низком ingress drift  
+Это часто рыночная асинхронность между биржами, а не локальная сетка/CPU.  
+Смотрите одновременно `lag_ms` и `ws_drift_ingress_*`.
+
 ---
 
-*Sprint planned: 2026-02-18*
+*Sprint planned: 2026-02-18 (runbook refreshed: 2026-02-18)*
