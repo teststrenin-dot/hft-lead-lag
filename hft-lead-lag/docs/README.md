@@ -13,6 +13,8 @@
 | Runtime UI (`/screener`) | ✅ Done |
 | Screener ingress drift метрики | ✅ Done |
 | Startup timestamp drift hardening | ✅ Done |
+| Shadow Trader (paper trading) | ✅ Done |
+| Real-time chart (`/chart`) | ✅ Done |
 | Order management | ⬜ Planned |
 | Production hardening (reconnect/metrics/alerts) | ⬜ Planned |
 
@@ -86,13 +88,50 @@ curl http://127.0.0.1:5000/api/v1/screener
 - `entry_half_life_ms`
 - `avg_gt_p90_ms`
 - `gate_natr_30m_pct`
+- Shadow trader fields: `shadow_position`, `shadow_pnl_per_hour_pct`, `shadow_trades`, `shadow_avg_trade_pct`, `shadow_win_rate_pct`
 
 ### `GET /screener`
 Веб-таблица поверх `/api/v1/screener` (polling 1 раз в секунду).
 
+### `GET /chart`
+Real-time uPlot график для shadow trader:
+- Premium (bps) линия — отклонение Gate от Binance
+- P90/P10 bands — зоны входа (short/long)
+- P50 линия — зона выхода
+- Маркеры сделок (entry gold, exit purple)
+- Selector для выбора монеты, auto-refresh 1 раз/сек
+
+### `GET /api/v1/chart/:symbol`
+JSON данные для графика: downsampled premium timeseries (~600 точек), пороги, список сделок.
+
+### `GET /api/v1/shadow/:symbol`
+Debug данные shadow trader: premium samples, cached thresholds, edge, trades, position.
+
 ---
 
-## 5) Важные определения метрик
+## 5a) Shadow Trader
+
+Paper trading модуль для валидации стратегии до реальных ордеров.
+
+### Модель
+- **Сигнал**: `premium_bps = (gate.mid − binance.mid) / binance.mid × 10000`
+- **Вход**: premium пересекает замороженный P90 → SHORT Gate, P10 → LONG Gate
+- **Выход**: premium возвращается к P50 (mean reversion)
+- **Execution**: Gate bid/ask + L1 market impact, 10ms simulated delay
+- **Fees**: Gate taker 0.05% × 2 = 10 bps round-trip
+- **MIN_EDGE_BPS = 10**: вход только если |P90−P50| ≥ 10 bps (покрывает fees)
+
+### Параметры
+| Параметр | Значение | Описание |
+|---|---|---|
+| `WARMUP_MS` | 120000 | 2 мин прогрев перед торговлей |
+| `COOLDOWN_MS` | 5000 | 5 сек пауза между сделками |
+| `THRESHOLD_INTERVAL_MS` | 60000 | Пересчёт P90/P10/P50 раз в минуту |
+| `QUOTE_FRESHNESS_MS` | 1000 | Макс. возраст котировки для расчёта premium |
+| `EXECUTION_DELAY_MS` | 10 | Симулированная задержка order-to-fill |
+| `MIN_EDGE_BPS` | 10.0 | Минимальный edge для входа (= 2 × fee) |
+
+---
 
 ### `lag_ms`
 Абсолютная разница между exchange timestamps Binance и Gate для текущих котировок.
@@ -140,10 +179,12 @@ cargo test
 
 ## 8) Что обновлено в текущей версии документации
 
+- добавлен Shadow Trader: paper trading с gate-only execution,
+- добавлен real-time chart `/chart` на uPlot с premium/thresholds/trade markers,
+- добавлены API endpoints: `/api/v1/chart/:symbol`, `/api/v1/shadow/:symbol`, `/api/v1/chart-symbols`,
+- screener таблица расширена shadow-метриками (position, pnl/hr, trades, avg trade, win rate),
 - отражена фиксация `local_ts_ns` на ingress (WS receive time),
 - отражен startup-drain накопленных сообщений,
-- отражено поведение `/api/v1/screener` (fallback только при отсутствии live rows),
-- отражен polling `/screener` раз в 1 секунду,
 - удалены чувствительные данные из документации.
 
 ---
