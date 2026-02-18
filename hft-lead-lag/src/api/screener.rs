@@ -411,7 +411,7 @@ pub struct ShadowStats {
 #[derive(Debug, Clone, Serialize)]
 pub struct ShadowDebug {
     pub premium_samples: usize,
-    pub current_premium_bps: f64,
+    pub last_premium_bps: f64,
     pub cached_p90: Option<f64>,
     pub cached_p10: Option<f64>,
     pub cached_p50: Option<f64>,
@@ -419,6 +419,7 @@ pub struct ShadowDebug {
     pub cooldown_remaining_ms: i64,
     pub warmup_remaining_ms: i64,
     pub position: String,
+    pub entry_price: Option<f64>,
     pub last_5_trades_pnl_pct: Vec<f64>,
     pub short_edge_bps: f64,
     pub long_edge_bps: f64,
@@ -663,7 +664,7 @@ impl ShadowTrader {
         };
         ShadowDebug {
             premium_samples: self.premium_bps.len(),
-            current_premium_bps: self.prev_premium_bps,
+            last_premium_bps: self.prev_premium_bps,
             cached_p90: self.cached_p90,
             cached_p10: self.cached_p10,
             cached_p50: self.cached_p50,
@@ -671,6 +672,7 @@ impl ShadowTrader {
             cooldown_remaining_ms: cooldown_remaining,
             warmup_remaining_ms: warmup_remaining,
             position: self.position_label(),
+            entry_price: self.position.as_ref().map(|p| p.gate_entry_price),
             last_5_trades_pnl_pct: last_5,
             short_edge_bps: short_edge,
             long_edge_bps: long_edge,
