@@ -4,6 +4,7 @@
 //! Reference: https://www.gate.io/docs/developers/futures/ws/en/
 
 use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
@@ -27,6 +28,9 @@ use crate::infrastructure::exchanges::common::{
 const GATE_WS_ENDPOINT: &str = "wss://fx-ws.gateio.ws/v4/ws/usdt";
 /// Bounded fan-in channel capacity (protects against OOM on 3.8 GiB server)
 const MSG_CHANNEL_CAPACITY: usize = 10_000;
+
+/// Cumulative count of market-data messages dropped due to channel backpressure.
+static DROPPED_MESSAGES: AtomicU64 = AtomicU64::new(0);
 
 /// Gate.io Futures market data connector
 pub struct GateMarketData {
@@ -152,6 +156,10 @@ impl GateMarketData {
         Self::extract_nested_price(data, parent, field)
     }
 
+    /// Number of market-data messages dropped due to channel backpressure.
+    pub fn dropped_messages() -> u64 {
+        DROPPED_MESSAGES.load(Ordering::Relaxed)
+    }
 }
 
 impl Default for GateMarketData {
@@ -176,11 +184,10 @@ impl MarketDataStream for GateMarketData {
             .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
 
         let (write_half, read_half) = futures_util::stream::StreamExt::split(ws_stream);
-        let (ws_tx, mut ws_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) =
+        let (ws_tx, ws_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) =
             mpsc::unbounded_channel();
         let (msg_tx, msg_rx) = mpsc::channel::<StampedBytes>(MSG_CHANNEL_CAPACITY);
 
-        // Spawn message reader task with auto-reconnect
         let auth_payload = if let (Some(key), Some(secret)) = (&self.api_key, &self.api_secret) {
             Some(Self::build_auth_payload(key, secret))
         } else {
@@ -188,43 +195,82 @@ impl MarketDataStream for GateMarketData {
         };
 
         let is_auth = self.api_key.is_some() && self.api_secret.is_some();
-        let pong_tx = ws_tx.clone();
+
         // Record subscriptions for reconnect replay
         let subs: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subs_reader = subs.clone();
-        let auth_for_reconnect = auth_payload.clone();
-        
-        tokio::spawn(async move {
-            use futures_util::StreamExt;
-            let mut read = read_half;
-            let mut reconnect_delay = Duration::from_secs(1);
 
-            loop {
-                while let Some(msg_result) = read.next().await {
-                    reconnect_delay = Duration::from_secs(1);
-                    let recv_ts = now_ns();
-                    match msg_result {
-                        Ok(msg) => match msg {
-                            Message::Text(text) => {
-                                let _ = msg_tx.try_send((text.into_bytes(), recv_ts));
+        let auth_for_task = auth_payload.clone();
+
+        // Single unified task: owns both read and write halves.
+        // On reconnect, both halves are replaced atomically.
+        tokio::spawn(async move {
+            use futures_util::{StreamExt, SinkExt};
+            let mut read = read_half;
+            let mut write = write_half;
+            let mut ws_rx = ws_rx;
+            let mut reconnect_delay = Duration::from_secs(1);
+            let auth_payload = auth_for_task;
+
+            'outer: loop {
+                loop {
+                    tokio::select! {
+                        biased;
+                        msg_result = read.next() => {
+                            match msg_result {
+                                Some(Ok(msg)) => match msg {
+                                    Message::Text(text) => {
+                                        reconnect_delay = Duration::from_secs(1);
+                                        let recv_ts = now_ns();
+                                        if let Err(_) = msg_tx.try_send((text.into_bytes(), recv_ts)) {
+                                            let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
+                                            if n.is_power_of_two() || n % 1000 == 0 {
+                                                warn!("Gate msg channel full, dropped total: {n}");
+                                            }
+                                        }
+                                    }
+                                    Message::Binary(bin) => {
+                                        reconnect_delay = Duration::from_secs(1);
+                                        let recv_ts = now_ns();
+                                        if let Err(_) = msg_tx.try_send((bin, recv_ts)) {
+                                            let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
+                                            if n.is_power_of_two() || n % 1000 == 0 {
+                                                warn!("Gate msg channel full, dropped total: {n}");
+                                            }
+                                        }
+                                    }
+                                    Message::Close(frame) => {
+                                        warn!("Gate.io WebSocket closed: {:?}", frame);
+                                        break; // -> reconnect
+                                    }
+                                    Message::Ping(data) => {
+                                        let _ = write.send(Message::Pong(data)).await;
+                                    }
+                                    Message::Pong(_) => {}
+                                    _ => {}
+                                }
+                                Some(Err(e)) => {
+                                    error!("Gate.io WebSocket error: {}", e);
+                                    break; // -> reconnect
+                                }
+                                None => break, // stream ended -> reconnect
                             }
-                            Message::Binary(bin) => {
-                                let _ = msg_tx.try_send((bin, recv_ts));
-                            }
-                            Message::Close(frame) => {
-                                warn!("Gate.io WebSocket closed: {:?}", frame);
-                                break;
-                            }
-                            Message::Ping(data) => {
-                                let _ = pong_tx.send(Message::Pong(data));
-                            }
-                            Message::Pong(_) => {}
-                            _ => {}
                         }
-                        Err(e) => {
-                            error!("Gate.io WebSocket error: {}", e);
-                            break;
+                        msg = ws_rx.recv() => {
+                            match msg {
+                                Some(msg) => {
+                                    if let Message::Text(ref text) = msg {
+                                        if text.contains("subscribe") {
+                                            subs.lock().unwrap().push(text.clone());
+                                        }
+                                    }
+                                    if write.send(msg).await.is_err() {
+                                        error!("Gate.io WebSocket write error");
+                                        break; // -> reconnect
+                                    }
+                                }
+                                None => break 'outer, // channel closed -> shutdown
+                            }
                         }
                     }
                 }
@@ -242,41 +288,22 @@ impl MarketDataStream for GateMarketData {
                     Ok(s) => s,
                     Err(e) => { error!("Gate reconnect failed: {}", e); continue; }
                 };
-                let (mut new_write, new_read) = futures_util::stream::StreamExt::split(new_stream);
+                let (new_write, new_read) = futures_util::stream::StreamExt::split(new_stream);
                 read = new_read;
+                write = new_write;
 
-                // Re-authenticate
-                if let Some(ref auth) = auth_for_reconnect {
-                    use futures_util::SinkExt;
-                    let _ = new_write.send(Message::Text(auth.clone())).await;
+                // Re-authenticate on new connection
+                if let Some(ref auth) = auth_payload {
+                    let _ = write.send(Message::Text(auth.clone())).await;
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
 
-                // Replay subscriptions
-                let sub_msgs = subs_reader.lock().unwrap().clone();
+                // Replay subscriptions on the new write half
+                let sub_msgs = subs.lock().unwrap().clone();
                 info!("Gate.io WS reconnected, replaying {} subscriptions", sub_msgs.len());
                 for msg in sub_msgs {
-                    use futures_util::SinkExt;
-                    let _ = new_write.send(Message::Text(msg)).await;
+                    let _ = write.send(Message::Text(msg)).await;
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        });
-
-        let subs_writer = subs;
-        tokio::spawn(async move {
-            use futures_util::SinkExt;
-            let mut write = write_half;
-            while let Some(msg) = ws_rx.recv().await {
-                // Record subscription messages for reconnect replay
-                if let Message::Text(ref text) = msg {
-                    if text.contains("subscribe") {
-                        subs_writer.lock().unwrap().push(text.clone());
-                    }
-                }
-                if write.send(msg).await.is_err() {
-                    error!("Gate.io WebSocket write error");
-                    break;
                 }
             }
         });

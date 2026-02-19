@@ -70,21 +70,23 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
-    // Migration: drop legacy configs table if it has removed columns.
-    // Config IDs changed (hash fields updated), so old rows are stale anyway.
+    // Migration: rename legacy tables to timestamped backups instead of dropping.
     let has_legacy_col: bool = conn
         .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='trailing_stop_bps'")
         .and_then(|mut s| s.exists([]))
         .unwrap_or(false);
     if has_legacy_col {
-        // Legacy schema has columns removed in current model. Recreate optimizer tables.
-        // Drop trades first (it references configs) to avoid FK violations.
-        conn.execute_batch(
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        info!("Legacy DB schema detected — renaming tables to *_backup_{ts}");
+        conn.execute_batch(&format!(
             "PRAGMA foreign_keys=OFF;
-             DROP TABLE IF EXISTS trades;
-             DROP TABLE IF EXISTS configs;
+             ALTER TABLE trades RENAME TO trades_backup_{ts};
+             ALTER TABLE configs RENAME TO configs_backup_{ts};
              PRAGMA foreign_keys=ON;"
-        )?;
+        ))?;
     }
 
     conn.execute_batch(SCHEMA)?;
