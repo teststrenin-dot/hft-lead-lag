@@ -83,6 +83,9 @@ dashmap = "5.5"
 async-trait = "0.1"
 dotenvy = "0.15.7"
 
+# SQLite (bundled = no system libsqlite3 needed)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.12"

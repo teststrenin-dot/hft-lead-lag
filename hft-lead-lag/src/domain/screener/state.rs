@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use super::cycle_tracker::CycleTracker;
 use super::price_samples::PriceSamples;
+use super::shadow_fleet::ShadowFleet;
 use super::shadow_trader::ShadowTrader;
 
 /// Snapshot of one side of the order book for a single exchange.
@@ -34,6 +35,7 @@ pub struct SymbolState {
     pub gate_leads: CycleTracker,
     pub price_samples: PriceSamples,
     pub shadow: ShadowTrader,
+    pub fleet: Option<ShadowFleet>,
 }
 
 /// Recompute combined ws_drift from per-exchange values (pick lowest absolute).

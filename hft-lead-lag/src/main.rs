@@ -160,7 +160,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     health_state.gate_connected.store(true, Ordering::Relaxed);
 
     // Start external APIs early so checkpoint endpoints are always available.
-    let screener = ScreenerStore::default();
+    let mut screener = ScreenerStore::default();
+
+    // Initialize fleet persistence (SQLite WAL mode, async batch writes).
+    let db_path = std::path::Path::new("data/optimizer.db");
+    if let Some(parent) = db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    {
+        let conn = hft_lead_lag::infrastructure::db::open_db(db_path)
+            .expect("failed to open optimizer db");
+        hft_lead_lag::infrastructure::db::upsert_configs(&conn, screener.fleet_configs())
+            .expect("failed to seed configs");
+        info!("Seeded {} fleet configs into {}", screener.fleet_configs().len(), db_path.display());
+    }
+    let db_writer = hft_lead_lag::infrastructure::db::spawn_writer(db_path);
+    screener.set_db_writer(db_writer);
+
     // Seed 24h volume from Gate REST data
     let vol_pairs: Vec<(String, f64)> = common_symbols
         .iter()

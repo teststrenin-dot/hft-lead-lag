@@ -136,6 +136,72 @@ pub(crate) async fn get_chart_data(
     Json(state.screener.chart_data(&symbol))
 }
 
+// ── Fleet ranking ───────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FleetConfigRank {
+    config_id: i64,
+    spike_threshold_bps: f64,
+    spike_window_ms: i64,
+    target_ratio: f64,
+    stop_loss_bps: f64,
+    max_hold_ms: i64,
+    max_spread_bps: f64,
+    total_trades: i64,
+    wins: i64,
+    win_rate_pct: f64,
+    total_pnl_pct: f64,
+    avg_pnl_pct: f64,
+    symbols_traded: i64,
+}
+
+pub(crate) async fn get_fleet_ranking(
+    State(_state): State<Arc<HttpState>>,
+) -> Result<Json<Vec<FleetConfigRank>>, (axum::http::StatusCode, String)> {
+    let db_path = std::path::Path::new("data/optimizer.db");
+    let conn = crate::infrastructure::db::open_db(db_path)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.spike_threshold_bps, c.spike_window_ms, c.target_ratio,
+                c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                COUNT(*) as total,
+                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(t.pnl_pct) as total_pnl,
+                COUNT(DISTINCT t.symbol) as symbols
+         FROM trades t
+         JOIN configs c ON t.config_id = c.id
+         GROUP BY c.id
+         HAVING total >= 10
+         ORDER BY CAST(wins AS REAL) / total DESC, total_pnl DESC
+         LIMIT 50"
+    ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
+
+    let rows = stmt.query_map([], |row| {
+        let total: i64 = row.get(7)?;
+        let wins: i64 = row.get(8)?;
+        let total_pnl: f64 = row.get(9)?;
+        Ok(FleetConfigRank {
+            config_id: row.get(0)?,
+            spike_threshold_bps: row.get(1)?,
+            spike_window_ms: row.get(2)?,
+            target_ratio: row.get(3)?,
+            stop_loss_bps: row.get(4)?,
+            max_hold_ms: row.get(5)?,
+            max_spread_bps: row.get(6)?,
+            total_trades: total,
+            wins,
+            win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
+            total_pnl_pct: total_pnl,
+            avg_pnl_pct: if total > 0 { total_pnl / total as f64 } else { 0.0 },
+            symbols_traded: row.get(10)?,
+        })
+    }).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
+
+    let result: Vec<FleetConfigRank> = rows.filter_map(|r| r.ok()).collect();
+    Ok(Json(result))
+}
+
 // ── Internal helpers ────────────────────────────────────────────────
 
 fn to_snapshots(exchange: &'static str, tickers: Vec<Ticker24h>) -> Vec<SymbolSnapshot> {

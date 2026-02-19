@@ -47,7 +47,7 @@
 ## 4) Архитектура (актуальная)
 
 ```text
-src/                          5469 LOC, 35 files
+src/                          ~5600 LOC, 37 files
 ├── main.rs                   417 LOC  — event loop, drift metrics, orchestration
 ├── lib.rs                           — crate root
 ├── config/mod.rs             198 LOC  — AppConfig from env
@@ -60,10 +60,12 @@ src/                          5469 LOC, 35 files
 │   └── mod.rs
 ├── domain/                          — business logic, no I/O deps
 │   ├── screener/
-│   │   ├── mod.rs            231 LOC  — ScreenerStore facade + ScreenerRow DTO
-│   │   ├── shadow_trader.rs  470 LOC  — spike-follow paper trading engine
+│   │   ├── mod.rs            240 LOC  — ScreenerStore facade + ScreenerRow DTO
+│   │   ├── shadow_trader.rs  485 LOC  — spike-follow paper trading engine
+│   │   ├── trader_config.rs   69 LOC  — TraderConfig (Copy, config_id hash)
+│   │   ├── price_samples.rs   50 LOC  — PriceSample + PriceSamples (shared/symbol)
 │   │   ├── cycle_tracker.rs   90 LOC  — divergence/convergence cycle detection
-│   │   ├── state.rs           50 LOC  — SymbolState, Quote, refresh_ws_drift
+│   │   ├── state.rs           52 LOC  — SymbolState, Quote, PriceSamples field
 │   │   └── utils.rs           58 LOC  — percentile, now_ms, timestamp helpers
 │   ├── messages.rs           178 LOC  — BookTicker, Trade message types
 │   ├── models.rs                    — OrderSide, TimeInForce etc.
@@ -142,21 +144,29 @@ curl http://localhost:5000/api/v1/screener | python3 -m json.tool
 
 Текущая реализация: **spike-follow** на bid/ask (без mid-price).
 
-Расположение: `src/domain/screener/shadow_trader.rs` (465 LOC).
+Декомпозиция: 3 файла в `src/domain/screener/`:
+- `trader_config.rs` (69 LOC) — `TraderConfig` struct (Copy, Serialize, config_id hash)
+- `price_samples.rs` (50 LOC) — `PriceSample` + `PriceSamples` (shared per symbol)
+- `shadow_trader.rs` (485 LOC) — `ShadowTrader` + internal types + DTOs
 
-Опорные константы:
+Tick-цикл разбит: `tick()` → `try_fill()` / `try_exit()` / `try_entry()`.
 
-| Константа | Значение | Описание |
+Опорные параметры (TraderConfig::default()):
+
+| Параметр | Значение | Описание |
 |-----------|----------|----------|
-| `SPIKE_THRESHOLD_BPS` | 30.0 | Порог спайка для входа и target-выхода |
-| `SPIKE_WINDOW_MS` | 500 | Окно измерения спайка |
-| `STOP_LOSS_BPS` | 10.0 | Стоп-лосс (bps) |
-| `MAX_HOLD_MS` | 30000 | Таймаут позиции |
-| `FILL_DELAY_MS` | 6 | Задержка исполнения (paper fill) |
-| `COOLDOWN_MS` | 3000 | Пауза между сделками |
-| `WARMUP_MS` | 30000 | Прогрев перед первой сделкой |
-| `QUOTE_FRESHNESS_MS` | 1000 | Максимальный возраст котировки |
-| `GATE_TAKER_FEE` | 0.05% | Комиссия Gate (×2 для round-trip) |
+| `spike_threshold_bps` | 30.0 | Порог спайка для входа (ask для long, bid для short) |
+| `spike_window_ms` | 500 | Окно измерения спайка |
+| `target_ratio` | 1.0 | Доля от спайка как target (1.0 = полный catchup) |
+| `stop_loss_bps` | 10.0 | Стоп-лосс (bps) |
+| `max_hold_ms` | 30000 | Таймаут позиции |
+| `max_spread_bps` | 0.0 | Max Gate spread для входа (0 = отключён) |
+| `trailing_stop_bps` | 0.0 | Trailing stop порог (0 = отключён) |
+| `fill_delay_ms` | 6 | Задержка исполнения (paper fill) |
+| `cooldown_ms` | 3000 | Пауза между сделками |
+| `warmup_ms` | 30000 | Прогрев перед первой сделкой |
+| `quote_freshness_ms` | 1000 | Максимальный возраст котировки |
+| `taker_fee` | 0.05% | Комиссия Gate (×2 для round-trip) |
 
 Логика входа (все условия одновременно):
 1. Нет открытой позиции и нет pending-ордера.
@@ -166,10 +176,11 @@ curl http://localhost:5000/api/v1/screener | python3 -m json.tool
 5. Binance **bid** упал ≥ 30 bps за 500ms → SHORT (продажа Gate bid).
 6. Ордер ждёт 6ms (fill delay), затем заполняется.
 
-Логика выхода (любое из трёх):
-1. **Target** — нереализованный PnL ≥ 30 bps.
-2. **Stop-loss** — нереализованный убыток ≥ 10 bps.
-3. **Timeout** — удержание ≥ 30с.
+Логика выхода (любое из четырёх):
+1. **Target** — нереализованный PnL ≥ spike_bps × target_ratio.
+2. **Stop-loss** — нереализованный убыток ≥ stop_loss_bps.
+3. **Trailing stop** — peak unrealized ≥ trailing_stop_bps, затем откат ≥ 50% от peak.
+4. **Timeout** — удержание ≥ max_hold_ms.
 
 Пирамидинг: **нет** — строго 1 позиция на символ.
 
@@ -239,6 +250,8 @@ cargo test     # 15 pass (14 unit + 1 doctest)
 | Spike detection | mid-price (bid+ask)/2 | ask для лонгов, bid для шортов | `4af8edb` |
 | FILL_DELAY / STOP_LOSS | 7ms / 20bps | 6ms / 10bps | `4af8edb` |
 | Chart markers | Круги (entry+exit) | ▲▼ треугольники (entry) + ● круги (exit) | `a7d6cdd` |
+| Shadow trader decompose | 1 файл 577 LOC | 3 файла: config 69 + samples 50 + trader 485 | `3eaf827` |
+| gate_spread propagation | Всегда 0.0 в ClosedTrade | Пробрасывается через OpenPosition | `3eaf827` |
 
 ---
 
@@ -260,4 +273,4 @@ cargo test     # 15 pass (14 unit + 1 doctest)
 
 ---
 
-*Last updated: 2026-02-19 (post P0 + P1 + spike logic fixes + chart markers)*
+*Last updated: 2026-02-19 (post Sprint 1: shadow trader decomposition + Sprint 2: new features)*

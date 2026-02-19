@@ -8,6 +8,7 @@
 
 pub mod cycle_tracker;
 pub mod price_samples;
+pub mod shadow_fleet;
 pub mod shadow_trader;
 pub mod state;
 pub mod trader_config;
@@ -19,11 +20,15 @@ use dashmap::DashMap;
 use serde::Serialize;
 
 use self::price_samples::PriceSample;
+use self::shadow_fleet::{ShadowFleet, generate_grid};
 use self::state::{Quote, SymbolState, refresh_ws_drift};
 use self::shadow_trader::{ChartData, ShadowDebug};
 use self::utils::{now_ms, calculate_ws_drift_ms, normalize_exchange_ts_ms, percentile};
 
+use crate::infrastructure::db::DbWriter;
+
 pub use self::shadow_trader::{ShadowStats, ChartTrade};
+pub use self::trader_config::TraderConfig;
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -64,6 +69,8 @@ pub struct ScreenerRow {
 pub struct ScreenerStore {
     symbols: Arc<DashMap<String, SymbolState>>,
     window_ms: i64,
+    fleet_configs: Arc<Vec<TraderConfig>>,
+    db_writer: Option<DbWriter>,
 }
 
 impl ScreenerStore {
@@ -71,7 +78,18 @@ impl ScreenerStore {
         Self {
             symbols: Arc::new(DashMap::new()),
             window_ms,
+            fleet_configs: Arc::new(generate_grid()),
+            db_writer: None,
         }
+    }
+
+    /// Attach a db writer for fleet trade persistence.
+    pub fn set_db_writer(&mut self, writer: DbWriter) {
+        self.db_writer = Some(writer);
+    }
+
+    pub fn fleet_configs(&self) -> &[TraderConfig] {
+        &self.fleet_configs
     }
 
     pub fn window_ms(&self) -> i64 {
@@ -181,6 +199,16 @@ impl ScreenerStore {
         });
         state.price_samples.cleanup(exchange_ts_ms);
         state.shadow.tick(exchange_ts_ms, binance, gate, &state.price_samples, self.window_ms);
+
+        // Fleet: lazy-init on first tick, then tick all + drain trades to db.
+        let fleet = state.fleet.get_or_insert_with(|| ShadowFleet::new(&self.fleet_configs));
+        fleet.tick_all(exchange_ts_ms, binance, gate, &state.price_samples, self.window_ms, symbol);
+        if let Some(ref writer) = self.db_writer {
+            let trades = fleet.drain_trades();
+            if !trades.is_empty() {
+                writer.send(trades);
+            }
+        }
     }
 
     pub fn rows_sorted(&self) -> Vec<ScreenerRow> {

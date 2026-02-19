@@ -107,6 +107,7 @@ impl HttpServer {
             .route(endpoints::SCREENER_PAGE, get(templates::screener_page))
             .route("/api/v1/shadow/:symbol", get(handlers::get_shadow_debug))
             .route("/api/v1/chart/:symbol", get(handlers::get_chart_data))
+            .route("/api/v1/fleet", get(handlers::get_fleet_ranking))
             .with_state(state);
 
         axum::serve(listener, app).await?;

@@ -11,5 +11,6 @@ pub mod websocket;
 pub mod rest;
 pub mod logging;
 pub mod enrichment;
+pub mod db;
 
 pub use exchanges::*;
