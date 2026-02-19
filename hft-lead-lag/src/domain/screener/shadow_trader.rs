@@ -286,7 +286,7 @@ impl ShadowTrader {
 
     // -- Entry logic ---------------------------------------------------------
 
-    fn try_entry(&mut self, ts_ms: i64, binance: &Quote, gate: &Quote, samples: &PriceSamples) {
+    fn try_entry(&mut self, ts_ms: i64, binance: &Quote, gate: &Quote, _samples: &PriceSamples) {
         if self.position.is_some() || self.pending.is_some() || ts_ms < self.cooldown_until_ms {
             return;
         }
@@ -301,7 +301,7 @@ impl ShadowTrader {
             }
         }
 
-        if let Some((direction, spike_bps)) = self.detect_spike(ts_ms, binance, samples) {
+        if let Some((direction, gap_bps)) = self.detect_gap(binance, gate) {
             self.spike_timestamps.push_back(ts_ms);
             let gate_mid = (gate.bid + gate.ask) * 0.5;
             let spread_bps = if gate_mid > 0.0 {
@@ -312,31 +312,33 @@ impl ShadowTrader {
                 fire_ts_ms: ts_ms,
                 is_exit: false,
                 exit_pos: None,
-                spike_bps,
+                spike_bps: gap_bps,
                 exit_reason: "",
                 gate_spread_at_entry_bps: spread_bps,
             });
         }
     }
 
-    // -- Spike detection -----------------------------------------------------
+    // -- Gap detection (lead-lag) --------------------------------------------
 
-    fn detect_spike(
-        &self, now_ms: i64, binance: &Quote, samples: &PriceSamples,
-    ) -> Option<(Direction, f64)> {
-        let cutoff = now_ms - self.config.spike_window_ms;
-        let baseline = samples.iter().find(|s| s.ts_ms >= cutoff)?;
+    /// Classic lead-lag: enter when Binance price diverges from Gate.
+    /// Long: Binance ask > Gate ask → Gate should catch up.
+    /// Short: Binance bid < Gate bid → Gate should catch down.
+    fn detect_gap(&self, binance: &Quote, gate: &Quote) -> Option<(Direction, f64)> {
+        let threshold = self.config.spike_threshold_bps;
 
-        if baseline.binance_ask > 0.0 {
-            let ask_move_bps = ((binance.ask - baseline.binance_ask) / baseline.binance_ask) * 10_000.0;
-            if ask_move_bps >= self.config.spike_threshold_bps {
-                return Some((Direction::Long, ask_move_bps));
+        // Long signal: Binance ask jumped above Gate ask
+        if gate.ask > 0.0 {
+            let gap_bps = ((binance.ask - gate.ask) / gate.ask) * 10_000.0;
+            if gap_bps >= threshold {
+                return Some((Direction::Long, gap_bps));
             }
         }
-        if baseline.binance_bid > 0.0 {
-            let bid_move_bps = ((baseline.binance_bid - binance.bid) / baseline.binance_bid) * 10_000.0;
-            if bid_move_bps >= self.config.spike_threshold_bps {
-                return Some((Direction::Short, bid_move_bps));
+        // Short signal: Binance bid dropped below Gate bid
+        if gate.bid > 0.0 {
+            let gap_bps = ((gate.bid - binance.bid) / gate.bid) * 10_000.0;
+            if gap_bps >= threshold {
+                return Some((Direction::Short, gap_bps));
             }
         }
         None
