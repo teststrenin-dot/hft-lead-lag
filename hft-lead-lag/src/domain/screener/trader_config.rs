@@ -32,6 +32,8 @@ pub struct TraderConfig {
     pub quote_freshness_ms: i64,
     /// Gate taker fee (fraction, e.g. 0.0005 = 0.05%).
     pub taker_fee: f64,
+    /// Min price samples required before baseline calculation.
+    pub min_baseline_samples: usize,
 }
 
 impl Default for TraderConfig {
@@ -50,6 +52,7 @@ impl Default for TraderConfig {
             warmup_ms: 30_000,
             quote_freshness_ms: 1_000,
             taker_fee: 0.000_5,
+            min_baseline_samples: 20,
         }
     }
 }
@@ -68,6 +71,11 @@ impl TraderConfig {
         self.max_spread_bps.to_bits().hash(&mut h);
         self.trailing_stop_bps.to_bits().hash(&mut h);
         self.trailing_decay_ratio.to_bits().hash(&mut h);
+        self.fill_delay_ms.hash(&mut h);
+        self.cooldown_ms.hash(&mut h);
+        self.warmup_ms.hash(&mut h);
+        self.quote_freshness_ms.hash(&mut h);
+        self.taker_fee.to_bits().hash(&mut h);
         h.finish()
     }
 }
