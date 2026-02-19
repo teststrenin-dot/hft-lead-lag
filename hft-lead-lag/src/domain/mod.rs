@@ -5,10 +5,12 @@
 //! - Market data message types (zero-copy optimized)
 //! - Order and position domain models
 //! - Symbol and price representations
+//! - Screener: lead-lag metrics, cycle analysis, shadow trading
 
 pub mod exchange;
 pub mod messages;
 pub mod models;
+pub mod screener;
 pub mod symbols;
 
 pub use exchange::*;

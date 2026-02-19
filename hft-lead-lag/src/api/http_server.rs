@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
-use crate::api::screener::{ChartData, ScreenerRow, ScreenerStore, ShadowDebug};
+use crate::domain::screener::{ScreenerStore, ScreenerRow};
+use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
 use crate::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 
 const NATR_PERIOD_30M: usize = 30;

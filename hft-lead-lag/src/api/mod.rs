@@ -8,9 +8,11 @@
 pub mod ws_server;
 pub mod http_server;
 pub mod health;
-pub mod screener;
 
 pub use ws_server::*;
 pub use http_server::*;
 pub use health::*;
-pub use screener::*;
+
+// Re-export screener types from domain layer for backwards compatibility.
+pub use crate::domain::screener::{ScreenerStore, ScreenerRow};
+pub use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug, ShadowStats, ChartTrade};
