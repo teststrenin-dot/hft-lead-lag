@@ -108,6 +108,7 @@ impl HttpServer {
             .route("/api/v1/shadow/:symbol", get(handlers::get_shadow_debug))
             .route("/api/v1/chart/:symbol", get(handlers::get_chart_data))
             .route("/api/v1/fleet", get(handlers::get_fleet_ranking))
+            .route("/api/v1/fleet/ranked", get(handlers::get_fleet_ranked))
             .route("/api/v1/fleet/symbols", get(handlers::get_fleet_by_symbol))
             .route("/fleet", get(templates::fleet_page))
             .with_state(state);

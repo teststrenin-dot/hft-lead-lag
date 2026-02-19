@@ -18,7 +18,7 @@ const GAP_THRESHOLDS: &[f64] = &[50.0, 60.0, 70.0, 80.0, 100.0];
 const TARGET_RATIOS: &[f64] = &[0.3, 0.4, 0.5, 0.7];
 const STOP_LOSSES: &[f64] = &[20.0, 30.0, 50.0, 80.0];
 const MAX_HOLDS: &[i64] = &[5_000, 10_000, 20_000, 30_000];
-const MAX_SPREADS: &[f64] = &[3.0, 5.0, 8.0];
+const MAX_SPREADS: &[f64] = &[3.0, 5.0]; // spread=8 never fires on liquid pairs
 const TRAILING_TAKES: &[f64] = &[0.3, 0.5, 0.7];
 
 /// Min trades before a config can be pruned for poor performance.
@@ -41,7 +41,11 @@ pub fn generate_grid() -> Vec<TraderConfig> {
 
     for &gap in GAP_THRESHOLDS {
         for &target in TARGET_RATIOS {
+            // gap=50 + target=0.7 → breakeven at 35bps, unrealistic for small signal
+            if gap <= 50.0 && target >= 0.7 { continue; }
             for &stop in STOP_LOSSES {
+                // gap=100 + sl≤30 → noise kills before signal develops
+                if gap >= 100.0 && stop <= 30.0 { continue; }
                 for &hold in MAX_HOLDS {
                     for &spread in MAX_SPREADS {
                         for &trailing in TRAILING_TAKES {
@@ -189,8 +193,15 @@ mod tests {
     #[test]
     fn grid_size() {
         let grid = generate_grid();
-        // 5 gaps × 4 targets × 4 SLs × 4 holds × 3 spreads × 3 trailing = 2880
-        assert_eq!(grid.len(), 5 * 4 * 4 * 4 * 3 * 3);
+        // 5 gaps × 4 targets × 4 SLs × 4 holds × 2 spreads × 3 trailing = 1920
+        // minus dead: gap=50+target≥0.7 (1×1×4×4×2×3=96)
+        //             gap=100+sl≤30    (1×4×2×4×2×3=192) → but target=0.7 already
+        //             cut = only gap=100+sl≤30 with target∈[0.3,0.4,0.5] → 1×3×2×4×2×3=144
+        // BUT: gap=100+target=0.7+sl≤30 is already killed by gap=100+sl≤30
+        //   gap=100+sl≤30 = 1×4×2×4×2×3=192 (target not filtered here because gap≠50)
+        //   gap=50+target=0.7 = 1×1×4×4×2×3=96
+        // total dead = 192+96=288, final = 1920−288=1632
+        assert_eq!(grid.len(), 1632);
     }
 
     #[test]
@@ -206,7 +217,7 @@ mod tests {
     fn fleet_creation() {
         let configs = generate_grid();
         let fleet = ShadowFleet::new(&configs);
-        assert_eq!(fleet.len(), 2880);
-        assert_eq!(fleet.active(), 2880);
+        assert_eq!(fleet.len(), 1632);
+        assert_eq!(fleet.active(), 1632);
     }
 }

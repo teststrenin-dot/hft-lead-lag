@@ -276,6 +276,98 @@ pub(crate) async fn get_fleet_by_symbol(
     Ok(Json(result))
 }
 
+// ── Fleet ranked (composite scoring) ─────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FleetRankedConfig {
+    config_id: i64,
+    spike_threshold_bps: f64,
+    target_ratio: f64,
+    stop_loss_bps: f64,
+    max_hold_ms: i64,
+    max_spread_bps: f64,
+    trailing_decay_ratio: f64,
+    total_trades: i64,
+    wins: i64,
+    win_rate_pct: f64,
+    total_pnl_pct: f64,
+    avg_pnl_pct: f64,
+    stddev_pnl_pct: f64,
+    sharpe: f64,
+    profit_factor: f64,
+    composite: f64,
+    symbols_traded: i64,
+}
+
+pub(crate) async fn get_fleet_ranked(
+    State(_state): State<Arc<HttpState>>,
+) -> Result<Json<Vec<FleetRankedConfig>>, (axum::http::StatusCode, String)> {
+    let db_path = std::path::Path::new("data/optimizer.db");
+    let conn = crate::infrastructure::db::open_db(db_path)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
+                c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                c.trailing_decay_ratio,
+                COUNT(*) as total,
+                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(t.pnl_pct) as total_pnl,
+                AVG(t.pnl_pct) as avg_pnl,
+                AVG(t.pnl_pct * t.pnl_pct) as avg_pnl_sq,
+                SUM(CASE WHEN t.pnl_pct > 0 THEN t.pnl_pct ELSE 0 END) as gross_win,
+                SUM(CASE WHEN t.pnl_pct < 0 THEN ABS(t.pnl_pct) ELSE 0 END) as gross_loss,
+                COUNT(DISTINCT t.symbol) as symbols
+         FROM trades t
+         JOIN configs c ON t.config_id = c.id
+         GROUP BY c.id
+         HAVING total >= 10
+         ORDER BY total DESC
+         LIMIT 100"
+    ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
+
+    let rows = stmt.query_map([], |row| {
+        let total: i64 = row.get(7)?;
+        let wins: i64 = row.get(8)?;
+        let total_pnl: f64 = row.get(9)?;
+        let avg_pnl: f64 = row.get(10)?;
+        let avg_pnl_sq: f64 = row.get(11)?;
+        let gross_win: f64 = row.get(12)?;
+        let gross_loss: f64 = row.get(13)?;
+
+        let variance = (avg_pnl_sq - avg_pnl * avg_pnl).max(0.0);
+        let stddev_pnl = variance.sqrt();
+        let sharpe = if stddev_pnl > 1e-9 { avg_pnl / stddev_pnl } else { 0.0 };
+        let profit_factor = if gross_loss > 1e-9 { gross_win / gross_loss } else { if gross_win > 0.0 { 99.0 } else { 0.0 } };
+        let pf_capped = profit_factor.min(3.0);
+        let composite = sharpe * (total as f64).sqrt() * pf_capped;
+
+        Ok(FleetRankedConfig {
+            config_id: row.get(0)?,
+            spike_threshold_bps: row.get(1)?,
+            target_ratio: row.get(2)?,
+            stop_loss_bps: row.get(3)?,
+            max_hold_ms: row.get(4)?,
+            max_spread_bps: row.get(5)?,
+            trailing_decay_ratio: row.get(6)?,
+            total_trades: total,
+            wins,
+            win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
+            total_pnl_pct: total_pnl,
+            avg_pnl_pct: avg_pnl,
+            stddev_pnl_pct: stddev_pnl,
+            sharpe,
+            profit_factor,
+            composite,
+            symbols_traded: row.get(14)?,
+        })
+    }).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
+
+    let mut result: Vec<FleetRankedConfig> = rows.filter_map(|r| r.ok()).collect();
+    result.sort_by(|a, b| b.composite.partial_cmp(&a.composite).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(Json(result))
+}
+
 // ── Internal helpers ────────────────────────────────────────────────
 
 fn to_snapshots(exchange: &'static str, tickers: Vec<Ticker24h>) -> Vec<SymbolSnapshot> {
