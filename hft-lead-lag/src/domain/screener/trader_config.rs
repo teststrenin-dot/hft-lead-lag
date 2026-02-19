@@ -37,7 +37,7 @@ impl Default for TraderConfig {
     /// produces a representative mid-grid configuration.
     fn default() -> Self {
         Self {
-            spike_threshold_bps: 35.0,
+            spike_threshold_bps: 50.0,
             target_ratio: 0.5,
             stop_loss_bps: 50.0,
             max_hold_ms: 10_000,

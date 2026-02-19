@@ -14,11 +14,11 @@ use super::trader_config::TraderConfig;
 /// Parameter grid values for fleet generation.
 /// Exit model: breakeven at spike × target_ratio, then trailing take-profit.
 /// Pre-breakeven: stop-loss only. Post-breakeven: stop at entry + trail peak.
-const GAP_THRESHOLDS: &[f64] = &[30.0, 35.0, 40.0, 45.0, 50.0];
-const TARGET_RATIOS: &[f64] = &[0.3, 0.4, 0.5, 0.7];
-const STOP_LOSSES: &[f64] = &[20.0, 30.0, 50.0, 80.0];
+const GAP_THRESHOLDS: &[f64] = &[30.0, 40.0, 50.0, 60.0, 80.0];
+const TARGET_RATIOS: &[f64] = &[0.3, 0.5, 0.7];
+const STOP_LOSSES: &[f64] = &[8.0, 15.0, 25.0, 40.0];
 const MAX_HOLDS: &[i64] = &[5_000, 10_000, 20_000, 30_000];
-const MAX_SPREADS: &[f64] = &[3.0, 5.0]; // spread=8 never fires on liquid pairs
+const MAX_SPREADS: &[f64] = &[3.0, 5.0];
 const TRAILING_TAKES: &[f64] = &[0.3, 0.5, 0.7];
 
 /// Min trades before a config can be pruned for poor performance.
@@ -189,8 +189,8 @@ mod tests {
     #[test]
     fn grid_size() {
         let grid = generate_grid();
-        // 5 gaps × 4 targets × 4 SLs × 4 holds × 2 spreads × 3 trailing = 1920
-        assert_eq!(grid.len(), 1920);
+        // 5 gaps × 3 targets × 4 SLs × 4 holds × 2 spreads × 3 trailing = 1440
+        assert_eq!(grid.len(), 1440);
     }
 
     #[test]
@@ -206,7 +206,7 @@ mod tests {
     fn fleet_creation() {
         let configs = generate_grid();
         let fleet = ShadowFleet::new(&configs);
-        assert_eq!(fleet.len(), 1920);
-        assert_eq!(fleet.active(), 1920);
+        assert_eq!(fleet.len(), 1440);
+        assert_eq!(fleet.active(), 1440);
     }
 }
