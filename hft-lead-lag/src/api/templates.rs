@@ -227,12 +227,16 @@ const SCREENER_HTML: &str = r#"<!doctype html>
         ctx.fillRect(x0, top, x1 - x0, bot - top);
         if (z.entry_price) {
           const y = u.valToPos(z.entry_price, 'y', true);
-          ctx.beginPath(); ctx.arc(x0, y, 3, 0, 2 * Math.PI);
+          const s = 5;
+          ctx.beginPath();
+          if (isLong) { ctx.moveTo(x0, y - s); ctx.lineTo(x0 - s, y + s); ctx.lineTo(x0 + s, y + s); }
+          else { ctx.moveTo(x0, y + s); ctx.lineTo(x0 - s, y - s); ctx.lineTo(x0 + s, y - s); }
+          ctx.closePath();
           ctx.fillStyle = isLong ? '#4ade80' : '#f87171'; ctx.fill();
         }
         if (!z.open && z.exit_price) {
           const y = u.valToPos(z.exit_price, 'y', true);
-          ctx.beginPath(); ctx.arc(x1, y, 3, 0, 2 * Math.PI);
+          ctx.beginPath(); ctx.arc(x1, y, 4, 0, 2 * Math.PI);
           ctx.fillStyle = isLong ? '#4ade80' : '#f87171'; ctx.fill();
         }
       }
