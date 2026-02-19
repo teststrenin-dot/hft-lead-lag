@@ -7,6 +7,8 @@
 
 pub mod ws_server;
 pub mod http_server;
+pub mod handlers;
+pub mod templates;
 pub mod health;
 
 pub use ws_server::*;
