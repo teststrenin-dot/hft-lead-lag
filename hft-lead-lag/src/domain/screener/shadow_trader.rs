@@ -4,44 +4,22 @@
 //! or Binance bid drops (for shorts) ≥ threshold in a short window, enter on
 //! Gate in the same direction. Exit when Gate catches up (target), on timeout,
 //! or stop-loss.
-//! All execution is paper-traded on Gate bid/ask with simulated fill delay.
 
 use std::collections::VecDeque;
 use serde::Serialize;
+
+use super::price_samples::PriceSamples;
 use super::state::Quote;
+use super::trader_config::TraderConfig;
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
-
-/// Gate taker fee (fraction).
-const GATE_TAKER_FEE: f64 = 0.000_5;
-/// Simulated order-to-fill latency (ms).
-const FILL_DELAY_MS: i64 = 6;
-/// Post-trade cooldown (ms).
-const COOLDOWN_MS: i64 = 3_000;
-/// Mid-price sample retention for chart + spike detection (ms).
-const CHART_RETENTION_MS: i64 = 2 * 60 * 1000;
-/// Warmup before trading starts (ms).
-const WARMUP_MS: i64 = 30_000;
-/// Max quote staleness (ms).
-const QUOTE_FRESHNESS_MS: i64 = 1_000;
-/// Min Binance move to trigger entry (bps). Ask for longs, bid for shorts.
-const SPIKE_THRESHOLD_BPS: f64 = 30.0;
-/// Window to measure Binance spike (ms).
-const SPIKE_WINDOW_MS: i64 = 500;
-/// Max hold time (ms).
-const MAX_HOLD_MS: i64 = 30_000;
-/// Stop-loss (bps).
-const STOP_LOSS_BPS: f64 = 10.0;
 
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Direction {
-    Short,
-    Long,
-}
+pub enum Direction { Short, Long }
 
 #[derive(Debug, Clone)]
 struct OpenPosition {
@@ -49,30 +27,34 @@ struct OpenPosition {
     gate_entry_price: f64,
     entry_ts_ms: i64,
     spike_bps: f64,
+    gate_spread_at_entry_bps: f64,
+    /// Highest unrealized profit seen (bps) — for trailing stop.
+    peak_unrealized_bps: f64,
 }
 
+/// Completed trade record — public for fleet/db persistence.
 #[derive(Debug, Clone)]
-struct ClosedTrade {
-    pnl_pct: f64,
-    ts_ms: i64,
-    direction: Direction,
-    entry_ts_ms: i64,
-    entry_price: f64,
-    exit_price: f64,
-    exit_reason: &'static str,
-    spike_bps: f64,
-    catchup_pct: f64,
-    catchup_ms: i64,
+pub struct ClosedTrade {
+    pub pnl_pct: f64,
+    pub ts_ms: i64,
+    pub direction: Direction,
+    pub entry_ts_ms: i64,
+    pub entry_price: f64,
+    pub exit_price: f64,
+    pub exit_reason: &'static str,
+    pub spike_bps: f64,
+    pub catchup_pct: f64,
+    pub catchup_ms: i64,
+    pub gate_spread_at_entry_bps: f64,
 }
 
-/// Only timestamp is needed — we count spikes in window via `.len()`.
-#[derive(Debug, Clone)]
-struct MidSample {
-    ts_ms: i64,
-    gate_bid: f64,
-    gate_ask: f64,
-    binance_bid: f64,
-    binance_ask: f64,
+impl ClosedTrade {
+    pub fn direction_str(&self) -> &'static str {
+        match self.direction {
+            Direction::Long => "LONG",
+            Direction::Short => "SHORT",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +65,7 @@ struct PendingOrder {
     exit_pos: Option<OpenPosition>,
     spike_bps: f64,
     exit_reason: &'static str,
+    gate_spread_at_entry_bps: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -151,175 +134,234 @@ pub struct ShadowDebug {
 // ShadowTrader
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default)]
+/// Shadow trader instance. Holds only trading state (no price samples).
+/// Receives `&PriceSamples` on each tick — samples are shared per symbol.
+#[derive(Debug)]
 pub struct ShadowTrader {
-    mid_samples: VecDeque<MidSample>,
+    config: TraderConfig,
     position: Option<OpenPosition>,
     pending: Option<PendingOrder>,
     completed_trades: VecDeque<ClosedTrade>,
-    /// Only timestamps — direction/magnitude aren't queried from history.
     spike_timestamps: VecDeque<i64>,
     start_ts_ms: Option<i64>,
     latest_ts_ms: i64,
     cooldown_until_ms: i64,
 }
 
+impl Default for ShadowTrader {
+    fn default() -> Self { Self::new(TraderConfig::default()) }
+}
+
 impl ShadowTrader {
-    pub fn tick(&mut self, ts_ms: i64, binance: &Quote, gate: &Quote, window_ms: i64) {
+    pub fn new(config: TraderConfig) -> Self {
+        Self {
+            config,
+            position: None,
+            pending: None,
+            completed_trades: VecDeque::new(),
+            spike_timestamps: VecDeque::new(),
+            start_ts_ms: None,
+            latest_ts_ms: 0,
+            cooldown_until_ms: 0,
+        }
+    }
+
+    pub fn config(&self) -> &TraderConfig { &self.config }
+
+    pub fn completed_trades(&self) -> &VecDeque<ClosedTrade> { &self.completed_trades }
+
+    // -- Core tick -----------------------------------------------------------
+
+    pub fn tick(
+        &mut self,
+        ts_ms: i64,
+        binance: &Quote,
+        gate: &Quote,
+        samples: &PriceSamples,
+        window_ms: i64,
+    ) {
         if self.start_ts_ms.is_none() {
             self.start_ts_ms = Some(ts_ms);
         }
         self.latest_ts_ms = ts_ms;
+        self.cleanup_spikes(ts_ms);
 
-        if (ts_ms - binance.ts_ms).unsigned_abs() > QUOTE_FRESHNESS_MS as u64
-            || (ts_ms - gate.ts_ms).unsigned_abs() > QUOTE_FRESHNESS_MS as u64
+        let cfg = &self.config;
+
+        if (ts_ms - binance.ts_ms).unsigned_abs() > cfg.quote_freshness_ms as u64
+            || (ts_ms - gate.ts_ms).unsigned_abs() > cfg.quote_freshness_ms as u64
         {
             return;
         }
 
-        self.mid_samples.push_back(MidSample {
-            ts_ms,
-            gate_bid: gate.bid, gate_ask: gate.ask,
-            binance_bid: binance.bid, binance_ask: binance.ask,
-        });
-        self.cleanup(ts_ms, window_ms);
-
         let elapsed = ts_ms.saturating_sub(self.start_ts_ms.unwrap_or(ts_ms));
-        if elapsed < WARMUP_MS {
+        if elapsed < cfg.warmup_ms {
             return;
         }
 
-        // Execute pending orders after FILL_DELAY_MS
-        if let Some(pending) = self.pending.take() {
-            if ts_ms >= pending.fire_ts_ms + FILL_DELAY_MS {
-                if pending.is_exit {
-                    if let Some(pos) = pending.exit_pos {
-                        self.fill_exit(ts_ms, gate, window_ms, pos, pending.exit_reason);
-                    }
-                } else {
-                    let gate_price = match pending.direction {
-                        Direction::Long => gate.ask,
-                        Direction::Short => gate.bid,
-                    };
-                    self.position = Some(OpenPosition {
-                        direction: pending.direction,
-                        gate_entry_price: gate_price,
-                        entry_ts_ms: ts_ms,
-                        spike_bps: pending.spike_bps,
-                    });
-                }
-            } else {
-                self.pending = Some(pending);
+        self.try_fill(ts_ms, gate, window_ms);
+        if self.pending.is_some() { return; }
+        self.try_exit(ts_ms, gate);
+        self.try_entry(ts_ms, binance, gate, samples);
+    }
+
+    // -- Fill pending orders -------------------------------------------------
+
+    fn try_fill(&mut self, ts_ms: i64, gate: &Quote, window_ms: i64) {
+        let Some(pending) = self.pending.take() else { return };
+        if ts_ms < pending.fire_ts_ms + self.config.fill_delay_ms {
+            self.pending = Some(pending);
+            return;
+        }
+        if pending.is_exit {
+            if let Some(pos) = pending.exit_pos {
+                self.fill_exit(ts_ms, gate, window_ms, pos, pending.exit_reason);
             }
-            return;
-        }
-
-        // Exit logic
-        if let Some(pos) = self.position.as_ref() {
-            let hold_ms = ts_ms - pos.entry_ts_ms;
-            let unrealized_bps = match pos.direction {
-                Direction::Long => {
-                    ((gate.bid - pos.gate_entry_price) / pos.gate_entry_price) * 10_000.0
-                }
-                Direction::Short => {
-                    ((pos.gate_entry_price - gate.ask) / pos.gate_entry_price) * 10_000.0
-                }
+        } else {
+            let gate_price = match pending.direction {
+                Direction::Long => gate.ask,
+                Direction::Short => gate.bid,
             };
-
-            let gate_moved_enough = unrealized_bps >= SPIKE_THRESHOLD_BPS;
-            let timed_out = hold_ms >= MAX_HOLD_MS;
-            let stopped_out = unrealized_bps <= -STOP_LOSS_BPS;
-
-            if gate_moved_enough || timed_out || stopped_out {
-                let reason = if gate_moved_enough { "target" }
-                    else if stopped_out { "stop_loss" }
-                    else { "timeout" };
-                let pos = self.position.take().unwrap();
-                self.pending = Some(PendingOrder {
-                    direction: pos.direction,
-                    fire_ts_ms: ts_ms,
-                    is_exit: true,
-                    exit_pos: Some(pos),
-                    spike_bps: 0.0,
-                    exit_reason: reason,
-                });
-            }
-        }
-
-        // Spike detection & entry
-        if self.position.is_none() && self.pending.is_none() && ts_ms >= self.cooldown_until_ms {
-            if let Some((direction, spike_bps)) = self.detect_spike(ts_ms, binance) {
-                self.spike_timestamps.push_back(ts_ms);
-                self.pending = Some(PendingOrder {
-                    direction,
-                    fire_ts_ms: ts_ms,
-                    is_exit: false,
-                    exit_pos: None,
-                    spike_bps,
-                    exit_reason: "",
-                });
-            }
+            self.position = Some(OpenPosition {
+                direction: pending.direction,
+                gate_entry_price: gate_price,
+                entry_ts_ms: ts_ms,
+                spike_bps: pending.spike_bps,
+                gate_spread_at_entry_bps: pending.gate_spread_at_entry_bps,
+                peak_unrealized_bps: 0.0,
+            });
         }
     }
 
-    fn detect_spike(&self, now_ms: i64, binance: &Quote) -> Option<(Direction, f64)> {
-        let cutoff = now_ms - SPIKE_WINDOW_MS;
-        let baseline = self.mid_samples.iter().find(|s| s.ts_ms >= cutoff)?;
+    // -- Exit logic ----------------------------------------------------------
 
-        // LONG: Binance ask spiked up → we buy Gate ask
+    fn try_exit(&mut self, ts_ms: i64, gate: &Quote) {
+        let Some(pos) = self.position.as_mut() else { return };
+        let cfg = &self.config;
+        let hold_ms = ts_ms - pos.entry_ts_ms;
+
+        let unrealized_bps = match pos.direction {
+            Direction::Long =>
+                ((gate.bid - pos.gate_entry_price) / pos.gate_entry_price) * 10_000.0,
+            Direction::Short =>
+                ((pos.gate_entry_price - gate.ask) / pos.gate_entry_price) * 10_000.0,
+        };
+        if unrealized_bps > pos.peak_unrealized_bps {
+            pos.peak_unrealized_bps = unrealized_bps;
+        }
+
+        let target_bps = pos.spike_bps * cfg.target_ratio;
+        let gate_moved_enough = unrealized_bps >= target_bps;
+        let timed_out = hold_ms >= cfg.max_hold_ms;
+        let stopped_out = unrealized_bps <= -cfg.stop_loss_bps;
+        let trailing_stopped = cfg.trailing_stop_bps > 0.0
+            && pos.peak_unrealized_bps >= cfg.trailing_stop_bps
+            && unrealized_bps <= pos.peak_unrealized_bps * 0.5;
+
+        if gate_moved_enough || timed_out || stopped_out || trailing_stopped {
+            let reason = if gate_moved_enough { "target" }
+                else if stopped_out { "stop_loss" }
+                else if trailing_stopped { "trailing_stop" }
+                else { "timeout" };
+            let pos = self.position.take().unwrap();
+            self.pending = Some(PendingOrder {
+                direction: pos.direction,
+                fire_ts_ms: ts_ms,
+                is_exit: true,
+                exit_pos: Some(pos),
+                spike_bps: 0.0,
+                exit_reason: reason,
+                gate_spread_at_entry_bps: 0.0,
+            });
+        }
+    }
+
+    // -- Entry logic ---------------------------------------------------------
+
+    fn try_entry(&mut self, ts_ms: i64, binance: &Quote, gate: &Quote, samples: &PriceSamples) {
+        if self.position.is_some() || self.pending.is_some() || ts_ms < self.cooldown_until_ms {
+            return;
+        }
+        let cfg = &self.config;
+
+        // Spread filter
+        if cfg.max_spread_bps > 0.0 {
+            let gate_mid = (gate.bid + gate.ask) * 0.5;
+            if gate_mid > 0.0 {
+                let spread_bps = ((gate.ask - gate.bid) / gate_mid) * 10_000.0;
+                if spread_bps > cfg.max_spread_bps { return; }
+            }
+        }
+
+        if let Some((direction, spike_bps)) = self.detect_spike(ts_ms, binance, samples) {
+            self.spike_timestamps.push_back(ts_ms);
+            let gate_mid = (gate.bid + gate.ask) * 0.5;
+            let spread_bps = if gate_mid > 0.0 {
+                ((gate.ask - gate.bid) / gate_mid) * 10_000.0
+            } else { 0.0 };
+            self.pending = Some(PendingOrder {
+                direction,
+                fire_ts_ms: ts_ms,
+                is_exit: false,
+                exit_pos: None,
+                spike_bps,
+                exit_reason: "",
+                gate_spread_at_entry_bps: spread_bps,
+            });
+        }
+    }
+
+    // -- Spike detection -----------------------------------------------------
+
+    fn detect_spike(
+        &self, now_ms: i64, binance: &Quote, samples: &PriceSamples,
+    ) -> Option<(Direction, f64)> {
+        let cutoff = now_ms - self.config.spike_window_ms;
+        let baseline = samples.iter().find(|s| s.ts_ms >= cutoff)?;
+
         if baseline.binance_ask > 0.0 {
             let ask_move_bps = ((binance.ask - baseline.binance_ask) / baseline.binance_ask) * 10_000.0;
-            if ask_move_bps >= SPIKE_THRESHOLD_BPS {
+            if ask_move_bps >= self.config.spike_threshold_bps {
                 return Some((Direction::Long, ask_move_bps));
             }
         }
-
-        // SHORT: Binance bid dropped → we sell Gate bid
         if baseline.binance_bid > 0.0 {
             let bid_move_bps = ((baseline.binance_bid - binance.bid) / baseline.binance_bid) * 10_000.0;
-            if bid_move_bps >= SPIKE_THRESHOLD_BPS {
+            if bid_move_bps >= self.config.spike_threshold_bps {
                 return Some((Direction::Short, bid_move_bps));
             }
         }
-
         None
     }
 
+    // -- Fill exit & bookkeeping ---------------------------------------------
+
     fn fill_exit(
-        &mut self,
-        ts_ms: i64,
-        gate: &Quote,
-        window_ms: i64,
-        pos: OpenPosition,
-        exit_reason: &'static str,
+        &mut self, ts_ms: i64, gate: &Quote, window_ms: i64,
+        pos: OpenPosition, exit_reason: &'static str,
     ) {
-        let fees = GATE_TAKER_FEE * 2.0;
+        let fees = self.config.taker_fee * 2.0;
         let (pnl_pct, catchup_pct, exit_price) = match pos.direction {
             Direction::Long => {
-                let exit_price = gate.bid;
-                let raw_pnl = (exit_price - pos.gate_entry_price) / pos.gate_entry_price;
-                ((raw_pnl - fees) * 100.0, raw_pnl * 100.0, exit_price)
+                let ep = gate.bid;
+                let raw = (ep - pos.gate_entry_price) / pos.gate_entry_price;
+                ((raw - fees) * 100.0, raw * 100.0, ep)
             }
             Direction::Short => {
-                let exit_price = gate.ask;
-                let raw_pnl = (pos.gate_entry_price - exit_price) / pos.gate_entry_price;
-                ((raw_pnl - fees) * 100.0, raw_pnl * 100.0, exit_price)
+                let ep = gate.ask;
+                let raw = (pos.gate_entry_price - ep) / pos.gate_entry_price;
+                ((raw - fees) * 100.0, raw * 100.0, ep)
             }
         };
 
         self.completed_trades.push_back(ClosedTrade {
-            pnl_pct,
-            ts_ms,
-            direction: pos.direction,
-            entry_ts_ms: pos.entry_ts_ms,
-            entry_price: pos.gate_entry_price,
-            exit_price,
-            exit_reason,
-            spike_bps: pos.spike_bps,
-            catchup_pct,
-            catchup_ms: ts_ms - pos.entry_ts_ms,
+            pnl_pct, ts_ms, direction: pos.direction,
+            entry_ts_ms: pos.entry_ts_ms, entry_price: pos.gate_entry_price,
+            exit_price, exit_reason, spike_bps: pos.spike_bps,
+            catchup_pct, catchup_ms: ts_ms - pos.entry_ts_ms,
+            gate_spread_at_entry_bps: pos.gate_spread_at_entry_bps,
         });
-        self.cooldown_until_ms = ts_ms + COOLDOWN_MS;
+        self.cooldown_until_ms = ts_ms + self.config.cooldown_ms;
 
         let cutoff = ts_ms - window_ms;
         while let Some(t) = self.completed_trades.front() {
@@ -328,29 +370,23 @@ impl ShadowTrader {
         }
     }
 
+    // -- Read models ---------------------------------------------------------
+
     pub fn stats(&self) -> ShadowStats {
         let n = self.completed_trades.len();
         if n == 0 {
             return ShadowStats {
-                pnl_per_hour_pct: 0.0,
-                trades_in_window: 0,
-                avg_trade_pct: 0.0,
-                win_rate_pct: 0.0,
+                pnl_per_hour_pct: 0.0, trades_in_window: 0,
+                avg_trade_pct: 0.0, win_rate_pct: 0.0,
                 position: self.position_label(),
                 spikes_detected: self.spike_timestamps.len(),
-                avg_catchup_pct: 0.0,
-                avg_catchup_lag_ms: 0.0,
+                avg_catchup_pct: 0.0, avg_catchup_lag_ms: 0.0,
             };
         }
-
         let obs_ms = self.start_ts_ms
-            .map(|s| {
-                let post_warmup = s + WARMUP_MS;
-                (self.latest_ts_ms - post_warmup).clamp(1, TEN_MINUTES_MS) as f64
-            })
+            .map(|s| (self.latest_ts_ms - s - self.config.warmup_ms).clamp(1, TEN_MINUTES_MS) as f64)
             .unwrap_or(1.0);
         let window_hours = obs_ms / 3_600_000.0;
-
         let total_pnl: f64 = self.completed_trades.iter().map(|t| t.pnl_pct).sum();
         let wins = self.completed_trades.iter().filter(|t| t.pnl_pct > 0.0).count();
         let avg_catchup = self.completed_trades.iter().map(|t| t.catchup_pct).sum::<f64>() / n as f64;
@@ -369,9 +405,7 @@ impl ShadowTrader {
     }
 
     pub fn position_label(&self) -> &'static str {
-        if self.pending.is_some() {
-            return "PENDING";
-        }
+        if self.pending.is_some() { return "PENDING"; }
         match &self.position {
             None => "FLAT",
             Some(p) => match p.direction {
@@ -381,49 +415,41 @@ impl ShadowTrader {
         }
     }
 
-    fn cleanup(&mut self, ts_ms: i64, _window_ms: i64) {
-        let sample_cutoff = ts_ms - CHART_RETENTION_MS;
-        while let Some(s) = self.mid_samples.front() {
-            if s.ts_ms >= sample_cutoff { break; }
-            self.mid_samples.pop_front();
-        }
+    fn cleanup_spikes(&mut self, ts_ms: i64) {
+        let cutoff = ts_ms - 2 * 60 * 1000;
         while let Some(&spike_ts) = self.spike_timestamps.front() {
-            if spike_ts >= sample_cutoff { break; }
+            if spike_ts >= cutoff { break; }
             self.spike_timestamps.pop_front();
         }
     }
 
-    pub fn debug(&self) -> ShadowDebug {
+    pub fn debug(&self, samples: &PriceSamples) -> ShadowDebug {
         let elapsed = self.start_ts_ms
-            .map(|s| self.latest_ts_ms.saturating_sub(s))
-            .unwrap_or(0);
-        let warmup_remaining = (WARMUP_MS - elapsed).max(0);
-        let cooldown_remaining = (self.cooldown_until_ms - self.latest_ts_ms).max(0);
+            .map(|s| self.latest_ts_ms.saturating_sub(s)).unwrap_or(0);
         let last_5: Vec<f64> = self.completed_trades.iter()
             .rev().take(5).map(|t| t.pnl_pct).collect();
-        let last = self.mid_samples.back();
-
+        let last = samples.back();
         ShadowDebug {
-            samples: self.mid_samples.len(),
+            samples: samples.len(),
             last_binance_bid: last.map(|s| s.binance_bid).unwrap_or(0.0),
             last_binance_ask: last.map(|s| s.binance_ask).unwrap_or(0.0),
             last_gate_bid: last.map(|s| s.gate_bid).unwrap_or(0.0),
             last_gate_ask: last.map(|s| s.gate_ask).unwrap_or(0.0),
             completed_trades_in_window: self.completed_trades.len(),
-            cooldown_remaining_ms: cooldown_remaining,
-            warmup_remaining_ms: warmup_remaining,
+            cooldown_remaining_ms: (self.cooldown_until_ms - self.latest_ts_ms).max(0),
+            warmup_remaining_ms: (self.config.warmup_ms - elapsed).max(0),
             position: self.position_label(),
             entry_price: self.position.as_ref().map(|p| p.gate_entry_price),
             last_5_trades_pnl_pct: last_5,
-            spike_threshold_bps: SPIKE_THRESHOLD_BPS,
+            spike_threshold_bps: self.config.spike_threshold_bps,
             spikes_in_window: self.spike_timestamps.len(),
-            max_hold_ms: MAX_HOLD_MS,
-            stop_loss_bps: STOP_LOSS_BPS,
+            max_hold_ms: self.config.max_hold_ms,
+            stop_loss_bps: self.config.stop_loss_bps,
         }
     }
 
-    pub fn chart_data(&self, symbol: &str) -> ChartData {
-        let len = self.mid_samples.len();
+    pub fn chart_data(&self, symbol: &str, samples: &PriceSamples) -> ChartData {
+        let len = samples.len();
         let step = (len / 600).max(1);
         let cap = len / step + 1;
         let mut ts = Vec::with_capacity(cap);
@@ -431,7 +457,7 @@ impl ShadowTrader {
         let mut gt_ask = Vec::with_capacity(cap);
         let mut bn_bid = Vec::with_capacity(cap);
         let mut bn_ask = Vec::with_capacity(cap);
-        for (i, s) in self.mid_samples.iter().enumerate() {
+        for (i, s) in samples.iter().enumerate() {
             if i % step == 0 {
                 ts.push(s.ts_ms as f64 / 1000.0);
                 gt_bid.push(s.gate_bid);
@@ -441,29 +467,17 @@ impl ShadowTrader {
             }
         }
         let trades: Vec<ChartTrade> = self.completed_trades.iter().map(|t| ChartTrade {
-            entry_ts_ms: t.entry_ts_ms,
-            exit_ts_ms: t.ts_ms,
-            direction: match t.direction {
-                Direction::Short => "SHORT",
-                Direction::Long => "LONG",
-            },
-            pnl_pct: t.pnl_pct,
-            exit_reason: t.exit_reason,
-            spike_bps: t.spike_bps,
-            catchup_pct: t.catchup_pct,
-            entry_price: t.entry_price,
-            exit_price: t.exit_price,
+            entry_ts_ms: t.entry_ts_ms, exit_ts_ms: t.ts_ms,
+            direction: t.direction_str(),
+            pnl_pct: t.pnl_pct, exit_reason: t.exit_reason,
+            spike_bps: t.spike_bps, catchup_pct: t.catchup_pct,
+            entry_price: t.entry_price, exit_price: t.exit_price,
         }).collect();
-
         ChartData {
-            symbol: symbol.to_string(),
-            ts,
-            gate_bid: gt_bid,
-            gate_ask: gt_ask,
-            binance_bid: bn_bid,
-            binance_ask: bn_ask,
-            trades,
-            position: self.position_label(),
+            symbol: symbol.to_string(), ts,
+            gate_bid: gt_bid, gate_ask: gt_ask,
+            binance_bid: bn_bid, binance_ask: bn_ask,
+            trades, position: self.position_label(),
             entry_price: self.position.as_ref().map(|p| p.gate_entry_price),
             entry_ts_ms: self.position.as_ref().map(|p| p.entry_ts_ms),
         }

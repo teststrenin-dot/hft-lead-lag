@@ -7,8 +7,10 @@
 //! - `utils`          — percentile math, timestamp normalisation
 
 pub mod cycle_tracker;
+pub mod price_samples;
 pub mod shadow_trader;
 pub mod state;
+pub mod trader_config;
 pub mod utils;
 
 use std::sync::Arc;
@@ -16,6 +18,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serde::Serialize;
 
+use self::price_samples::PriceSample;
 use self::state::{Quote, SymbolState, refresh_ws_drift};
 use self::shadow_trader::{ChartData, ShadowDebug};
 use self::utils::{now_ms, calculate_ws_drift_ms, normalize_exchange_ts_ms, percentile};
@@ -169,7 +172,15 @@ impl ScreenerStore {
         if let Some(v) = state.gate_leads.average_above_p90_ms() { gt_p90_means.push(v); }
         state.avg_gt_p90_ms = if gt_p90_means.is_empty() { 0.0 } else { gt_p90_means.iter().sum::<f64>() / gt_p90_means.len() as f64 };
 
-        state.shadow.tick(exchange_ts_ms, binance, gate, self.window_ms);
+        state.price_samples.push(PriceSample {
+            ts_ms: exchange_ts_ms,
+            gate_bid: gate.bid,
+            gate_ask: gate.ask,
+            binance_bid: binance.bid,
+            binance_ask: binance.ask,
+        });
+        state.price_samples.cleanup(exchange_ts_ms);
+        state.shadow.tick(exchange_ts_ms, binance, gate, &state.price_samples, self.window_ms);
     }
 
     pub fn rows_sorted(&self) -> Vec<ScreenerRow> {
@@ -210,11 +221,11 @@ impl ScreenerStore {
     }
 
     pub fn shadow_debug(&self, symbol: &str) -> Option<ShadowDebug> {
-        self.symbols.get(symbol).map(|s| s.shadow.debug())
+        self.symbols.get(symbol).map(|s| s.shadow.debug(&s.price_samples))
     }
 
     pub fn chart_data(&self, symbol: &str) -> Option<ChartData> {
-        self.symbols.get(symbol).map(|s| s.shadow.chart_data(symbol))
+        self.symbols.get(symbol).map(|s| s.shadow.chart_data(symbol, &s.price_samples))
     }
 
     pub fn symbol_list(&self) -> Vec<String> {

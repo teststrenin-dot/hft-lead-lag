@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use super::cycle_tracker::CycleTracker;
+use super::price_samples::PriceSamples;
 use super::shadow_trader::ShadowTrader;
 
 /// Snapshot of one side of the order book for a single exchange.
@@ -31,6 +32,7 @@ pub struct SymbolState {
     pub volume_24h_usd: f64,
     pub binance_leads: CycleTracker,
     pub gate_leads: CycleTracker,
+    pub price_samples: PriceSamples,
     pub shadow: ShadowTrader,
 }
 
