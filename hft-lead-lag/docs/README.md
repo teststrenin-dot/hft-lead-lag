@@ -40,23 +40,23 @@
 | Shadow Trader (paper mode) | ✅ Работает | Spike-follow модель, paper PnL tracking |
 | Order execution (real orders) | ⚠️ Не завершено | Executor-заглушки присутствуют, не подключены |
 | Secrets management | ✅ Исправлено | `.env` (gitignored) + `dotenvy` auto-load |
-| Codebase | 32 файла, 5446 LOC | Декомпозированы screener (950→5 файлов) и http_server (793→3 файла) |
+| Codebase | 35 файлов, 5469 LOC | Декомпозированы screener (950→5 файлов), http_server (793→3 файла), executors в отдельные модули |
 
 ---
 
 ## 4) Архитектура (актуальная)
 
 ```text
-src/                          5446 LOC, 32 files
+src/                          5469 LOC, 35 files
 ├── main.rs                   417 LOC  — event loop, drift metrics, orchestration
 ├── lib.rs                           — crate root
 ├── config/mod.rs             198 LOC  — AppConfig from env
 ├── api/                             — HTTP/WS external interfaces
 │   ├── http_server.rs        123 LOC  — server config, routing, HealthState
-│   ├── handlers.rs           283 LOC  — request handlers, DTOs, NATR cache
+│   ├── handlers.rs           159 LOC  — request handlers, DTOs
 │   ├── templates.rs          321 LOC  — screener dashboard HTML/CSS/JS
 │   ├── ws_server.rs          188 LOC  — WebSocket broadcast server
-│   ├── health.rs                    — HealthChecker (legacy, unused)
+│   ├── health.rs             146 LOC  — HealthChecker (legacy, #[allow(dead_code)])
 │   └── mod.rs
 ├── domain/                          — business logic, no I/O deps
 │   ├── screener/
@@ -73,14 +73,20 @@ src/                          5446 LOC, 32 files
 │   ├── services/
 │   │   ├── lead_lag.rs       207 LOC  — LeadLagAnalyzer (unused in main loop)
 │   │   └── risk.rs                  — RiskManager skeleton
-│   └── ports/mod.rs                 — trait ports (declared, not wired)
+│   └── ports/mod.rs                 — trait ports (documented, not wired)
 └── infrastructure/
+    ├── enrichment.rs         139 LOC  — NATR enrichment + fallback screener rows
     ├── exchanges/
-    │   ├── binance/mod.rs    417 LOC  — WS connect + reconnect + REST auth
-    │   ├── gate/mod.rs       568 LOC  — WS connect + reconnect + REST auth
-    │   └── common.rs         228 LOC  — shared exchange utilities
+    │   ├── binance/
+    │   │   ├── mod.rs        398 LOC  — WS connect + reconnect
+    │   │   └── executor.rs    29 LOC  — order executor stub
+    │   ├── gate/
+    │   │   ├── mod.rs        487 LOC  — WS connect + reconnect + parsing
+    │   │   └── executor.rs    63 LOC  — order executor stub
+    │   ├── common.rs         228 LOC  — shared exchange utilities
+    │   └── mod.rs                   — explicit re-exports
     ├── rest/mod.rs           411 LOC  — BinanceRestClient, GateRestClient
-    ├── websocket/mod.rs      168 LOC  — low-level WS helpers
+    ├── websocket/mod.rs      170 LOC  — low-level WS helpers
     └── logging.rs                   — tracing setup
 ```
 
@@ -182,14 +188,14 @@ Root cause исторического drift 177,995ms: unbounded queue death spi
 ## 9) Проверка качества
 
 ```bash
-cargo build    # ~7 warnings (dead code в неподключённых модулях)
+cargo build    # 0 warnings
 cargo test     # 15 pass (14 unit + 1 doctest)
 ```
 
-Текущие warnings (все в неактивном коде):
-- `BinanceOrderExecutor` / `GateOrderExecutor` — fields never read (executor не подключён)
-- `Gate::parse_trade` instance method — дубль static версии
-- `HealthChecker::set_state` — legacy, заменён на `HealthState` с `AtomicBool`
+Все warnings устранены в P1 рефакторинге:
+- `#[allow(dead_code)]` с doc-комментариями для executor-заглушек, WsManager, HealthChecker, ports
+- Удалён мёртвый `Gate::parse_trade` instance method
+- Бизнес-логика NATR вынесена из API-слоя в `infrastructure/enrichment.rs`
 
 ---
 
@@ -215,11 +221,14 @@ cargo test     # 15 pass (14 unit + 1 doctest)
 | Рефакторинг | До | После | Коммит |
 |-------------|-----|-------|--------|
 | screener.rs | 950 LOC god object в api/ | 5 файлов в domain/screener/ (899 LOC) | `c0aaf0c` |
-| http_server.rs | 793 LOC с inline HTML | 3 файла: server 123 + handlers 283 + templates 321 | `89c7583` |
+| http_server.rs | 793 LOC с inline HTML | 3 файла: server 123 + handlers 159 + templates 321 | `89c7583` |
+| NATR enrichment | Inline в handlers.rs (283 LOC) | enrichment.rs (139 LOC) + handlers (159 LOC) | `031f5b7` |
+| Exchange executors | Inline в binance/gate mod.rs | Отдельные executor.rs (29 + 63 LOC) | `031f5b7` |
 | Типы screener | Dead fields (bid_qty, ask_qty, binance_mid_at_entry) | Очищены | `c0aaf0c` |
 | Endpoint constants | 9 констант (5 dead) | 4 живые константы | `89c7583` |
+| Dead code warnings | 6 warnings | 0 warnings (#[allow(dead_code)] + удаление) | `031f5b7` |
 | SYMBOLS_PER_WS | 2 (94 сокета) | 20 (10 сокетов) | `bbe34fc` |
 
 ---
 
-*Last updated: 2026-02-19 (post P0-fixes + architecture refactoring)*
+*Last updated: 2026-02-19 (post P0-fixes + P1 refactoring + architecture decomposition)*
