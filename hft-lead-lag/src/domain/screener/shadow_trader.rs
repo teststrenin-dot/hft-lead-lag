@@ -355,6 +355,8 @@ impl ShadowTrader {
         &self, binance: &Quote, gate: &Quote, samples: &PriceSamples,
     ) -> Option<(Direction, f64)> {
         if samples.len() < self.config.min_baseline_samples { return None; }
+        // Only trade when Binance leads (fresher quote) — the core lead-lag edge.
+        if binance.ts_ms < gate.ts_ms { return None; }
 
         // Compute baseline gap (average ask-gap and bid-gap over history)
         let (mut ask_gap_sum, mut bid_gap_sum, mut count) = (0.0_f64, 0.0_f64, 0_u32);
