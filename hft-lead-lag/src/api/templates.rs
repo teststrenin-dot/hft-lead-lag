@@ -46,6 +46,7 @@ const SCREENER_HTML: &str = r#"<!doctype html>
 <body>
   <div class="top">
     <h1>Lead-Lag Screener</h1>
+    <nav><a href="/fleet" style="color:#93c5fd;font-size:13px;text-decoration:none;">Fleet Optimizer →</a></nav>
     <div class="meta" id="meta">Loading...</div>
   </div>
 
