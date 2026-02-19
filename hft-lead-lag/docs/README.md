@@ -1,30 +1,66 @@
 # HFT Lead-Lag Documentation
 
-Актуальная документация проекта `hft-lead-lag`.
+Документация проекта `hft-lead-lag` (обновлена после полного deep-dive ревью).
 
 ---
 
-## 1) Текущее состояние
+## 1) Статус документации
 
-| Компонент | Статус |
-|---|---|
-| Exchange connectors (Binance/Gate) | ✅ Done |
-| Runtime API (`/health`, `/api/v1/symbols`, `/api/v1/screener`) | ✅ Done |
-| Runtime UI (`/screener`) | ✅ Done |
-| Screener ingress drift метрики | ✅ Done |
-| Startup timestamp drift hardening | ✅ Done |
-| Shadow Trader (paper trading) | ✅ Done |
-| Real-time chart (embedded in `/screener`) | ✅ Done |
-| Order management | ⬜ Planned |
-| Production hardening (reconnect/metrics/alerts) | ⬜ Planned |
+Этот README приведён в актуальное состояние по фактическому коду и логам.
+
+Для полного технического аудита используйте:
+
+- **`docs/review-2026-02-19-deep-dive.md`** — сверх-детальный обзор:
+  - общее качество,
+  - математика,
+  - логика,
+  - баги,
+  - over-architecture,
+  - god objects,
+  - слои/модули,
+  - дублирование,
+  - deep-dive ревью всех 43 коммитов,
+  - привязка к реальному серверу.
 
 ---
 
-## 2) Навигация по документации
+## 2) Верифицированный серверный контекст
+
+Проверка выполнялась на реальном хосте:
+
+- Linux `5.15` (KVM VM)
+- `2 vCPU`
+- RAM `3.8 GiB`, swap `9 GiB` (частично используется)
+- Disk `50G`, свободно ~`11G`
+- Load average ~`1.9`
+- Rust `1.95.0-nightly`
+
+Это важно для интерпретации runtime-поведения (fan-out сокетов, очереди, latency drift, backpressure).
+
+---
+
+## 3) Текущее состояние проекта (по факту)
+
+| Компонент | Статус | Примечание |
+|---|---|---|
+| Exchange connectors (Binance/Gate) | ✅ Работает | Подключение и подписки подтверждены логами |
+| Runtime API (`/health`, `/api/v1/symbols`, `/api/v1/screener`) | ✅ Работает | Есть операционные ограничения (см. deep-dive) |
+| Runtime UI (`/screener`) | ✅ Работает | Polling + chart отображаются |
+| Screener lag/drift метрики | ✅ Работает | Есть риски CPU/стат.смещений под нагрузкой |
+| Shadow Trader (paper mode) | ✅ Работает | Текущая модель — spike-follow, не P90/P10 |
+| Order execution (real orders) | ⚠️ Не завершено | Часть executor-веток пока заглушки |
+| Production hardening | ⚠️ Частично | Нужны reconnect/backpressure/health improvements |
+| Security hygiene | ❌ Критичный долг | Требуется ротация/очистка секретов из истории |
+
+---
+
+## 4) Навигация по документации
 
 ```text
 docs/
-├── README.md
+├── README.md                                # этот файл
+├── review-2026-02-19-deep-dive.md          # полный технический аудит
+├── review-shadow-trader.md                  # исторический review-файл
 ├── manifest/
 │   └── MANIFESTO.md
 ├── backlog/
@@ -39,11 +75,12 @@ docs/
 
 ---
 
-## 3) Быстрый старт
+## 5) Быстрый старт (безопасный)
 
 ```bash
 cd /root/turbo/hft-lead-lag
 
+# Никогда не коммитьте реальные ключи в репозиторий
 export BINANCE_API_KEY="..."
 export BINANCE_API_SECRET="..."
 export GATE_API_KEY="..."
@@ -65,129 +102,102 @@ curl http://127.0.0.1:5000/api/v1/screener
 
 ---
 
-## 4) Основные runtime endpoint'ы
+## 6) Фактические runtime endpoint'ы (из router)
 
-### `GET /health`
-Возвращает статус HTTP сервиса (`{"status":"ok"}`).
+Согласно `src/api/http_server.rs`:
 
-### `GET /api/v1/symbols`
-Возвращает символы Binance/Gate после volume-фильтра:
-- `min_volume_usd = 1_000_000`
-- `common_symbols` = пересечение символов двух бирж.
-- исключены `BTCUSDT`, `ETHUSDT`, `SOLUSDT` (blacklisted).
+- `GET /health`
+- `GET /api/v1/symbols`
+- `GET /api/v1/screener`
+- `GET /screener`
+- `GET /api/v1/shadow/:symbol`
+- `GET /api/v1/chart/:symbol`
 
-### `GET /api/v1/screener`
-Возвращает строки скринера:
-- `symbol`
-- `leader_exchange`
-- `lag_ms`: Медиана (P50) абсолютной разницы timestamps за последние 5 минут.
-- `ws_drift_ms`
-- `ws_drift_binance_ms`
-- `ws_drift_gate_ms`
-- `ws_drift_ingress_binance_ms`
-- `ws_drift_ingress_gate_ms`
-- `entry_half_life_ms`
-- `avg_gt_p90_ms`
-- `gate_natr_30m_pct`
-- Shadow trader fields: `shadow_position`, `shadow_pnl_per_hour_pct`, `shadow_trades`, `shadow_avg_trade_pct`, `shadow_win_rate_pct`
-- `volume_24h_usd`: Объем торгов на Gate за 24ч.
+Важно:
 
-### `GET /screener`
-Веб-таблица поверх `/api/v1/screener` с встроенным real-time графиком.
-- Polling таблицы: 1 раз в секунду.
-- График: uPlot поверх WebSocket, 4 линии (Gate Bid/Ask, Binance Bid/Ask).
-- Визуализация сделок: Trade Zones (зеленая/красная заливка).
-- Сортировка колонок кликом по заголовку.
-
-### `GET /api/v1/chart/:symbol`
-JSON данные для инициализации графика:
-- Downsampled premium timeseries.
-- Текущие пороги P90/P10/P50.
-- Список последних сделок для отрисовки зон.
-
-### `GET /api/v1/shadow/:symbol`
-Debug данные shadow trader: premium samples, cached thresholds, edge, trades, position.
+1. `/health` сейчас возвращает статический `{"status":"ok"}` и не отражает полноту системного здоровья.
+2. В коде есть endpoint-константы, которые не все зарегистрированы в router — ориентируйтесь на фактические route выше.
 
 ---
 
-## 5a) Shadow Trader
+## 7) Актуальная модель Shadow Trader (по коду)
 
-Paper trading модуль для валидации стратегии до реальных ордеров.
+Текущая реализация: **spike-follow** (а не premium-percentile P90/P10/P50).
 
-### Модель
-- **Сигнал**: `premium_bps = (gate.mid − binance.mid) / binance.mid × 10000`
-- **Вход**: premium пересекает замороженный P90 → SHORT Gate, P10 → LONG Gate
-- **Выход**: premium возвращается к P50 (mean reversion)
-- **Execution**: Gate bid/ask + L1 market impact, 10ms simulated delay
-- **Fees**: Gate taker 0.05% × 2 = 10 bps round-trip
-- **MIN_EDGE_BPS = 10**: вход только если |P90−P50| ≥ 10 bps (покрывает fees)
+Опорные константы:
 
-### Параметры
-| Параметр | Значение | Описание |
-|---|---|---|
-| `WARMUP_MS` | 120000 | 2 мин прогрев перед торговлей |
-| `COOLDOWN_MS` | 5000 | 5 сек пауза между сделками |
-| `THRESHOLD_INTERVAL_MS` | 60000 | Пересчёт P90/P10/P50 раз в минуту |
-| `QUOTE_FRESHNESS_MS` | 1000 | Макс. возраст котировки для расчёта premium |
-| `EXECUTION_DELAY_MS` | 10 | Симулированная задержка order-to-fill |
-| `MIN_EDGE_BPS` | 10.0 | Минимальный edge для входа (= 2 × fee) |
+- `FILL_DELAY_MS = 7`
+- `COOLDOWN_MS = 3000`
+- `WARMUP_MS = 30000`
+- `QUOTE_FRESHNESS_MS = 1000`
+- `SPIKE_THRESHOLD_BPS = 30.0`
+
+Логика (упрощённо):
+
+1. Сигнал строится на spike-движении.
+2. Вход делается в paper-позицию с задержкой fill.
+3. Выход основан на target/timeout/stop-loss правилах.
+4. Метрики shadow выводятся в screener API/таблицу.
 
 ---
 
-### `lag_ms`
-Абсолютная разница между exchange timestamps Binance и Gate для текущих котировок.
+## 8) Ключевые технические риски (кратко)
 
-### `ws_drift_ingress_binance_ms` / `ws_drift_ingress_gate_ms`
-`local_receive_ts_ms - exchange_ts_ms` для соответствующей биржи, где `local_receive_ts_ms` фиксируется **в момент получения WS кадра** reader-задачей.
+Подробности и доказательства — в `review-2026-02-19-deep-dive.md`.
 
-### `entry_half_life_ms`
-Среднее время от входа в зону расхождения (`P90`) до схождения (`P50`) в окне 10 минут.
+### P0
 
-### `avg_gt_p90_ms`
-Средняя длительность нахождения в зоне `>= P90` в окне 10 минут.
+1. Секреты в shell-скриптах (требуется немедленная ротация/очистка истории).
+2. Fail-open startup: при проблеме bind API процесс может продолжать runtime.
+3. Unbounded очереди в WS-пайплайне (риск memory/latency blow-up).
+4. Недостаточная reconnect/health зрелость для production-профиля.
 
-### `gate_natr_30m_pct`
-NATR по Gate candles (`interval=30m`, `period=30`) в процентах.
+### P1
 
----
+1. Декомпозиция `screener.rs` и `http_server.rs`.
+2. Устранение дублирования parser/lifecycle/symbol-universe логики.
+3. Выравнивание слоёв: бизнес-логика из API в application services.
 
-## 6) Интерпретация расхождений
+### P2
 
-Если `lag_ms` высокий, а ingress drift низкий:
-- это обычно не сетевой лаг процесса,
-- это асинхронность обновлений между биржами и различие времени прихода последних тикеров.
-
-Если ingress drift резко растет на многих символах:
-- проверяйте нагрузку процесса и частоту polling/REST fallback,
-- проверяйте состояние WS reader/consumer и backlog сообщений.
+1. Полное выравнивание docs↔code через автоматические проверки.
+2. Усиление guardrails для размера модулей и операционной надёжности.
 
 ---
 
-## 7) Проверка качества
+## 9) Проверка качества
 
 ```bash
 cargo build
 cargo test
 ```
 
-Логи:
+Текущий baseline:
+
+- сборка успешна,
+- тесты успешны (`14` unit + `1` doctest),
+- есть warnings по dead/unused code в нескольких модулях (см. deep-dive отчёт).
+
+---
+
+## 10) Полезные логи
+
 - `logs/runtime.log`
-- `logs/test_connection_*.log`
-- `logs/test_final_*.log`
+- `logs/launcher.log`
 - `logs/summary.log`
+- `test_connection_20260218_104355.log`
+- `test_final_20260218_110029.log`
 
 ---
 
-## 8) Что обновлено в текущей версии документации
+## 11) Что обновлено в этой ревизии документации
 
-- добавлен Shadow Trader: paper trading с gate-only execution,
-- добавлен real-time chart `/chart` на uPlot с premium/thresholds/trade markers,
-- добавлены API endpoints: `/api/v1/chart/:symbol`, `/api/v1/shadow/:symbol`, `/api/v1/chart-symbols`,
-- screener таблица расширена shadow-метриками (position, pnl/hr, trades, avg trade, win rate),
-- отражена фиксация `local_ts_ns` на ingress (WS receive time),
-- отражен startup-drain накопленных сообщений,
-- удалены чувствительные данные из документации.
+1. Добавлен полный deep-dive отчёт `review-2026-02-19-deep-dive.md`.
+2. Исправлены устаревшие формулировки по модели Shadow Trader.
+3. Синхронизирован список фактических endpoint'ов с router.
+4. Добавлены server-grounded эксплуатационные риски и приоритеты P0/P1/P2.
+5. Явно зафиксированы security-ограничения по ключам.
 
 ---
 
-*Last updated: 2026-02-18 (runtime drift hardening + docs refresh)*
+*Last updated: 2026-02-19 (deep-dive audit sync)*
