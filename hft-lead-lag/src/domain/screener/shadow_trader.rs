@@ -12,8 +12,6 @@ use super::price_samples::PriceSamples;
 use super::state::Quote;
 use super::trader_config::TraderConfig;
 
-const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
-
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -142,6 +140,9 @@ pub struct ShadowTrader {
     position: Option<OpenPosition>,
     pending: Option<PendingOrder>,
     completed_trades: VecDeque<ClosedTrade>,
+    session_total_pnl_pct: f64,
+    session_trades: usize,
+    session_wins: usize,
     spike_timestamps: VecDeque<i64>,
     start_ts_ms: Option<i64>,
     latest_ts_ms: i64,
@@ -159,6 +160,9 @@ impl ShadowTrader {
             position: None,
             pending: None,
             completed_trades: VecDeque::new(),
+            session_total_pnl_pct: 0.0,
+            session_trades: 0,
+            session_wins: 0,
             spike_timestamps: VecDeque::new(),
             start_ts_ms: None,
             latest_ts_ms: 0,
@@ -361,6 +365,11 @@ impl ShadowTrader {
             catchup_pct, catchup_ms: ts_ms - pos.entry_ts_ms,
             gate_spread_at_entry_bps: pos.gate_spread_at_entry_bps,
         });
+        self.session_total_pnl_pct += pnl_pct;
+        self.session_trades += 1;
+        if pnl_pct > 0.0 {
+            self.session_wins += 1;
+        }
         self.cooldown_until_ms = ts_ms + self.config.cooldown_ms;
 
         let cutoff = ts_ms - window_ms;
@@ -373,8 +382,8 @@ impl ShadowTrader {
     // -- Read models ---------------------------------------------------------
 
     pub fn stats(&self) -> ShadowStats {
-        let n = self.completed_trades.len();
-        if n == 0 {
+        let window_n = self.completed_trades.len();
+        if self.session_trades == 0 {
             return ShadowStats {
                 pnl_per_hour_pct: 0.0, trades_in_window: 0,
                 avg_trade_pct: 0.0, win_rate_pct: 0.0,
@@ -383,20 +392,23 @@ impl ShadowTrader {
                 avg_catchup_pct: 0.0, avg_catchup_lag_ms: 0.0,
             };
         }
-        let obs_ms = self.start_ts_ms
-            .map(|s| (self.latest_ts_ms - s - self.config.warmup_ms).clamp(1, TEN_MINUTES_MS) as f64)
-            .unwrap_or(1.0);
-        let window_hours = obs_ms / 3_600_000.0;
         let total_pnl: f64 = self.completed_trades.iter().map(|t| t.pnl_pct).sum();
-        let wins = self.completed_trades.iter().filter(|t| t.pnl_pct > 0.0).count();
-        let avg_catchup = self.completed_trades.iter().map(|t| t.catchup_pct).sum::<f64>() / n as f64;
-        let avg_lag = self.completed_trades.iter().map(|t| t.catchup_ms as f64).sum::<f64>() / n as f64;
+        let avg_catchup = if window_n > 0 {
+            self.completed_trades.iter().map(|t| t.catchup_pct).sum::<f64>() / window_n as f64
+        } else {
+            0.0
+        };
+        let avg_lag = if window_n > 0 {
+            self.completed_trades.iter().map(|t| t.catchup_ms as f64).sum::<f64>() / window_n as f64
+        } else {
+            0.0
+        };
 
         ShadowStats {
-            pnl_per_hour_pct: total_pnl / window_hours,
-            trades_in_window: n,
-            avg_trade_pct: total_pnl / n as f64,
-            win_rate_pct: (wins as f64 / n as f64) * 100.0,
+            pnl_per_hour_pct: self.session_total_pnl_pct,
+            trades_in_window: self.session_trades,
+            avg_trade_pct: if window_n > 0 { total_pnl / window_n as f64 } else { 0.0 },
+            win_rate_pct: (self.session_wins as f64 / self.session_trades as f64) * 100.0,
             position: self.position_label(),
             spikes_detected: self.spike_timestamps.len(),
             avg_catchup_pct: avg_catchup,

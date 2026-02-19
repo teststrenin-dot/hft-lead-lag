@@ -74,7 +74,7 @@ const SCREENER_HTML: &str = r#"<!doctype html>
         <th class="num" data-key="gate_natr_30m_pct" onclick="sortBy('gate_natr_30m_pct')">NATR%</th>
         <th data-key="shadow_position" onclick="sortBy('shadow_position')">Pos</th>
         <th class="num" data-key="shadow_spikes_detected" onclick="sortBy('shadow_spikes_detected')">Spikes</th>
-        <th class="num" data-key="shadow_pnl_per_hour_pct" onclick="sortBy('shadow_pnl_per_hour_pct')">PnL/hr%</th>
+        <th class="num" data-key="shadow_pnl_per_hour_pct" onclick="sortBy('shadow_pnl_per_hour_pct')">PnL%</th>
         <th class="num" data-key="shadow_trades" onclick="sortBy('shadow_trades')">Trd</th>
         <th class="num" data-key="shadow_avg_trade_pct" onclick="sortBy('shadow_avg_trade_pct')">Avg%</th>
         <th class="num" data-key="shadow_win_rate_pct" onclick="sortBy('shadow_win_rate_pct')">Win%</th>
