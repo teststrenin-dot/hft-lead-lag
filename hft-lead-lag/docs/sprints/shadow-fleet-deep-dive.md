@@ -32,21 +32,20 @@ Shadow Fleet запускает много paper-trader инстансов на 
 
 ---
 
-## 3) Parameter grid (2430 configs)
+## 3) Parameter grid (2880 configs)
 
 ```text
-gap_threshold_bps (spike_threshold_bps): [40, 50, 60, 70, 80, 100]  (6)
-target_ratio:                            [0.3, 0.5, 0.7]            (3)
-stop_loss_bps:                           [8, 10, 15, 20, 30]        (5)
-max_hold_ms:                             [3000, 5000, 10000]         (3)
-max_spread_bps:                          [3, 5, 8]                   (3)
-trailing_decay_ratio:                    [0.3, 0.5, 0.7]             (3)
-trailing_stop_bps:                       gap * 0.5 (computed)        (-)
+gap_threshold_bps (spike_threshold_bps): [50, 60, 70, 80, 100]     (5)
+target_ratio (breakeven trigger):        [0.3, 0.4, 0.5, 0.7]      (4)
+stop_loss_bps:                           [20, 30, 50, 80]           (4)
+max_hold_ms:                             [5000, 10000, 20000, 30000](4)
+max_spread_bps:                          [3, 5, 8]                  (3)
+trailing_decay_ratio (trailing take):    [0.3, 0.5, 0.7]            (3)
 
-TOTAL: 6 * 3 * 5 * 3 * 3 * 3 = 2430
+TOTAL: 5 * 4 * 4 * 4 * 3 * 3 = 2880
 ```
 
-> `spike_window_ms` удалён — baseline считается по всему PriceSamples (2 мин).
+> Двухфазная exit-модель: breakeven при spike×target_ratio → trailing take-profit.
 
 ### Почему в поле остался `spike_*` нейминг
 
@@ -90,14 +89,16 @@ TOTAL: 6 * 3 * 5 * 3 * 3 * 3 = 2430
 - signal = current gap - baseline gap,
 - LONG/SHORT при signal >= threshold.
 
-### Exit
+### Exit (двухфазная модель)
 
-Приоритет:
+**Фаза 1 (до breakeven):** только stop_loss и timeout.
 
-1. `target` (`unrealized_bps >= spike_bps * target_ratio`)
-2. `stop_loss`
-3. `trailing_stop` (если `trailing_stop_bps > 0`)
-4. `timeout` (`max_hold_ms`)
+**Breakeven-активация:** `unrealized_bps >= spike_bps * target_ratio`.
+
+**Фаза 2 (после breakeven):**
+1. `breakeven` — стоп переносится на entry price (`unrealized <= 0`)
+2. `trailing_take` — `unrealized <= peak * trailing_decay_ratio`
+3. `timeout` — `max_hold_ms`
 
 ### PnL
 
@@ -131,7 +132,7 @@ TOTAL: 6 * 3 * 5 * 3 * 3 * 3 = 2430
 `configs`:
 - `id`, `spike_threshold_bps`, `target_ratio`,
 - `stop_loss_bps`, `max_hold_ms`, `max_spread_bps`,
-- `trailing_stop_bps`, `trailing_decay_ratio`,
+- `trailing_decay_ratio`,
 - `fill_delay_ms`, `cooldown_ms`, `warmup_ms`, `quote_freshness_ms`, `taker_fee`.
 
 `trades`:
@@ -205,7 +206,7 @@ Payload:
 
 ### 10.2 CPU profile
 
-- Fleet стартует крупным (2430 конфигов/символ),
+- Fleet стартует крупным (2880 конфигов/символ),
 - затем уменьшается из-за двух уровней прунинга,
 - это удерживает нагрузку в пределах 2 vCPU.
 
@@ -235,7 +236,7 @@ PY
 ```
 
 Ожидаемо:
-- `configs = 2430`,
+- `configs = 2880`,
 - trades растут,
 - endpoint-ы возвращают данные.
 

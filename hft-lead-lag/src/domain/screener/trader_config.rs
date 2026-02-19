@@ -8,17 +8,15 @@ use serde::Serialize;
 pub struct TraderConfig {
     /// Min Binance move to trigger entry (bps). Ask for longs, bid for shorts.
     pub spike_threshold_bps: f64,
-    /// Target as fraction of detected spike (1.0 = full catchup).
+    /// Fraction of detected spike at which breakeven activates and trailing begins.
     pub target_ratio: f64,
-    /// Stop-loss (bps).
+    /// Stop-loss (bps) — active only before breakeven.
     pub stop_loss_bps: f64,
     /// Max hold time (ms).
     pub max_hold_ms: i64,
     /// Max Gate spread to allow entry (bps). 0 = disabled.
     pub max_spread_bps: f64,
-    /// Trailing stop activation threshold (bps of unrealized profit). 0 = disabled.
-    pub trailing_stop_bps: f64,
-    /// Trailing stop decay ratio — exit when unrealized drops below peak * ratio.
+    /// Trailing take-profit ratio — exit when unrealized drops to peak × ratio (post-breakeven).
     pub trailing_decay_ratio: f64,
     /// Simulated order-to-fill latency (ms).
     pub fill_delay_ms: i64,
@@ -39,12 +37,11 @@ impl Default for TraderConfig {
     /// produces a representative mid-grid configuration.
     fn default() -> Self {
         Self {
-            spike_threshold_bps: 60.0,
+            spike_threshold_bps: 70.0,
             target_ratio: 0.5,
-            stop_loss_bps: 15.0,
-            max_hold_ms: 5_000,
+            stop_loss_bps: 50.0,
+            max_hold_ms: 10_000,
             max_spread_bps: 5.0,
-            trailing_stop_bps: 30.0,
             trailing_decay_ratio: 0.5,
             fill_delay_ms: 6,
             cooldown_ms: 3_000,
@@ -67,7 +64,6 @@ impl TraderConfig {
         self.stop_loss_bps.to_bits().hash(&mut h);
         self.max_hold_ms.hash(&mut h);
         self.max_spread_bps.to_bits().hash(&mut h);
-        self.trailing_stop_bps.to_bits().hash(&mut h);
         self.trailing_decay_ratio.to_bits().hash(&mut h);
         self.fill_delay_ms.hash(&mut h);
         self.cooldown_ms.hash(&mut h);

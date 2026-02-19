@@ -26,8 +26,11 @@ struct OpenPosition {
     entry_ts_ms: i64,
     spike_bps: f64,
     gate_spread_at_entry_bps: f64,
-    /// Highest unrealized profit seen (bps) — for trailing stop.
+    /// Highest unrealized profit seen (bps) — for trailing take-profit.
     peak_unrealized_bps: f64,
+    /// True once unrealized reaches breakeven threshold (spike * target_ratio).
+    /// Switches exit from stop-loss to breakeven + trailing take.
+    breakeven_activated: bool,
 }
 
 /// Completed trade record — public for fleet/db persistence.
@@ -245,6 +248,7 @@ impl ShadowTrader {
                     spike_bps,
                     gate_spread_at_entry_bps,
                     peak_unrealized_bps: 0.0,
+                    breakeven_activated: false,
                 });
             }
         }
@@ -267,19 +271,40 @@ impl ShadowTrader {
             pos.peak_unrealized_bps = unrealized_bps;
         }
 
-        let target_bps = pos.spike_bps * cfg.target_ratio;
-        let gate_moved_enough = unrealized_bps >= target_bps;
         let timed_out = hold_ms >= cfg.max_hold_ms;
-        let stopped_out = unrealized_bps <= -cfg.stop_loss_bps;
-        let trailing_stopped = cfg.trailing_stop_bps > 0.0
-            && pos.peak_unrealized_bps >= cfg.trailing_stop_bps
-            && unrealized_bps <= pos.peak_unrealized_bps * cfg.trailing_decay_ratio;
 
-        if gate_moved_enough || timed_out || stopped_out || trailing_stopped {
-            let reason = if gate_moved_enough { "target" }
-                else if stopped_out { "stop_loss" }
-                else if trailing_stopped { "trailing_stop" }
-                else { "timeout" };
+        // Activate breakeven when unrealized reaches spike × target_ratio.
+        let breakeven_threshold = pos.spike_bps * cfg.target_ratio;
+        if !pos.breakeven_activated && unrealized_bps >= breakeven_threshold {
+            pos.breakeven_activated = true;
+        }
+
+        let (should_exit, reason) = if pos.breakeven_activated {
+            // Phase 2: stop at breakeven (entry price), trailing take-profit.
+            let hit_breakeven_stop = unrealized_bps <= 0.0;
+            let trailing_take = unrealized_bps <= pos.peak_unrealized_bps * cfg.trailing_decay_ratio;
+            if hit_breakeven_stop {
+                (true, "breakeven")
+            } else if trailing_take {
+                (true, "trailing_take")
+            } else if timed_out {
+                (true, "timeout")
+            } else {
+                (false, "")
+            }
+        } else {
+            // Phase 1: stop-loss only (no target exit — let trade develop).
+            let stopped_out = unrealized_bps <= -cfg.stop_loss_bps;
+            if stopped_out {
+                (true, "stop_loss")
+            } else if timed_out {
+                (true, "timeout")
+            } else {
+                (false, "")
+            }
+        };
+
+        if should_exit {
             let pos = self.position.take().unwrap();
             self.pending = Some(PendingOrder::Exit {
                 fire_ts_ms: ts_ms,
@@ -674,10 +699,11 @@ mod tests {
     }
 
     #[test]
-    fn target_exit_triggers() {
+    fn breakeven_then_trailing_take() {
         let mut trader = make_trader(|c| {
             c.spike_threshold_bps = 10.0;
-            c.target_ratio = 0.5; // target = spike_bps * 0.5
+            c.target_ratio = 0.5; // breakeven activates at spike * 0.5
+            c.trailing_decay_ratio = 0.5; // exit when unrealized < peak * 0.5
             c.warmup_ms = 0;
             c.fill_delay_ms = 0;
             c.min_baseline_samples = 5;
@@ -686,27 +712,37 @@ mod tests {
             c.max_spread_bps = 0.0;
         });
         let samples = stable_samples(10, 100.0, 100.0, 50_000);
-        // 20 bps gap → spike_bps = 20, target = 20 * 0.5 = 10 bps
+        // 20 bps gap → spike_bps = 20, breakeven at 20 * 0.5 = 10 bps
         let bn = quote(100.20, 100.20, 50_100);
         let gt = quote(100.0, 100.0, 50_100);
         trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
         trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS); // fill entry at 100.0
-        // gate.bid moves to 100.11 → unrealized = 11 bps >= 10 bps target
+        // gate.bid = 100.11 → unrealized = 11 bps >= 10 → breakeven activates
         let gt_up = quote(100.11, 100.20, 50_300);
         trader.tick(50_300, &bn, &gt_up, &samples, WINDOW_MS);
-        trader.tick(50_400, &bn, &gt_up, &samples, WINDOW_MS); // fill exit
+        // Still open — no target exit in new model, trailing take not triggered yet
+        assert_eq!(trader.position_label(), "LONG_GT");
+        // Peak: gate.bid = 100.20 → 20 bps
+        let gt_peak = quote(100.20, 100.25, 50_400);
+        trader.tick(50_400, &bn, &gt_peak, &samples, WINDOW_MS);
+        // Drop: gate.bid = 100.09 → 9 bps < 20 * 0.5 = 10 → trailing take fires
+        let gt_drop = quote(100.09, 100.20, 50_500);
+        trader.tick(50_500, &bn, &gt_drop, &samples, WINDOW_MS);
+        trader.tick(50_600, &bn, &gt_drop, &samples, WINDOW_MS); // fill exit
         assert_eq!(trader.position_label(), "FLAT");
         let t = &trader.completed_trades()[0];
-        assert_eq!(t.exit_reason, "target");
+        assert_eq!(t.exit_reason, "trailing_take");
+        // exit at 100.09, entry at 100.0 → raw 9bps, fees 10bps → net -1bp
+        // With trailing take the trade is in profit pre-fees but not after.
+        // The important thing is the mechanism works — trailing_take fires correctly.
     }
 
     #[test]
-    fn trailing_stop_exit() {
+    fn breakeven_stop_after_activation() {
         let mut trader = make_trader(|c| {
             c.spike_threshold_bps = 10.0;
-            c.trailing_stop_bps = 8.0;    // activate trailing after 8 bps unrealized
-            c.trailing_decay_ratio = 0.5;  // exit when unrealized < peak * 0.5
-            c.target_ratio = 99.0;         // disable target exit
+            c.target_ratio = 0.5; // breakeven at spike * 0.5
+            c.trailing_decay_ratio = 0.5;
             c.warmup_ms = 0;
             c.fill_delay_ms = 0;
             c.min_baseline_samples = 5;
@@ -719,16 +755,16 @@ mod tests {
         let gt = quote(100.0, 100.0, 50_100);
         trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
         trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS); // fill at 100.0
-        // Peak: gate.bid = 100.12 → 12 bps (> 8 bps activation)
-        let gt_peak = quote(100.12, 100.20, 50_300);
-        trader.tick(50_300, &bn, &gt_peak, &samples, WINDOW_MS);
-        // Drop: gate.bid = 100.05 → 5 bps < 12 * 0.5 = 6 bps → trailing triggers
-        let gt_drop = quote(100.05, 100.20, 50_400);
-        trader.tick(50_400, &bn, &gt_drop, &samples, WINDOW_MS);
-        trader.tick(50_500, &bn, &gt_drop, &samples, WINDOW_MS); // fill exit
+        // Hit breakeven threshold: 11 bps >= 10
+        let gt_up = quote(100.11, 100.20, 50_300);
+        trader.tick(50_300, &bn, &gt_up, &samples, WINDOW_MS);
+        // Price crashes back to entry: gate.bid = 99.99 → unrealized = -1 bps <= 0
+        let gt_crash = quote(99.99, 100.20, 50_400);
+        trader.tick(50_400, &bn, &gt_crash, &samples, WINDOW_MS);
+        trader.tick(50_500, &bn, &gt_crash, &samples, WINDOW_MS); // fill exit
         assert_eq!(trader.position_label(), "FLAT");
         let t = &trader.completed_trades()[0];
-        assert_eq!(t.exit_reason, "trailing_stop");
+        assert_eq!(t.exit_reason, "breakeven");
     }
 
     #[test]
@@ -793,22 +829,28 @@ mod tests {
         });
         let samples = stable_samples(10, 100.0, 100.0, 50_000);
 
-        // Trade 1: entry at 100.0, exit target at ~100.06+ (20*0.3=6 bps)
+        // Trade 1: entry at 100.0, breakeven at spike*0.3=6bps, needs trailing take to close
         let bn = quote(100.20, 100.20, 50_100);
         let gt = quote(100.0, 100.0, 50_100);
         trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
         trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS);
+        // Activate breakeven (10 bps > 6 bps threshold) + set peak
         let gt_up = quote(100.10, 100.20, 50_300);
         trader.tick(50_300, &bn, &gt_up, &samples, WINDOW_MS);
-        trader.tick(50_400, &bn, &gt_up, &samples, WINDOW_MS);
+        // Drop below peak*0.5 → trailing take. gate.bid=100.04 → 4 < 10*0.5=5
+        let gt_drop = quote(100.04, 100.20, 50_400);
+        trader.tick(50_400, &bn, &gt_drop, &samples, WINDOW_MS);
+        trader.tick(50_500, &bn, &gt_drop, &samples, WINDOW_MS); // fill exit
 
         // Trade 2
-        let gt2 = quote(100.0, 100.0, 50_500);
-        trader.tick(50_500, &bn, &gt2, &samples, WINDOW_MS);
+        let gt2 = quote(100.0, 100.0, 50_600);
         trader.tick(50_600, &bn, &gt2, &samples, WINDOW_MS);
-        let gt_up2 = quote(100.10, 100.20, 50_700);
-        trader.tick(50_700, &bn, &gt_up2, &samples, WINDOW_MS);
+        trader.tick(50_700, &bn, &gt2, &samples, WINDOW_MS);
+        let gt_up2 = quote(100.10, 100.20, 50_800);
         trader.tick(50_800, &bn, &gt_up2, &samples, WINDOW_MS);
+        let gt_drop2 = quote(100.04, 100.20, 50_900);
+        trader.tick(50_900, &bn, &gt_drop2, &samples, WINDOW_MS);
+        trader.tick(51_000, &bn, &gt_drop2, &samples, WINDOW_MS); // fill exit
 
         let stats = trader.stats();
         assert_eq!(stats.session_trades, 2);

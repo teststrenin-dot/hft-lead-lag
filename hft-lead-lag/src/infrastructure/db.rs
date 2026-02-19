@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS configs (
     stop_loss_bps         REAL NOT NULL,
     max_hold_ms           INTEGER NOT NULL,
     max_spread_bps        REAL NOT NULL,
-    trailing_stop_bps     REAL NOT NULL,
     trailing_decay_ratio  REAL NOT NULL DEFAULT 0.5,
     fill_delay_ms         INTEGER NOT NULL,
     cooldown_ms           INTEGER NOT NULL,
@@ -87,9 +86,9 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
 pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
         "INSERT OR IGNORE INTO configs (id, spike_threshold_bps, target_ratio,
-         stop_loss_bps, max_hold_ms, max_spread_bps, trailing_stop_bps, trailing_decay_ratio,
+         stop_loss_bps, max_hold_ms, max_spread_bps, trailing_decay_ratio,
          fill_delay_ms, cooldown_ms, warmup_ms, quote_freshness_ms, taker_fee)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
     )?;
     for c in configs {
         stmt.execute(params![
@@ -99,7 +98,6 @@ pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::
             c.stop_loss_bps,
             c.max_hold_ms,
             c.max_spread_bps,
-            c.trailing_stop_bps,
             c.trailing_decay_ratio,
             c.fill_delay_ms,
             c.cooldown_ms,

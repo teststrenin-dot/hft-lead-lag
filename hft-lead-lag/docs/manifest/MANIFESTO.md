@@ -35,7 +35,7 @@
 ## Текущий фокус
 
 - Gap-based lead-lag с baseline нормализацией.
-- Shadow Fleet exploration: **2430 configs**.
+- Shadow Fleet exploration: **2880 configs**.
 - Expectancy-first ranking + runtime pruning.
 - Подготовка к следующему шагу: policy selection + robust scoring.
 
