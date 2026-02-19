@@ -76,7 +76,14 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
         .and_then(|mut s| s.exists([]))
         .unwrap_or(false);
     if has_legacy_col {
-        conn.execute_batch("DROP TABLE IF EXISTS configs;")?;
+        // Legacy schema has columns removed in current model. Recreate optimizer tables.
+        // Drop trades first (it references configs) to avoid FK violations.
+        conn.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             DROP TABLE IF EXISTS trades;
+             DROP TABLE IF EXISTS configs;
+             PRAGMA foreign_keys=ON;"
+        )?;
     }
 
     conn.execute_batch(SCHEMA)?;
