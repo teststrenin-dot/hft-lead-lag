@@ -14,12 +14,13 @@ use super::trader_config::TraderConfig;
 /// Parameter grid values for fleet generation.
 /// Exit model: breakeven at spike × target_ratio, then trailing take-profit.
 /// Pre-breakeven: stop-loss only. Post-breakeven: stop at entry + trail peak.
-const GAP_THRESHOLDS: &[f64] = &[30.0, 40.0, 50.0, 60.0, 80.0];
+const GAP_THRESHOLDS: &[f64] = &[30.0, 50.0, 60.0, 80.0];
 const TARGET_RATIOS: &[f64] = &[0.3, 0.5, 0.7];
 const STOP_LOSSES: &[f64] = &[8.0, 15.0, 25.0, 40.0];
-const MAX_HOLDS: &[i64] = &[5_000, 10_000, 20_000, 30_000];
+const MAX_HOLDS: &[i64] = &[5_000, 10_000, 30_000];
 const MAX_SPREADS: &[f64] = &[3.0, 5.0];
-const TRAILING_TAKES: &[f64] = &[0.3, 0.5, 0.7];
+const TRAILING_TAKES: &[f64] = &[0.3, 0.7];
+const BASELINE_WINDOWS: &[i64] = &[10_000, 20_000, 30_000, 60_000];
 
 /// Min trades before a config can be pruned for poor performance.
 const PRUNE_MIN_TRADES: usize = 30;
@@ -35,7 +36,8 @@ pub fn generate_grid() -> Vec<TraderConfig> {
         * STOP_LOSSES.len()
         * MAX_HOLDS.len()
         * MAX_SPREADS.len()
-        * TRAILING_TAKES.len();
+        * TRAILING_TAKES.len()
+        * BASELINE_WINDOWS.len();
     let mut configs = Vec::with_capacity(cap);
     let base = TraderConfig::default();
 
@@ -45,15 +47,18 @@ pub fn generate_grid() -> Vec<TraderConfig> {
                 for &hold in MAX_HOLDS {
                     for &spread in MAX_SPREADS {
                         for &trailing in TRAILING_TAKES {
-                            configs.push(TraderConfig {
-                                spike_threshold_bps: gap,
-                                target_ratio: target,
-                                stop_loss_bps: stop,
-                                max_hold_ms: hold,
-                                max_spread_bps: spread,
-                                trailing_decay_ratio: trailing,
-                                ..base
-                            });
+                            for &bw in BASELINE_WINDOWS {
+                                configs.push(TraderConfig {
+                                    spike_threshold_bps: gap,
+                                    target_ratio: target,
+                                    stop_loss_bps: stop,
+                                    max_hold_ms: hold,
+                                    max_spread_bps: spread,
+                                    trailing_decay_ratio: trailing,
+                                    baseline_window_ms: bw,
+                                    ..base
+                                });
+                            }
                         }
                     }
                 }
@@ -189,8 +194,8 @@ mod tests {
     #[test]
     fn grid_size() {
         let grid = generate_grid();
-        // 5 gaps × 3 targets × 4 SLs × 4 holds × 2 spreads × 3 trailing = 1440
-        assert_eq!(grid.len(), 1440);
+        // 4 gaps × 3 targets × 4 SLs × 3 holds × 2 spreads × 2 trailing × 4 baseline = 2304
+        assert_eq!(grid.len(), 2304);
     }
 
     #[test]
@@ -206,7 +211,7 @@ mod tests {
     fn fleet_creation() {
         let configs = generate_grid();
         let fleet = ShadowFleet::new(&configs);
-        assert_eq!(fleet.len(), 1440);
-        assert_eq!(fleet.active(), 1440);
+        assert_eq!(fleet.len(), 2304);
+        assert_eq!(fleet.active(), 2304);
     }
 }

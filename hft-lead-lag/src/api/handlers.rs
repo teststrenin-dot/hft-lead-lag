@@ -147,6 +147,7 @@ pub(crate) struct FleetConfigRank {
     max_hold_ms: i64,
     max_spread_bps: f64,
     trailing_decay_ratio: f64,
+    baseline_window_ms: i64,
     total_trades: i64,
     wins: i64,
     win_rate_pct: f64,
@@ -165,7 +166,7 @@ pub(crate) async fn get_fleet_ranking(
     let mut stmt = conn.prepare(
         "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
                 c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
-                c.trailing_decay_ratio,
+                c.trailing_decay_ratio, c.baseline_window_ms,
                 COUNT(*) as total,
                 SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(t.pnl_pct) as total_pnl,
@@ -179,9 +180,9 @@ pub(crate) async fn get_fleet_ranking(
     ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
 
     let rows = stmt.query_map([], |row| {
-        let total: i64 = row.get(7)?;
-        let wins: i64 = row.get(8)?;
-        let total_pnl: f64 = row.get(9)?;
+        let total: i64 = row.get(8)?;
+        let wins: i64 = row.get(9)?;
+        let total_pnl: f64 = row.get(10)?;
         Ok(FleetConfigRank {
             config_id: row.get(0)?,
             spike_threshold_bps: row.get(1)?,
@@ -190,12 +191,13 @@ pub(crate) async fn get_fleet_ranking(
             max_hold_ms: row.get(4)?,
             max_spread_bps: row.get(5)?,
             trailing_decay_ratio: row.get(6)?,
+            baseline_window_ms: row.get(7)?,
             total_trades: total,
             wins,
             win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
             total_pnl_pct: total_pnl,
             avg_pnl_pct: if total > 0 { total_pnl / total as f64 } else { 0.0 },
-            symbols_traded: row.get(10)?,
+            symbols_traded: row.get(11)?,
         })
     }).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
 
@@ -215,6 +217,7 @@ pub(crate) struct SymbolBestConfig {
     max_hold_ms: i64,
     max_spread_bps: f64,
     trailing_decay_ratio: f64,
+    baseline_window_ms: i64,
     total_trades: i64,
     wins: i64,
     win_rate_pct: f64,
@@ -234,7 +237,7 @@ pub(crate) async fn get_fleet_by_symbol(
             SELECT t.symbol, c.id as config_id,
                    c.spike_threshold_bps, c.target_ratio,
                    c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
-                   c.trailing_decay_ratio,
+                   c.trailing_decay_ratio, c.baseline_window_ms,
                    COUNT(*) as total,
                    SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
                    SUM(t.pnl_pct) as total_pnl,
@@ -246,15 +249,15 @@ pub(crate) async fn get_fleet_by_symbol(
         )
         SELECT symbol, config_id, spike_threshold_bps, target_ratio,
                stop_loss_bps, max_hold_ms, max_spread_bps, trailing_decay_ratio,
-               total, wins, total_pnl
+               baseline_window_ms, total, wins, total_pnl
         FROM ranked WHERE rn = 1
         ORDER BY total_pnl / total DESC"
     ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
 
     let rows = stmt.query_map([], |row| {
-        let total: i64 = row.get(8)?;
-        let wins: i64 = row.get(9)?;
-        let total_pnl: f64 = row.get(10)?;
+        let total: i64 = row.get(9)?;
+        let wins: i64 = row.get(10)?;
+        let total_pnl: f64 = row.get(11)?;
         Ok(SymbolBestConfig {
             symbol: row.get(0)?,
             config_id: row.get(1)?,
@@ -264,6 +267,7 @@ pub(crate) async fn get_fleet_by_symbol(
             max_hold_ms: row.get(5)?,
             max_spread_bps: row.get(6)?,
             trailing_decay_ratio: row.get(7)?,
+            baseline_window_ms: row.get(8)?,
             total_trades: total,
             wins,
             win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
@@ -287,6 +291,7 @@ pub(crate) struct FleetRankedConfig {
     max_hold_ms: i64,
     max_spread_bps: f64,
     trailing_decay_ratio: f64,
+    baseline_window_ms: i64,
     total_trades: i64,
     wins: i64,
     win_rate_pct: f64,
@@ -309,7 +314,7 @@ pub(crate) async fn get_fleet_ranked(
     let mut stmt = conn.prepare(
         "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
                 c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
-                c.trailing_decay_ratio,
+                c.trailing_decay_ratio, c.baseline_window_ms,
                 COUNT(*) as total,
                 SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(t.pnl_pct) as total_pnl,
@@ -327,13 +332,13 @@ pub(crate) async fn get_fleet_ranked(
     ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
 
     let rows = stmt.query_map([], |row| {
-        let total: i64 = row.get(7)?;
-        let wins: i64 = row.get(8)?;
-        let total_pnl: f64 = row.get(9)?;
-        let avg_pnl: f64 = row.get(10)?;
-        let avg_pnl_sq: f64 = row.get(11)?;
-        let gross_win: f64 = row.get(12)?;
-        let gross_loss: f64 = row.get(13)?;
+        let total: i64 = row.get(8)?;
+        let wins: i64 = row.get(9)?;
+        let total_pnl: f64 = row.get(10)?;
+        let avg_pnl: f64 = row.get(11)?;
+        let avg_pnl_sq: f64 = row.get(12)?;
+        let gross_win: f64 = row.get(13)?;
+        let gross_loss: f64 = row.get(14)?;
 
         let variance = (avg_pnl_sq - avg_pnl * avg_pnl).max(0.0);
         let stddev_pnl = variance.sqrt();
@@ -350,6 +355,7 @@ pub(crate) async fn get_fleet_ranked(
             max_hold_ms: row.get(4)?,
             max_spread_bps: row.get(5)?,
             trailing_decay_ratio: row.get(6)?,
+            baseline_window_ms: row.get(7)?,
             total_trades: total,
             wins,
             win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
@@ -359,7 +365,7 @@ pub(crate) async fn get_fleet_ranked(
             sharpe,
             profit_factor,
             composite,
-            symbols_traded: row.get(14)?,
+            symbols_traded: row.get(15)?,
         })
     }).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
 

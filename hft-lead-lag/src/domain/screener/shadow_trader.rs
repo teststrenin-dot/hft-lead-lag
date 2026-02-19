@@ -331,7 +331,7 @@ impl ShadowTrader {
             }
         }
 
-        if let Some((direction, gap_bps)) = self.detect_gap(binance, gate, samples) {
+        if let Some((direction, gap_bps)) = self.detect_gap(ts_ms, binance, gate, samples) {
             self.spike_timestamps.push_back(ts_ms);
             let gate_mid = (gate.bid + gate.ask) * 0.5;
             let spread_bps = if gate_mid > 0.0 {
@@ -349,16 +349,19 @@ impl ShadowTrader {
     // -- Gap detection (lead-lag) --------------------------------------------
 
     /// Lead-lag with baseline: enter when current gap EXCEEDS the average gap.
-    /// Baseline = mean(binance - gate) over PriceSamples history (~2 min).
+    /// Baseline = mean(binance - gate) over last `baseline_window_ms`.
     /// Signal = current_gap - baseline_gap. Enter when signal > threshold.
     fn detect_gap(
-        &self, binance: &Quote, gate: &Quote, samples: &PriceSamples,
+        &self, ts_ms: i64, binance: &Quote, gate: &Quote, samples: &PriceSamples,
     ) -> Option<(Direction, f64)> {
         if samples.len() < self.config.min_baseline_samples { return None; }
 
-        // Compute baseline gap (average ask-gap and bid-gap over history)
+        let cutoff = ts_ms - self.config.baseline_window_ms;
+
+        // Compute baseline gap over window (not all samples)
         let (mut ask_gap_sum, mut bid_gap_sum, mut count) = (0.0_f64, 0.0_f64, 0_u32);
         for s in samples.iter() {
+            if s.ts_ms < cutoff { continue; }
             if s.gate_ask > 0.0 && s.binance_ask > 0.0 {
                 ask_gap_sum += ((s.binance_ask - s.gate_ask) / s.gate_ask) * 10_000.0;
             }
@@ -592,7 +595,7 @@ mod tests {
         let samples = stable_samples(19, 100.0, 100.0, 50_000);
         let bn = quote(100.0, 100.0, 50_000);
         let gt = quote(100.0, 100.0, 50_000);
-        assert!(trader.detect_gap(&bn, &gt, &samples).is_none());
+        assert!(trader.detect_gap(50_100, &bn, &gt, &samples).is_none());
     }
 
     #[test]
@@ -607,7 +610,7 @@ mod tests {
         // current: binance_ask = 100.60, gate_ask = 100 → current_gap = 60 bps
         let bn = quote(100.60, 100.60, 50_000);
         let gt = quote(100.0, 100.0, 50_000);
-        let result = trader.detect_gap(&bn, &gt, &samples);
+        let result = trader.detect_gap(50_100, &bn, &gt, &samples);
         assert!(result.is_some());
         let (dir, gap_bps) = result.unwrap();
         assert_eq!(dir, Direction::Long);
@@ -624,7 +627,7 @@ mod tests {
         // 30 bps gap — below 50 bps threshold
         let bn = quote(100.30, 100.30, 50_000);
         let gt = quote(100.0, 100.0, 50_000);
-        assert!(trader.detect_gap(&bn, &gt, &samples).is_none());
+        assert!(trader.detect_gap(50_100, &bn, &gt, &samples).is_none());
     }
 
     // -- PnL with fees ----------------------------------------------------------

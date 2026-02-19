@@ -18,6 +18,8 @@ pub struct TraderConfig {
     pub max_spread_bps: f64,
     /// Trailing take-profit ratio — exit when unrealized drops to peak × ratio (post-breakeven).
     pub trailing_decay_ratio: f64,
+    /// Baseline window for gap detection (ms). Shorter = more signals, noisier.
+    pub baseline_window_ms: i64,
     /// Simulated order-to-fill latency (ms).
     pub fill_delay_ms: i64,
     /// Post-trade cooldown (ms).
@@ -39,10 +41,11 @@ impl Default for TraderConfig {
         Self {
             spike_threshold_bps: 50.0,
             target_ratio: 0.5,
-            stop_loss_bps: 50.0,
+            stop_loss_bps: 15.0,
             max_hold_ms: 10_000,
             max_spread_bps: 5.0,
             trailing_decay_ratio: 0.5,
+            baseline_window_ms: 20_000,
             fill_delay_ms: 6,
             cooldown_ms: 3_000,
             warmup_ms: 30_000,
@@ -65,6 +68,7 @@ impl TraderConfig {
         self.max_hold_ms.hash(&mut h);
         self.max_spread_bps.to_bits().hash(&mut h);
         self.trailing_decay_ratio.to_bits().hash(&mut h);
+        self.baseline_window_ms.hash(&mut h);
         self.fill_delay_ms.hash(&mut h);
         self.cooldown_ms.hash(&mut h);
         self.warmup_ms.hash(&mut h);
