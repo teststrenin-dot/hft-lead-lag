@@ -22,14 +22,16 @@ use crate::infrastructure::exchanges::common::{
 };
 
 const BINANCE_WS_ENDPOINT: &str = "wss://fstream.binance.com/ws";
+/// Bounded fan-in channel capacity (protects against OOM on 3.8 GiB server)
+const MSG_CHANNEL_CAPACITY: usize = 10_000;
 
 pub struct BinanceMarketData {
     /// WebSocket sender channels (2 symbols per socket in batch mode)
     ws_txs: Vec<mpsc::UnboundedSender<Message>>,
     /// Shared fan-in channel for all WS reader tasks
-    msg_tx: Option<mpsc::UnboundedSender<StampedBytes>>,
+    msg_tx: Option<mpsc::Sender<StampedBytes>>,
     /// Receiver for incoming messages
-    msg_rx: Option<mpsc::UnboundedReceiver<StampedBytes>>,
+    msg_rx: Option<mpsc::Receiver<StampedBytes>>,
     symbol_cache: SymbolCache,
     next_subscription_id: SubscriptionId,
     api_key: Option<String>,
@@ -121,7 +123,7 @@ impl BinanceMarketData {
     }
 
     async fn spawn_ws_worker(
-        msg_tx: mpsc::UnboundedSender<StampedBytes>,
+        msg_tx: mpsc::Sender<StampedBytes>,
     ) -> ExchangeResult<mpsc::UnboundedSender<Message>> {
         let request = BINANCE_WS_ENDPOINT
             .into_client_request()
@@ -143,10 +145,10 @@ impl BinanceMarketData {
                 let recv_ts = now_ns();
                 match msg_result {
                     Ok(Message::Text(text)) => {
-                        let _ = msg_tx.send((text.into_bytes(), recv_ts));
+                        let _ = msg_tx.try_send((text.into_bytes(), recv_ts));
                     }
                     Ok(Message::Binary(bin)) => {
-                        let _ = msg_tx.send((bin, recv_ts));
+                        let _ = msg_tx.try_send((bin, recv_ts));
                     }
                     Ok(Message::Close(frame)) => {
                         warn!("WS closed: {:?}", frame);
@@ -240,8 +242,7 @@ impl MarketDataStream for BinanceMarketData {
     }
 
     async fn connect(&mut self) -> ExchangeResult<()> {
-        let (msg_tx, msg_rx): (mpsc::UnboundedSender<StampedBytes>, mpsc::UnboundedReceiver<StampedBytes>) =
-            mpsc::unbounded_channel();
+        let (msg_tx, msg_rx) = mpsc::channel::<StampedBytes>(MSG_CHANNEL_CAPACITY);
         let primary_ws = Self::spawn_ws_worker(msg_tx.clone()).await?;
         self.ws_txs.clear();
         self.ws_txs.push(primary_ws);

@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
@@ -32,11 +33,34 @@ impl Default for HttpServerConfig {
     }
 }
 
+/// Shared health state (lock-free via atomics)
+#[derive(Debug)]
+pub struct HealthState {
+    pub binance_connected: AtomicBool,
+    pub gate_connected: AtomicBool,
+}
+
+impl HealthState {
+    pub fn new() -> Self {
+        Self {
+            binance_connected: AtomicBool::new(false),
+            gate_connected: AtomicBool::new(false),
+        }
+    }
+}
+
+impl Default for HealthState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// HTTP server for REST API
 pub struct HttpServer {
     config: HttpServerConfig,
     min_volume_usd: f64,
     screener: ScreenerStore,
+    health: Arc<HealthState>,
 }
 
 impl HttpServer {
@@ -45,18 +69,20 @@ impl HttpServer {
     }
 
     pub fn with_min_volume(config: HttpServerConfig, min_volume_usd: f64) -> Self {
-        Self::with_runtime(config, min_volume_usd, ScreenerStore::default())
+        Self::with_runtime(config, min_volume_usd, ScreenerStore::default(), Arc::new(HealthState::new()))
     }
 
     pub fn with_runtime(
         config: HttpServerConfig,
         min_volume_usd: f64,
         screener: ScreenerStore,
+        health: Arc<HealthState>,
     ) -> Self {
         Self {
             config,
             min_volume_usd,
             screener,
+            health,
         }
     }
 
@@ -66,10 +92,18 @@ impl HttpServer {
 
     /// Start the HTTP API server
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind(self.bind_address()).await?;
+        info!("HTTP server listening on {}", self.bind_address());
+        self.serve(listener).await
+    }
+
+    /// Start serving on a pre-bound listener (fail-fast: bind in main, serve in task)
+    pub async fn serve(&self, listener: tokio::net::TcpListener) -> Result<(), Box<dyn std::error::Error>> {
         let state = Arc::new(HttpState {
             min_volume_usd: self.min_volume_usd,
             screener: self.screener.clone(),
             natr_cache: Arc::new(DashMap::new()),
+            health: self.health.clone(),
         });
 
         let app = Router::new()
@@ -81,8 +115,6 @@ impl HttpServer {
             .route("/api/v1/chart/:symbol", get(get_chart_data))
             .with_state(state);
 
-        let listener = tokio::net::TcpListener::bind(self.bind_address()).await?;
-        info!("HTTP server listening on {}", self.bind_address());
         axum::serve(listener, app).await?;
         Ok(())
     }
@@ -93,6 +125,7 @@ struct HttpState {
     min_volume_usd: f64,
     screener: ScreenerStore,
     natr_cache: Arc<DashMap<String, CachedNatr>>,
+    health: Arc<HealthState>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +137,8 @@ struct CachedNatr {
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
+    binance: bool,
+    gate: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -131,8 +166,17 @@ struct ScreenerResponse {
     rows: Vec<ScreenerRow>,
 }
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
+async fn health(State(state): State<Arc<HttpState>>) -> (axum::http::StatusCode, Json<HealthResponse>) {
+    let binance = state.health.binance_connected.load(Ordering::Relaxed);
+    let gate = state.health.gate_connected.load(Ordering::Relaxed);
+    let healthy = binance && gate;
+    let status = if healthy { "ok" } else { "degraded" };
+    let code = if healthy {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(HealthResponse { status, binance, gate }))
 }
 
 async fn get_symbols(

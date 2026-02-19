@@ -86,12 +86,17 @@ impl MarketDataServer {
 
     /// Start WebSocket server for market data broadcasting
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind(self.bind_address()).await?;
+        info!("Market data server listening on {}", self.bind_address());
+        self.serve(listener).await
+    }
+
+    /// Start serving on a pre-bound listener (fail-fast: bind in main, serve in task)
+    pub async fn serve(&self, listener: tokio::net::TcpListener) -> Result<(), Box<dyn std::error::Error>> {
         let app = Router::new()
             .route("/ws", get(ws_upgrade))
             .with_state(self.tx.clone());
 
-        let listener = tokio::net::TcpListener::bind(self.bind_address()).await?;
-        info!("Market data server listening on {}", self.bind_address());
         axum::serve(listener, app).await?;
         Ok(())
     }

@@ -5,11 +5,17 @@ set -e
 
 cd /root/turbo/hft-lead-lag
 
-# API ключи
-export BINANCE_API_KEY="TnczkCaMuCYSvkLBYbiRXkAPDXIexso3jdIKu3TBA8aSiRwGlOTnSspstBcdpZrp"
-export BINANCE_API_SECRET="cYkg26J3WqiMyPZMKA87tgbPJmRo1ybghVyeh52s2JaLQrTNDolmAc6V66rAGPxj"
-export GATE_API_KEY="f9dd727fd86d14c064971e59e0c88e3f"
-export GATE_API_SECRET="534d0d582a0fa23faf378cf2b0b68cc4c56212b47f1293b93fa335fdf326dfb1"
+# API ключи — задать в окружении или в .env
+if [ -f .env ]; then
+    set -a; source .env; set +a
+fi
+
+for var in BINANCE_API_KEY BINANCE_API_SECRET GATE_API_KEY GATE_API_SECRET; do
+    if [ -z "${!var}" ]; then
+        echo "ERROR: $var is not set. Export it or add to .env" >&2
+        exit 1
+    fi
+done
 export RUST_LOG=hft_lead_lag=info
 
 LOG_DIR="/root/turbo/hft-lead-lag/logs"

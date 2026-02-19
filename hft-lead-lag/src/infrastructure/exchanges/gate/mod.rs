@@ -25,13 +25,15 @@ use crate::infrastructure::exchanges::common::{
 
 /// Gate.io Futures WebSocket endpoint
 const GATE_WS_ENDPOINT: &str = "wss://fx-ws.gateio.ws/v4/ws/usdt";
+/// Bounded fan-in channel capacity (protects against OOM on 3.8 GiB server)
+const MSG_CHANNEL_CAPACITY: usize = 10_000;
 
 /// Gate.io Futures market data connector
 pub struct GateMarketData {
     /// WebSocket writer channel
     ws_tx: Option<mpsc::UnboundedSender<Message>>,
     /// Receiver for incoming messages
-    msg_rx: Option<mpsc::UnboundedReceiver<StampedBytes>>,
+    msg_rx: Option<mpsc::Receiver<StampedBytes>>,
     /// Symbol cache for interning
     symbol_cache: SymbolCache,
     /// Next subscription ID
@@ -236,7 +238,7 @@ impl MarketDataStream for GateMarketData {
         let (write_half, read_half) = futures_util::stream::StreamExt::split(ws_stream);
         let (ws_tx, mut ws_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) =
             mpsc::unbounded_channel();
-        let (msg_tx, msg_rx) = mpsc::unbounded_channel::<StampedBytes>();
+        let (msg_tx, msg_rx) = mpsc::channel::<StampedBytes>(MSG_CHANNEL_CAPACITY);
 
         // Spawn message reader task
         let auth_payload = if let (Some(key), Some(secret)) = (&self.api_key, &self.api_secret) {
@@ -257,10 +259,10 @@ impl MarketDataStream for GateMarketData {
                 match msg_result {
                     Ok(msg) => match msg {
                         Message::Text(text) => {
-                            let _ = msg_tx.send((text.into_bytes(), recv_ts));
+                            let _ = msg_tx.try_send((text.into_bytes(), recv_ts));
                         }
                         Message::Binary(bin) => {
-                            let _ = msg_tx.send((bin, recv_ts));
+                            let _ = msg_tx.try_send((bin, recv_ts));
                         }
                         Message::Close(frame) => {
                             warn!("Gate.io WebSocket closed: {:?}", frame);

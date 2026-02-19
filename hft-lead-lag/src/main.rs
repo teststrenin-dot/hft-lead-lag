@@ -8,10 +8,12 @@ use hft_lead_lag::{
     LeadLagStrategy, LeadLagStrategyConfig,
     ConfigManager, MarketDataStream,
 };
-use hft_lead_lag::api::{HttpServer, HttpServerConfig, MarketDataEvent, MarketDataServer, ScreenerStore, WsServerConfig};
+use hft_lead_lag::api::{HealthState, HttpServer, HttpServerConfig, MarketDataEvent, MarketDataServer, ScreenerStore, WsServerConfig};
 use hft_lead_lag::infrastructure::logging::init_centralized_logging;
 use hft_lead_lag::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 use tracing::{error, info, warn};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 /// Minimum 24h USD volume for symbol filtering
@@ -126,6 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize exchange connectors
     let mut binance = BinanceMarketData::new();
     let mut gate = GateMarketData::new();
+    let health_state = Arc::new(HealthState::new());
 
     // Set credentials if available
     if let Some(creds) = config_manager.binance_credentials() {
@@ -144,12 +147,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         error!("Failed to connect to Binance: {}", e);
         return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
     }
+    health_state.binance_connected.store(true, Ordering::Relaxed);
 
     info!("Connecting to Gate.io Futures...");
     if let Err(e) = gate.connect().await {
         error!("Failed to connect to Gate: {}", e);
         return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
     }
+    health_state.gate_connected.store(true, Ordering::Relaxed);
 
     // Start external APIs early so checkpoint endpoints are always available.
     let screener = ScreenerStore::default();
@@ -163,17 +168,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         HttpServerConfig::default(),
         MIN_VOLUME_USD,
         screener.clone(),
+        health_state.clone(),
     );
-    tokio::spawn(async move {
-        if let Err(e) = http_server.start().await {
-            error!("HTTP server failed: {}", e);
-        }
-    });
+
+    // Bind listeners before spawning to fail fast on "Address already in use"
+    let http_listener = tokio::net::TcpListener::bind(http_server.bind_address()).await?;
+    info!("HTTP server bound on {}", http_server.bind_address());
 
     let ws_server = MarketDataServer::new(WsServerConfig::default());
     let ws_tx = ws_server.transmitter();
+    let ws_listener = tokio::net::TcpListener::bind(ws_server.bind_address()).await?;
+    info!("WS server bound on {}", ws_server.bind_address());
+
     tokio::spawn(async move {
-        if let Err(e) = ws_server.start().await {
+        if let Err(e) = http_server.serve(http_listener).await {
+            error!("HTTP server failed: {}", e);
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = ws_server.serve(ws_listener).await {
             error!("WS server failed: {}", e);
         }
     });
