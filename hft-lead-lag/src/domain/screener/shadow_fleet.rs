@@ -68,8 +68,8 @@ pub struct ShadowFleet {
     traders: Vec<(u64, ShadowTrader)>,
     /// Trades pending drain to persistence layer.
     pending_trades: VecDeque<FleetTrade>,
-    /// Track last known trade count per trader to detect new completions.
-    last_trade_counts: Vec<usize>,
+    /// Monotonic session trade count per trader — never decreases.
+    last_session_trades: Vec<usize>,
 }
 
 impl ShadowFleet {
@@ -78,11 +78,11 @@ impl ShadowFleet {
             .iter()
             .map(|c| (c.config_id(), ShadowTrader::new(*c)))
             .collect();
-        let last_trade_counts = vec![0; traders.len()];
+        let last_session_trades = vec![0; traders.len()];
         Self {
             traders,
             pending_trades: VecDeque::new(),
-            last_trade_counts,
+            last_session_trades,
         }
     }
 
@@ -103,18 +103,21 @@ impl ShadowFleet {
         for (idx, (config_id, trader)) in self.traders.iter_mut().enumerate() {
             trader.tick(ts_ms, binance, gate, samples, window_ms);
 
-            // Detect new completed trades since last tick.
-            let current_count = trader.completed_trades().len();
-            let prev_count = self.last_trade_counts[idx];
-            if current_count > prev_count {
-                for trade in trader.completed_trades().iter().skip(prev_count) {
+            // Detect new completed trades via monotonic session counter.
+            let session_n = trader.session_trades();
+            let prev_n = self.last_session_trades[idx];
+            if session_n > prev_n {
+                // New trades are always at the tail of the deque.
+                let new_count = session_n - prev_n;
+                let deque = trader.completed_trades();
+                for trade in deque.iter().rev().take(new_count) {
                     self.pending_trades.push_back(FleetTrade {
                         config_id: *config_id,
                         symbol: symbol.to_string(),
                         trade: trade.clone(),
                     });
                 }
-                self.last_trade_counts[idx] = current_count;
+                self.last_session_trades[idx] = session_n;
             }
         }
     }

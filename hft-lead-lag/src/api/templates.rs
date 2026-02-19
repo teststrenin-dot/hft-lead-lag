@@ -74,8 +74,8 @@ const SCREENER_HTML: &str = r#"<!doctype html>
         <th class="num" data-key="gate_natr_30m_pct" onclick="sortBy('gate_natr_30m_pct')">NATR%</th>
         <th data-key="shadow_position" onclick="sortBy('shadow_position')">Pos</th>
         <th class="num" data-key="shadow_spikes_detected" onclick="sortBy('shadow_spikes_detected')">Spikes</th>
-        <th class="num" data-key="shadow_pnl_per_hour_pct" onclick="sortBy('shadow_pnl_per_hour_pct')">PnL%</th>
-        <th class="num" data-key="shadow_trades" onclick="sortBy('shadow_trades')">Trd</th>
+        <th class="num" data-key="shadow_session_pnl_pct" onclick="sortBy('shadow_session_pnl_pct')">PnL%</th>
+        <th class="num" data-key="shadow_session_trades" onclick="sortBy('shadow_session_trades')">Trd</th>
         <th class="num" data-key="shadow_avg_trade_pct" onclick="sortBy('shadow_avg_trade_pct')">Avg%</th>
         <th class="num" data-key="shadow_win_rate_pct" onclick="sortBy('shadow_win_rate_pct')">Win%</th>
         <th class="num" data-key="shadow_avg_catchup_pct" onclick="sortBy('shadow_avg_catchup_pct')">Catch%</th>
@@ -124,8 +124,8 @@ const SCREENER_HTML: &str = r#"<!doctype html>
           <td class="num">${Number(r.gate_natr_30m_pct).toFixed(4)}</td>
           <td>${r.shadow_position}</td>
           <td class="num">${r.shadow_spikes_detected}</td>
-          <td class="num" style="color:${Number(r.shadow_pnl_per_hour_pct)>=0?'#4ade80':'#f87171'}">${Number(r.shadow_pnl_per_hour_pct).toFixed(4)}</td>
-          <td class="num">${r.shadow_trades}</td>
+          <td class="num" style="color:${Number(r.shadow_session_pnl_pct)>=0?'#4ade80':'#f87171'}">${Number(r.shadow_session_pnl_pct).toFixed(4)}</td>
+          <td class="num">${r.shadow_session_trades}</td>
           <td class="num" style="color:${Number(r.shadow_avg_trade_pct)>=0?'#4ade80':'#f87171'}">${Number(r.shadow_avg_trade_pct).toFixed(4)}</td>
           <td class="num">${Number(r.shadow_win_rate_pct).toFixed(1)}</td>
           <td class="num">${Number(r.shadow_avg_catchup_pct).toFixed(3)}</td>

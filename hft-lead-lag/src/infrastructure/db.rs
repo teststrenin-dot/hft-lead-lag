@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE INDEX IF NOT EXISTS idx_trades_config ON trades(config_id);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_exit_ts ON trades(exit_ts_ms);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_natural_key ON trades(config_id, symbol, entry_ts_ms, exit_ts_ms);
 ";
 
 // ---------------------------------------------------------------------------
@@ -142,10 +143,10 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
                 }
                 _ = interval.tick() => {
                     if !buf.is_empty() {
-                        if let Err(e) = flush_trades(&conn, &buf) {
-                            warn!("db flush error: {e}");
+                        match flush_trades(&conn, &buf) {
+                            Ok(_) => buf.clear(),
+                            Err(e) => warn!("db flush error (retaining {} trades): {e}", buf.len()),
                         }
-                        buf.clear();
                     }
                 }
             }
@@ -164,7 +165,7 @@ fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()
     let tx = conn.unchecked_transaction()?;
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO trades (config_id, symbol, direction, entry_ts_ms, exit_ts_ms,
+            "INSERT OR IGNORE INTO trades (config_id, symbol, direction, entry_ts_ms, exit_ts_ms,
              entry_price, exit_price, spike_bps, pnl_pct, exit_reason,
              gate_spread_at_entry_bps)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"

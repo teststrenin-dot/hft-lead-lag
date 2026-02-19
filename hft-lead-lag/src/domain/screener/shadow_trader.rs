@@ -99,8 +99,8 @@ pub struct ChartData {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ShadowStats {
-    pub pnl_per_hour_pct: f64,
-    pub trades_in_window: usize,
+    pub session_pnl_pct: f64,
+    pub session_trades: usize,
     pub avg_trade_pct: f64,
     pub win_rate_pct: f64,
     pub position: &'static str,
@@ -173,6 +173,8 @@ impl ShadowTrader {
     pub fn config(&self) -> &TraderConfig { &self.config }
 
     pub fn completed_trades(&self) -> &VecDeque<ClosedTrade> { &self.completed_trades }
+
+    pub fn session_trades(&self) -> usize { self.session_trades }
 
     // -- Core tick -----------------------------------------------------------
 
@@ -385,14 +387,13 @@ impl ShadowTrader {
         let window_n = self.completed_trades.len();
         if self.session_trades == 0 {
             return ShadowStats {
-                pnl_per_hour_pct: 0.0, trades_in_window: 0,
+                session_pnl_pct: 0.0, session_trades: 0,
                 avg_trade_pct: 0.0, win_rate_pct: 0.0,
                 position: self.position_label(),
                 spikes_detected: self.spike_timestamps.len(),
                 avg_catchup_pct: 0.0, avg_catchup_lag_ms: 0.0,
             };
         }
-        let total_pnl: f64 = self.completed_trades.iter().map(|t| t.pnl_pct).sum();
         let avg_catchup = if window_n > 0 {
             self.completed_trades.iter().map(|t| t.catchup_pct).sum::<f64>() / window_n as f64
         } else {
@@ -405,9 +406,9 @@ impl ShadowTrader {
         };
 
         ShadowStats {
-            pnl_per_hour_pct: self.session_total_pnl_pct,
-            trades_in_window: self.session_trades,
-            avg_trade_pct: if window_n > 0 { total_pnl / window_n as f64 } else { 0.0 },
+            session_pnl_pct: self.session_total_pnl_pct,
+            session_trades: self.session_trades,
+            avg_trade_pct: self.session_total_pnl_pct / self.session_trades as f64,
             win_rate_pct: (self.session_wins as f64 / self.session_trades as f64) * 100.0,
             position: self.position_label(),
             spikes_detected: self.spike_timestamps.len(),
