@@ -1,8 +1,9 @@
 //! ShadowTrader — paper-trading spike-follow model.
 //!
-//! Strategy: Binance leads, Gate lags. When Binance mid spikes ≥ threshold
-//! in a short window, enter on Gate in the same direction. Exit when Gate
-//! catches up (target), on timeout, or stop-loss.
+//! Strategy: Binance leads, Gate lags. When Binance ask spikes up (for longs)
+//! or Binance bid drops (for shorts) ≥ threshold in a short window, enter on
+//! Gate in the same direction. Exit when Gate catches up (target), on timeout,
+//! or stop-loss.
 //! All execution is paper-traded on Gate bid/ask with simulated fill delay.
 
 use std::collections::VecDeque;
@@ -14,7 +15,7 @@ const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 /// Gate taker fee (fraction).
 const GATE_TAKER_FEE: f64 = 0.000_5;
 /// Simulated order-to-fill latency (ms).
-const FILL_DELAY_MS: i64 = 7;
+const FILL_DELAY_MS: i64 = 6;
 /// Post-trade cooldown (ms).
 const COOLDOWN_MS: i64 = 3_000;
 /// Mid-price sample retention for chart + spike detection (ms).
@@ -23,14 +24,14 @@ const CHART_RETENTION_MS: i64 = 2 * 60 * 1000;
 const WARMUP_MS: i64 = 30_000;
 /// Max quote staleness (ms).
 const QUOTE_FRESHNESS_MS: i64 = 1_000;
-/// Min Binance mid move to trigger entry (bps).
+/// Min Binance move to trigger entry (bps). Ask for longs, bid for shorts.
 const SPIKE_THRESHOLD_BPS: f64 = 30.0;
 /// Window to measure Binance spike (ms).
 const SPIKE_WINDOW_MS: i64 = 500;
 /// Max hold time (ms).
 const MAX_HOLD_MS: i64 = 30_000;
 /// Stop-loss (bps).
-const STOP_LOSS_BPS: f64 = 20.0;
+const STOP_LOSS_BPS: f64 = 10.0;
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -72,10 +73,6 @@ struct MidSample {
     gate_ask: f64,
     binance_bid: f64,
     binance_ask: f64,
-}
-
-impl MidSample {
-    fn binance_mid(&self) -> f64 { (self.binance_bid + self.binance_ask) / 2.0 }
 }
 
 #[derive(Debug, Clone)]
@@ -180,8 +177,6 @@ impl ShadowTrader {
             return;
         }
 
-        let bn_mid = ((binance.bid + binance.ask) / 2.0).max(1e-12);
-
         self.mid_samples.push_back(MidSample {
             ts_ms,
             gate_bid: gate.bid, gate_ask: gate.ask,
@@ -253,7 +248,7 @@ impl ShadowTrader {
 
         // Spike detection & entry
         if self.position.is_none() && self.pending.is_none() && ts_ms >= self.cooldown_until_ms {
-            if let Some((direction, spike_bps)) = self.detect_spike(ts_ms, bn_mid) {
+            if let Some((direction, spike_bps)) = self.detect_spike(ts_ms, binance) {
                 self.spike_timestamps.push_back(ts_ms);
                 self.pending = Some(PendingOrder {
                     direction,
@@ -267,21 +262,27 @@ impl ShadowTrader {
         }
     }
 
-    fn detect_spike(&self, now_ms: i64, current_mid: f64) -> Option<(Direction, f64)> {
+    fn detect_spike(&self, now_ms: i64, binance: &Quote) -> Option<(Direction, f64)> {
         let cutoff = now_ms - SPIKE_WINDOW_MS;
         let baseline = self.mid_samples.iter().find(|s| s.ts_ms >= cutoff)?;
-        let baseline_mid = baseline.binance_mid();
-        if baseline_mid <= 0.0 {
-            return None;
+
+        // LONG: Binance ask spiked up → we buy Gate ask
+        if baseline.binance_ask > 0.0 {
+            let ask_move_bps = ((binance.ask - baseline.binance_ask) / baseline.binance_ask) * 10_000.0;
+            if ask_move_bps >= SPIKE_THRESHOLD_BPS {
+                return Some((Direction::Long, ask_move_bps));
+            }
         }
-        let move_bps = ((current_mid - baseline_mid) / baseline_mid) * 10_000.0;
-        if move_bps >= SPIKE_THRESHOLD_BPS {
-            Some((Direction::Long, move_bps))
-        } else if move_bps <= -SPIKE_THRESHOLD_BPS {
-            Some((Direction::Short, move_bps.abs()))
-        } else {
-            None
+
+        // SHORT: Binance bid dropped → we sell Gate bid
+        if baseline.binance_bid > 0.0 {
+            let bid_move_bps = ((baseline.binance_bid - binance.bid) / baseline.binance_bid) * 10_000.0;
+            if bid_move_bps >= SPIKE_THRESHOLD_BPS {
+                return Some((Direction::Short, bid_move_bps));
+            }
         }
+
+        None
     }
 
     fn fill_exit(
