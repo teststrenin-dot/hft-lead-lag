@@ -6,6 +6,10 @@ pub async fn screener_page() -> Html<&'static str> {
     Html(SCREENER_HTML)
 }
 
+pub async fn fleet_page() -> Html<&'static str> {
+    Html(FLEET_HTML)
+}
+
 const SCREENER_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -320,6 +324,108 @@ const SCREENER_HTML: &str = r#"<!doctype html>
   (async function tableLoop() { await renderTable(); setTimeout(tableLoop, 1000); })();
   setInterval(pollTrades, 5000);
   requestAnimationFrame(renderLoop);
+  </script>
+</body>
+</html>"#;
+
+const FLEET_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Fleet Optimizer</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background:#0b1020; color:#e5e7eb; }
+    .top { padding: 12px 16px; }
+    h1 { margin: 0 0 4px; font-size: 18px; }
+    .meta { margin-bottom: 8px; color: #9ca3af; font-size: 12px; }
+    nav { margin-bottom: 12px; }
+    nav a { color:#93c5fd; text-decoration:none; margin-right:16px; font-size:13px; }
+    nav a:hover { text-decoration:underline; }
+    h2 { font-size: 14px; color: #93c5fd; margin: 16px 0 6px; }
+    table { width: 100%; border-collapse: collapse; background:#111827; font-size: 12px; margin-bottom: 24px; }
+    th, td { padding: 4px 6px; border-bottom: 1px solid #1f2937; text-align: left; }
+    th { position: sticky; top: 0; background:#111827; color:#93c5fd; font-size: 11px; cursor: pointer; user-select: none; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .pos { color: #34d399; }
+    .neg { color: #f87171; }
+    tr:hover { background: #162032; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1>⚡ Fleet Optimizer</h1>
+    <nav><a href="/screener">← Screener</a></nav>
+    <div class="meta" id="meta">Loading…</div>
+
+    <h2>🏆 Top Configs (global, by expectancy)</h2>
+    <table id="tbl-global">
+      <thead><tr>
+        <th>#</th><th>Spike</th><th>Win</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th>
+        <th class="num">Trades</th><th class="num">Wins</th><th class="num">WR%</th>
+        <th class="num">PnL%</th><th class="num">Avg%</th><th class="num">Syms</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <h2>🎯 Best Config Per Symbol</h2>
+    <table id="tbl-symbol">
+      <thead><tr>
+        <th>Symbol</th><th>Spike</th><th>Win</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th>
+        <th class="num">Trades</th><th class="num">Wins</th><th class="num">WR%</th>
+        <th class="num">PnL%</th><th class="num">Avg%</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <script>
+  const cl = (v, d=4) => { const s = v.toFixed(d); return `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${s}</span>`; };
+
+  async function refresh() {
+    try {
+      const [gRes, sRes] = await Promise.all([
+        fetch('/api/v1/fleet'), fetch('/api/v1/fleet/symbols')
+      ]);
+      const global = await gRes.json();
+      const symbols = await sRes.json();
+      const now = new Date().toLocaleTimeString();
+      document.getElementById('meta').textContent =
+        `Global: ${global.length} configs | Symbols: ${symbols.length} | Updated: ${now}`;
+
+      // Global table
+      const gb = document.querySelector('#tbl-global tbody');
+      gb.innerHTML = global.map((r, i) =>
+        `<tr>
+          <td>${i+1}</td><td>${r.spike_threshold_bps}</td><td>${r.spike_window_ms}</td>
+          <td>${r.target_ratio}</td><td>${r.stop_loss_bps}</td><td>${r.max_hold_ms}</td>
+          <td>${r.max_spread_bps}</td>
+          <td class="num">${r.total_trades}</td><td class="num">${r.wins}</td>
+          <td class="num">${r.win_rate_pct.toFixed(1)}</td>
+          <td class="num">${cl(r.total_pnl_pct,3)}</td>
+          <td class="num">${cl(r.avg_pnl_pct)}</td>
+          <td class="num">${r.symbols_traded}</td>
+        </tr>`
+      ).join('');
+
+      // Per-symbol table
+      const sb = document.querySelector('#tbl-symbol tbody');
+      sb.innerHTML = symbols.map(r =>
+        `<tr>
+          <td>${r.symbol}</td><td>${r.spike_threshold_bps}</td><td>${r.spike_window_ms}</td>
+          <td>${r.target_ratio}</td><td>${r.stop_loss_bps}</td><td>${r.max_hold_ms}</td>
+          <td>${r.max_spread_bps}</td>
+          <td class="num">${r.total_trades}</td><td class="num">${r.wins}</td>
+          <td class="num">${r.win_rate_pct.toFixed(1)}</td>
+          <td class="num">${cl(r.total_pnl_pct,3)}</td>
+          <td class="num">${cl(r.avg_pnl_pct)}</td>
+        </tr>`
+      ).join('');
+    } catch(e) { document.getElementById('meta').textContent = 'Error: ' + e; }
+  }
+
+  refresh();
+  setInterval(refresh, 30000);
   </script>
 </body>
 </html>"#;

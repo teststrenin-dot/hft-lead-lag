@@ -202,6 +202,78 @@ pub(crate) async fn get_fleet_ranking(
     Ok(Json(result))
 }
 
+// ── Fleet per-symbol best config ────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SymbolBestConfig {
+    symbol: String,
+    config_id: i64,
+    spike_threshold_bps: f64,
+    spike_window_ms: i64,
+    target_ratio: f64,
+    stop_loss_bps: f64,
+    max_hold_ms: i64,
+    max_spread_bps: f64,
+    total_trades: i64,
+    wins: i64,
+    win_rate_pct: f64,
+    total_pnl_pct: f64,
+    avg_pnl_pct: f64,
+}
+
+pub(crate) async fn get_fleet_by_symbol(
+    State(_state): State<Arc<HttpState>>,
+) -> Result<Json<Vec<SymbolBestConfig>>, (axum::http::StatusCode, String)> {
+    let db_path = std::path::Path::new("data/optimizer.db");
+    let conn = crate::infrastructure::db::open_db(db_path)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+
+    // Best config per symbol: highest expectancy with >=5 trades
+    let mut stmt = conn.prepare(
+        "WITH ranked AS (
+            SELECT t.symbol, c.id as config_id,
+                   c.spike_threshold_bps, c.spike_window_ms, c.target_ratio,
+                   c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                   SUM(t.pnl_pct) as total_pnl,
+                   ROW_NUMBER() OVER (PARTITION BY t.symbol ORDER BY SUM(t.pnl_pct)/COUNT(*) DESC) as rn
+            FROM trades t
+            JOIN configs c ON t.config_id = c.id
+            GROUP BY t.symbol, c.id
+            HAVING total >= 5
+        )
+        SELECT symbol, config_id, spike_threshold_bps, spike_window_ms, target_ratio,
+               stop_loss_bps, max_hold_ms, max_spread_bps, total, wins, total_pnl
+        FROM ranked WHERE rn = 1
+        ORDER BY total_pnl / total DESC"
+    ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
+
+    let rows = stmt.query_map([], |row| {
+        let total: i64 = row.get(8)?;
+        let wins: i64 = row.get(9)?;
+        let total_pnl: f64 = row.get(10)?;
+        Ok(SymbolBestConfig {
+            symbol: row.get(0)?,
+            config_id: row.get(1)?,
+            spike_threshold_bps: row.get(2)?,
+            spike_window_ms: row.get(3)?,
+            target_ratio: row.get(4)?,
+            stop_loss_bps: row.get(5)?,
+            max_hold_ms: row.get(6)?,
+            max_spread_bps: row.get(7)?,
+            total_trades: total,
+            wins,
+            win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
+            total_pnl_pct: total_pnl,
+            avg_pnl_pct: if total > 0 { total_pnl / total as f64 } else { 0.0 },
+        })
+    }).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
+
+    let result: Vec<SymbolBestConfig> = rows.filter_map(|r| r.ok()).collect();
+    Ok(Json(result))
+}
+
 // ── Internal helpers ────────────────────────────────────────────────
 
 fn to_snapshots(exchange: &'static str, tickers: Vec<Ticker24h>) -> Vec<SymbolSnapshot> {
