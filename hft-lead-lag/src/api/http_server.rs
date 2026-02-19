@@ -234,9 +234,9 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             ScreenerRow {
             symbol,
             leader_exchange: if binance_volume >= gate_volume {
-                "binance".to_string()
+                "binance"
             } else {
-                "gate".to_string()
+                "gate"
             },
             lag_ms: 0.0,
             ws_drift_ms: 0.0,
@@ -252,7 +252,7 @@ async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             shadow_trades: 0,
             shadow_avg_trade_pct: 0.0,
             shadow_win_rate_pct: 0.0,
-            shadow_position: "FLAT".to_string(),
+            shadow_position: "FLAT",
             shadow_spikes_detected: 0,
             shadow_avg_catchup_pct: 0.0,
             shadow_avg_lag_ms: 0.0,

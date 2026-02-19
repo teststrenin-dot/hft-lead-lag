@@ -19,7 +19,7 @@ const FILL_DELAY_MS: i64 = 7;
 #[derive(Debug, Clone, Serialize)]
 pub struct ScreenerRow {
     pub symbol: String,
-    pub leader_exchange: String,
+    pub leader_exchange: &'static str,
     pub lag_ms: f64,
     pub ws_drift_ms: f64,
     pub ws_drift_binance_ms: f64,
@@ -35,7 +35,7 @@ pub struct ScreenerRow {
     pub shadow_trades: usize,
     pub shadow_avg_trade_pct: f64,
     pub shadow_win_rate_pct: f64,
-    pub shadow_position: String,
+    pub shadow_position: &'static str,
     pub shadow_spikes_detected: usize,
     pub shadow_avg_catchup_pct: f64,
     pub shadow_avg_lag_ms: f64,
@@ -123,9 +123,9 @@ impl ScreenerStore {
         }
         refresh_ws_drift(state);
 
-        let (Some(binance), Some(gate)) = (state.binance.clone(), state.gate.clone()) else {
+        let (Some(binance), Some(gate)) = (state.binance.as_ref(), state.gate.as_ref()) else {
             state.updated_at_ms = exchange_ts_ms;
-            state.leader_exchange = exchange.to_string();
+            state.leader_exchange = exchange;
             state.lag_ms = 0.0;
             return;
         };
@@ -138,9 +138,9 @@ impl ScreenerStore {
         }
         state.lag_ms = percentile(state.lag_samples.iter().map(|(_, v)| *v), 50.0).unwrap_or(instant_lag);
         state.leader_exchange = if binance.ts_ms >= gate.ts_ms {
-            "binance".to_string()
+            "binance"
         } else {
-            "gate".to_string()
+            "gate"
         };
 
         // Use the leading exchange's mid as per-coin normalizer (no cross-exchange blending).
@@ -205,7 +205,7 @@ impl ScreenerStore {
                 let stats = shadow.stats();
                 ScreenerRow {
                     symbol: item.key().clone(),
-                    leader_exchange: item.value().leader_exchange.clone(),
+                    leader_exchange: item.value().leader_exchange,
                     lag_ms: item.value().lag_ms,
                     ws_drift_ms: item.value().ws_drift_ms,
                     ws_drift_binance_ms: item.value().binance_ws_drift_ms.unwrap_or(0.0),
@@ -220,7 +220,7 @@ impl ScreenerStore {
                     shadow_trades: stats.trades_in_window,
                     shadow_avg_trade_pct: stats.avg_trade_pct,
                     shadow_win_rate_pct: stats.win_rate_pct,
-                    shadow_position: stats.position.clone(),
+                    shadow_position: stats.position,
                     shadow_spikes_detected: stats.spikes_detected,
                     shadow_avg_catchup_pct: stats.avg_catchup_pct,
                     shadow_avg_lag_ms: stats.avg_catchup_lag_ms,
@@ -266,7 +266,7 @@ struct Quote {
 struct SymbolState {
     binance: Option<Quote>,
     gate: Option<Quote>,
-    leader_exchange: String,
+    leader_exchange: &'static str,
     lag_ms: f64,
     lag_samples: VecDeque<(i64, f64)>,
     ws_drift_ms: f64,
@@ -453,9 +453,9 @@ struct SpikeEvent {
 pub struct ChartTrade {
     pub entry_ts_ms: i64,
     pub exit_ts_ms: i64,
-    pub direction: String,
+    pub direction: &'static str,
     pub pnl_pct: f64,
-    pub exit_reason: String,
+    pub exit_reason: &'static str,
     pub spike_bps: f64,
     pub catchup_pct: f64,
     pub entry_price: f64,
@@ -471,7 +471,7 @@ pub struct ChartData {
     pub binance_bid: Vec<f64>,
     pub binance_ask: Vec<f64>,
     pub trades: Vec<ChartTrade>,
-    pub position: String,
+    pub position: &'static str,
     pub entry_price: Option<f64>,
     pub entry_ts_ms: Option<i64>,
 }
@@ -482,7 +482,7 @@ pub struct ShadowStats {
     pub trades_in_window: usize,
     pub avg_trade_pct: f64,
     pub win_rate_pct: f64,
-    pub position: String,
+    pub position: &'static str,
     pub spikes_detected: usize,
     pub avg_catchup_pct: f64,
     pub avg_catchup_lag_ms: f64,
@@ -498,7 +498,7 @@ pub struct ShadowDebug {
     pub completed_trades_in_window: usize,
     pub cooldown_remaining_ms: i64,
     pub warmup_remaining_ms: i64,
-    pub position: String,
+    pub position: &'static str,
     pub entry_price: Option<f64>,
     pub last_5_trades_pnl_pct: Vec<f64>,
     pub spike_threshold_bps: f64,
@@ -775,15 +775,15 @@ impl ShadowTrader {
         }
     }
 
-    fn position_label(&self) -> String {
+    fn position_label(&self) -> &'static str {
         if self.pending.is_some() {
-            return "PENDING".to_string();
+            return "PENDING";
         }
         match &self.position {
-            None => "FLAT".to_string(),
+            None => "FLAT",
             Some(p) => match p.direction {
-                ShadowDirection::Short => "SHORT_GT".to_string(),
-                ShadowDirection::Long => "LONG_GT".to_string(),
+                ShadowDirection::Short => "SHORT_GT",
+                ShadowDirection::Long => "LONG_GT",
             },
         }
     }
@@ -854,11 +854,11 @@ impl ShadowTrader {
             entry_ts_ms: t.entry_ts_ms,
             exit_ts_ms: t.ts_ms,
             direction: match t.direction {
-                ShadowDirection::Short => "SHORT".to_string(),
-                ShadowDirection::Long => "LONG".to_string(),
+                ShadowDirection::Short => "SHORT",
+                ShadowDirection::Long => "LONG",
             },
             pnl_pct: t.pnl_pct,
-            exit_reason: t.exit_reason.to_string(),
+            exit_reason: t.exit_reason,
             spike_bps: t.spike_bps,
             catchup_pct: t.catchup_pct,
             entry_price: t.entry_price,

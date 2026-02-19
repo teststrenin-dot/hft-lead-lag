@@ -32,7 +32,7 @@ struct SnapshotRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct MarketDataEvent {
     pub symbol: String,
-    pub exchange: String,
+    pub exchange: &'static str,
     pub bid: f64,
     pub ask: f64,
     pub timestamp_ns: i64,
