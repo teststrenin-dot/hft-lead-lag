@@ -19,11 +19,10 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serde::Serialize;
 
-use self::price_samples::PriceSample;
 use self::shadow_fleet::{ShadowFleet, generate_grid};
-use self::state::{Quote, SymbolState, refresh_ws_drift};
+use self::state::{Quote, SymbolState};
 use self::shadow_trader::{ChartData, ShadowDebug};
-use self::utils::{now_ms, calculate_ws_drift_ms, normalize_exchange_ts_ms, percentile};
+use self::utils::{now_ms, calculate_ws_drift_ms, normalize_exchange_ts_ms};
 
 use crate::infrastructure::db::DbWriter;
 
@@ -134,75 +133,29 @@ impl ScreenerStore {
         let ingress_ws_drift = calculate_ws_drift_ms(ingress_local_ts_ms, timestamp_ns);
         let quote = Quote { bid, ask, ts_ms: exchange_ts_ms };
 
-        match exchange {
-            "binance" => {
-                state.binance = Some(quote);
-                if let Some(v) = ws_drift { state.binance_ws_drift_ms = Some(v); }
-                if let Some(v) = ingress_ws_drift { state.binance_ingress_ws_drift_ms = Some(v); }
-            }
-            "gate" => {
-                state.gate = Some(quote);
-                if let Some(v) = ws_drift { state.gate_ws_drift_ms = Some(v); }
-                if let Some(v) = ingress_ws_drift { state.gate_ingress_ws_drift_ms = Some(v); }
-            }
-            _ => return,
+        if !state.ingest_quote(exchange, quote, ws_drift, ingress_ws_drift) {
+            return;
         }
-        refresh_ws_drift(state);
 
-        let (Some(binance), Some(gate)) = (state.binance.as_ref(), state.gate.as_ref()) else {
+        if state.binance.is_none() || state.gate.is_none() {
             state.updated_at_ms = exchange_ts_ms;
             state.leader_exchange = exchange;
             state.lag_ms = 0.0;
             return;
-        };
+        }
 
         state.updated_at_ms = exchange_ts_ms;
-        let instant_lag = (binance.ts_ms - gate.ts_ms).unsigned_abs() as f64;
-        state.lag_samples.push_back((exchange_ts_ms, instant_lag));
-        while state.lag_samples.front().map_or(false, |(t, _)| exchange_ts_ms - *t > LAG_WINDOW_MS) {
-            state.lag_samples.pop_front();
-        }
-        state.lag_ms = percentile(state.lag_samples.iter().map(|(_, v)| *v), 50.0).unwrap_or(instant_lag);
-        state.leader_exchange = if binance.ts_ms >= gate.ts_ms { "binance" } else { "gate" };
-
-        let leader_mid = if binance.ts_ms >= gate.ts_ms {
-            (binance.bid + binance.ask) / 2.0
-        } else {
-            (gate.bid + gate.ask) / 2.0
-        }
-        .max(1e-12);
-
-        let binance_div_bps = ((binance.bid - gate.ask) / leader_mid) * 10_000.0;
-        let binance_conv_bps = ((binance.ask - gate.bid) / leader_mid) * 10_000.0;
-        let gate_div_bps = ((gate.bid - binance.ask) / leader_mid) * 10_000.0;
-        let gate_conv_bps = ((gate.ask - binance.bid) / leader_mid) * 10_000.0;
-
-        state.binance_leads.update(exchange_ts_ms, binance_div_bps, binance_conv_bps, self.window_ms);
-        state.gate_leads.update(exchange_ts_ms, gate_div_bps, gate_conv_bps, self.window_ms);
-
-        let mut means = Vec::with_capacity(2);
-        if let Some(v) = state.binance_leads.average_half_life_ms() { means.push(v); }
-        if let Some(v) = state.gate_leads.average_half_life_ms() { means.push(v); }
-        state.entry_half_life_ms = if means.is_empty() { 0.0 } else { means.iter().sum::<f64>() / means.len() as f64 };
-
-        let mut gt_p90_means = Vec::with_capacity(2);
-        if let Some(v) = state.binance_leads.average_above_p90_ms() { gt_p90_means.push(v); }
-        if let Some(v) = state.gate_leads.average_above_p90_ms() { gt_p90_means.push(v); }
-        state.avg_gt_p90_ms = if gt_p90_means.is_empty() { 0.0 } else { gt_p90_means.iter().sum::<f64>() / gt_p90_means.len() as f64 };
-
-        state.price_samples.push(PriceSample {
-            ts_ms: exchange_ts_ms,
-            gate_bid: gate.bid,
-            gate_ask: gate.ask,
-            binance_bid: binance.bid,
-            binance_ask: binance.ask,
-        });
-        state.price_samples.cleanup(exchange_ts_ms);
-        state.shadow.tick(exchange_ts_ms, binance, gate, &state.price_samples, self.window_ms);
+        state.update_lag(exchange_ts_ms, LAG_WINDOW_MS);
+        state.update_cycles(exchange_ts_ms, self.window_ms);
+        state.tick_shadow(exchange_ts_ms, self.window_ms);
 
         // Fleet: lazy-init on first tick, then tick all + drain trades to db.
+        let (binance_ref, gate_ref) = match (state.binance.as_ref(), state.gate.as_ref()) {
+            (Some(b), Some(g)) => (b, g),
+            _ => return,
+        };
         let fleet = state.fleet.get_or_insert_with(|| ShadowFleet::new(&self.fleet_configs));
-        fleet.tick_all(exchange_ts_ms, binance, gate, &state.price_samples, self.window_ms, symbol);
+        fleet.tick_all(exchange_ts_ms, binance_ref, gate_ref, &state.price_samples, self.window_ms, symbol);
         if let Some(ref writer) = self.db_writer {
             let trades = fleet.drain_trades();
             if !trades.is_empty() {
@@ -223,11 +176,11 @@ impl ScreenerStore {
                     symbol: item.key().clone(),
                     leader_exchange: item.value().leader_exchange,
                     lag_ms: item.value().lag_ms,
-                    ws_drift_ms: item.value().ws_drift_ms,
-                    ws_drift_binance_ms: item.value().binance_ws_drift_ms.unwrap_or(0.0),
-                    ws_drift_gate_ms: item.value().gate_ws_drift_ms.unwrap_or(0.0),
-                    ws_drift_ingress_binance_ms: item.value().binance_ingress_ws_drift_ms.unwrap_or(0.0),
-                    ws_drift_ingress_gate_ms: item.value().gate_ingress_ws_drift_ms.unwrap_or(0.0),
+                    ws_drift_ms: item.value().drifts.combined,
+                    ws_drift_binance_ms: item.value().drifts.binance.unwrap_or(0.0),
+                    ws_drift_gate_ms: item.value().drifts.gate.unwrap_or(0.0),
+                    ws_drift_ingress_binance_ms: item.value().drifts.binance_ingress.unwrap_or(0.0),
+                    ws_drift_ingress_gate_ms: item.value().drifts.gate_ingress.unwrap_or(0.0),
                     entry_half_life_ms: item.value().entry_half_life_ms,
                     avg_gt_p90_ms: item.value().avg_gt_p90_ms,
                     gate_natr_30m_pct: 0.0,
@@ -254,12 +207,6 @@ impl ScreenerStore {
 
     pub fn chart_data(&self, symbol: &str) -> Option<ChartData> {
         self.symbols.get(symbol).map(|s| s.shadow.chart_data(symbol, &s.price_samples))
-    }
-
-    pub fn symbol_list(&self) -> Vec<String> {
-        let mut syms: Vec<String> = self.symbols.iter().map(|r| r.key().clone()).collect();
-        syms.sort();
-        syms
     }
 }
 
