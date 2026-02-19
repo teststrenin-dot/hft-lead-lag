@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Minimum 24h USD volume for symbol filtering
-const MIN_VOLUME_USD: f64 = 1_000_000.0;  // 1 million USD
+const MIN_VOLUME_USD: f64 = 2_500_000.0;  // 2.5 million USD
 const MAX_STRATEGY_SYMBOLS: usize = 8;
 const SUBSCRIBE_DELAY_MS: u64 = 15;
 
