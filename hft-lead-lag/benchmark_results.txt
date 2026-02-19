@@ -1,0 +1,7 @@
+SYMS_PER_WS  SOCKETS  DRIFT_AVG  DRIFT_P50  DRIFT_P95  DRIFT_P99  DRIFT_MAX 
+==================================================================================
+2            94       2ms        3ms        4ms        4ms        13ms      
+5            38       3ms        3ms        5ms        9ms        236ms     
+10           20       2ms        3ms        4ms        7ms        42ms      
+20           10       2ms        3ms        4ms        7ms        31ms      
+47           4        2ms        3ms        4ms        5ms        33ms      

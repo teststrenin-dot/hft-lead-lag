@@ -198,7 +198,7 @@ impl BinanceMarketData {
         let symbols_per_ws: usize = std::env::var("SYMBOLS_PER_WS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(2);
+            .unwrap_or(20);
         let required_ws_count = (symbols.len() + symbols_per_ws - 1) / symbols_per_ws;
         while self.ws_txs.len() < required_ws_count {
             let ws = Self::spawn_ws_worker(shared_msg_tx.clone()).await?;
