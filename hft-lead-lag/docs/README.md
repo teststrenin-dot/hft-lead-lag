@@ -140,30 +140,38 @@ curl http://localhost:5000/api/v1/screener | python3 -m json.tool
 
 ## 7) Модель Shadow Trader (по коду)
 
-Текущая реализация: **spike-follow** (не premium-percentile P90/P10/P50).
+Текущая реализация: **spike-follow** на bid/ask (без mid-price).
 
-Расположение: `src/domain/screener/shadow_trader.rs` (470 LOC).
+Расположение: `src/domain/screener/shadow_trader.rs` (465 LOC).
 
 Опорные константы:
 
 | Константа | Значение | Описание |
 |-----------|----------|----------|
-| `FILL_DELAY_MS` | 7 | Задержка исполнения (paper fill) |
+| `SPIKE_THRESHOLD_BPS` | 30.0 | Порог спайка для входа и target-выхода |
+| `SPIKE_WINDOW_MS` | 500 | Окно измерения спайка |
+| `STOP_LOSS_BPS` | 10.0 | Стоп-лосс (bps) |
+| `MAX_HOLD_MS` | 30000 | Таймаут позиции |
+| `FILL_DELAY_MS` | 6 | Задержка исполнения (paper fill) |
 | `COOLDOWN_MS` | 3000 | Пауза между сделками |
 | `WARMUP_MS` | 30000 | Прогрев перед первой сделкой |
 | `QUOTE_FRESHNESS_MS` | 1000 | Максимальный возраст котировки |
-| `SPIKE_THRESHOLD_BPS` | 30.0 | Порог спайка для входа |
+| `GATE_TAKER_FEE` | 0.05% | Комиссия Gate (×2 для round-trip) |
 
-Логика:
-1. Обнаружение spike-движения Gate→Binance.
-2. Paper-вход с задержкой fill.
-3. Выход по target / timeout / stop-loss.
-4. Метрики (PnL/hr, win rate, avg trade) в screener API и дашборд.
+Логика входа (все условия одновременно):
+1. Нет открытой позиции и нет pending-ордера.
+2. Прошёл cooldown (3с) и warmup (30с).
+3. Котировки Binance и Gate свежие (< 1с).
+4. Binance **ask** вырос ≥ 30 bps за 500ms → LONG (покупка Gate ask).
+5. Binance **bid** упал ≥ 30 bps за 500ms → SHORT (продажа Gate bid).
+6. Ордер ждёт 6ms (fill delay), затем заполняется.
 
-Типы (очищены от dead fields):
-- `Quote` — без `bid_qty`/`ask_qty` (никогда не читались)
-- `OpenPosition` (бывш. ShadowPosition) — без `binance_mid_at_entry`
-- `spike_timestamps: VecDeque<i64>` вместо `spike_history: VecDeque<SpikeEvent>`
+Логика выхода (любое из трёх):
+1. **Target** — нереализованный PnL ≥ 30 bps.
+2. **Stop-loss** — нереализованный убыток ≥ 10 bps.
+3. **Timeout** — удержание ≥ 30с.
+
+Пирамидинг: **нет** — строго 1 позиция на символ.
 
 ---
 
@@ -228,7 +236,28 @@ cargo test     # 15 pass (14 unit + 1 doctest)
 | Endpoint constants | 9 констант (5 dead) | 4 живые константы | `89c7583` |
 | Dead code warnings | 6 warnings | 0 warnings (#[allow(dead_code)] + удаление) | `031f5b7` |
 | SYMBOLS_PER_WS | 2 (94 сокета) | 20 (10 сокетов) | `bbe34fc` |
+| Spike detection | mid-price (bid+ask)/2 | ask для лонгов, bid для шортов | `4af8edb` |
+| FILL_DELAY / STOP_LOSS | 7ms / 20bps | 6ms / 10bps | `4af8edb` |
+| Chart markers | Круги (entry+exit) | ▲▼ треугольники (entry) + ● круги (exit) | `a7d6cdd` |
 
 ---
 
-*Last updated: 2026-02-19 (post P0-fixes + P1 refactoring + architecture decomposition)*
+## 12) Следующий этап: Grid Optimizer
+
+Запуск N теневых ботов с разными настройками на каждый активный символ.
+Сбор статистики в SQLite, выявление робастных конфигураций по **win rate**.
+
+Параметры для sweep:
+- `spike_threshold_bps`: [20, 30, 40, 50]
+- `spike_window_ms`: [300, 500, 1000]
+- `target_ratio`: [0.3, 0.5, 0.7, 1.0]
+- `stop_loss_bps`: [8, 10, 15, 20]
+- `max_hold_ms`: [10000, 30000]
+- `max_spread_bps`: [5, 10, 15]
+- **1152 комбинации**, ~25MB RAM
+
+Новые фичи трейдера: spread filter, dynamic target (доля от спайка), trailing stop.
+
+---
+
+*Last updated: 2026-02-19 (post P0 + P1 + spike logic fixes + chart markers)*

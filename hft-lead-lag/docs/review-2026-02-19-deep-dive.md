@@ -416,6 +416,8 @@
 | `c0aaf0c` | Screener decomposition (950 LOC → 5 файлов) |
 | `89c7583` | http_server decomposition (793 LOC → 3 файла) |
 | `031f5b7` | P1: executor extraction, enrichment module, dead code cleanup |
+| `a7d6cdd` | Chart markers: ▲▼ для входов, ● для выходов |
+| `4af8edb` | Spike detection на bid/ask (без mid), FILL_DELAY 6ms, STOP_LOSS 10bps |
 
 ### Файловые reference points
 
@@ -439,12 +441,11 @@
 - Два god object декомпозированы (screener 950→5 файлов, http_server 793→3 файла).
 - Executor-заглушки извлечены в отдельные модули (binance/executor.rs, gate/executor.rs).
 - NATR-enrichment вынесен из API-слоя в infrastructure/enrichment.rs.
-- 0 warnings в cargo build.
-- Конфигурация оптимизирована по бенчмаркам (SYMBOLS_PER_WS=20, P99=7ms).
-- Drift metrics в production (P50=3ms).
+- Spike detection переведён на чистые bid/ask (mid-price удалён).
+- Chart markers: треугольники для входов, кружки для выходов.
 - 35 файлов, 5469 LOC — чистая Rust кодовая база.
 
-**Текущий статус:** production-ready для paper trading на 2 vCPU / 3.8 GiB VM.
-**Следующий шаг:** P2 — интеграционные тесты, TCP tuning, graceful shutdown, Prometheus.
+**Текущий статус:** production paper trading на 2 vCPU / 3.8 GiB VM.
+**Следующий шаг:** Grid Optimizer — 1152 конфигурации × N символов, SQLite storage, поиск робастных параметров по win rate.
 
-*Last updated: 2026-02-19 (post all P0 + P1 fixes + architecture refactoring)*
+*Last updated: 2026-02-19 (post P0 + P1 + spike logic + chart fixes)*
