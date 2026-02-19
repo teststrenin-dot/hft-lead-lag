@@ -142,11 +142,11 @@ pub(crate) async fn get_chart_data(
 pub(crate) struct FleetConfigRank {
     config_id: i64,
     spike_threshold_bps: f64,
-    spike_window_ms: i64,
     target_ratio: f64,
     stop_loss_bps: f64,
     max_hold_ms: i64,
     max_spread_bps: f64,
+    trailing_decay_ratio: f64,
     total_trades: i64,
     wins: i64,
     win_rate_pct: f64,
@@ -163,8 +163,9 @@ pub(crate) async fn get_fleet_ranking(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
 
     let mut stmt = conn.prepare(
-        "SELECT c.id, c.spike_threshold_bps, c.spike_window_ms, c.target_ratio,
+        "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
                 c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                c.trailing_decay_ratio,
                 COUNT(*) as total,
                 SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(t.pnl_pct) as total_pnl,
@@ -184,11 +185,11 @@ pub(crate) async fn get_fleet_ranking(
         Ok(FleetConfigRank {
             config_id: row.get(0)?,
             spike_threshold_bps: row.get(1)?,
-            spike_window_ms: row.get(2)?,
-            target_ratio: row.get(3)?,
-            stop_loss_bps: row.get(4)?,
-            max_hold_ms: row.get(5)?,
-            max_spread_bps: row.get(6)?,
+            target_ratio: row.get(2)?,
+            stop_loss_bps: row.get(3)?,
+            max_hold_ms: row.get(4)?,
+            max_spread_bps: row.get(5)?,
+            trailing_decay_ratio: row.get(6)?,
             total_trades: total,
             wins,
             win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
@@ -209,11 +210,11 @@ pub(crate) struct SymbolBestConfig {
     symbol: String,
     config_id: i64,
     spike_threshold_bps: f64,
-    spike_window_ms: i64,
     target_ratio: f64,
     stop_loss_bps: f64,
     max_hold_ms: i64,
     max_spread_bps: f64,
+    trailing_decay_ratio: f64,
     total_trades: i64,
     wins: i64,
     win_rate_pct: f64,
@@ -228,12 +229,12 @@ pub(crate) async fn get_fleet_by_symbol(
     let conn = crate::infrastructure::db::open_db(db_path)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
 
-    // Best config per symbol: highest expectancy with >=5 trades
     let mut stmt = conn.prepare(
         "WITH ranked AS (
             SELECT t.symbol, c.id as config_id,
-                   c.spike_threshold_bps, c.spike_window_ms, c.target_ratio,
+                   c.spike_threshold_bps, c.target_ratio,
                    c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                   c.trailing_decay_ratio,
                    COUNT(*) as total,
                    SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
                    SUM(t.pnl_pct) as total_pnl,
@@ -243,8 +244,9 @@ pub(crate) async fn get_fleet_by_symbol(
             GROUP BY t.symbol, c.id
             HAVING total >= 5
         )
-        SELECT symbol, config_id, spike_threshold_bps, spike_window_ms, target_ratio,
-               stop_loss_bps, max_hold_ms, max_spread_bps, total, wins, total_pnl
+        SELECT symbol, config_id, spike_threshold_bps, target_ratio,
+               stop_loss_bps, max_hold_ms, max_spread_bps, trailing_decay_ratio,
+               total, wins, total_pnl
         FROM ranked WHERE rn = 1
         ORDER BY total_pnl / total DESC"
     ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
@@ -257,11 +259,11 @@ pub(crate) async fn get_fleet_by_symbol(
             symbol: row.get(0)?,
             config_id: row.get(1)?,
             spike_threshold_bps: row.get(2)?,
-            spike_window_ms: row.get(3)?,
-            target_ratio: row.get(4)?,
-            stop_loss_bps: row.get(5)?,
-            max_hold_ms: row.get(6)?,
-            max_spread_bps: row.get(7)?,
+            target_ratio: row.get(3)?,
+            stop_loss_bps: row.get(4)?,
+            max_hold_ms: row.get(5)?,
+            max_spread_bps: row.get(6)?,
+            trailing_decay_ratio: row.get(7)?,
             total_trades: total,
             wins,
             win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },

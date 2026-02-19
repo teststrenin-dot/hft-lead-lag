@@ -21,17 +21,18 @@ const CHANNEL_CAPACITY: usize = 10_000;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS configs (
-    id                  INTEGER PRIMARY KEY,
-    spike_threshold_bps REAL NOT NULL,
-    spike_window_ms     INTEGER NOT NULL,
-    target_ratio        REAL NOT NULL,
-    stop_loss_bps       REAL NOT NULL,
-    max_hold_ms         INTEGER NOT NULL,
-    max_spread_bps      REAL NOT NULL,
-    trailing_stop_bps   REAL NOT NULL,
-    fill_delay_ms       INTEGER NOT NULL,
-    cooldown_ms         INTEGER NOT NULL,
-    taker_fee           REAL NOT NULL
+    id                    INTEGER PRIMARY KEY,
+    spike_threshold_bps   REAL NOT NULL,
+    spike_window_ms       INTEGER NOT NULL,
+    target_ratio          REAL NOT NULL,
+    stop_loss_bps         REAL NOT NULL,
+    max_hold_ms           INTEGER NOT NULL,
+    max_spread_bps        REAL NOT NULL,
+    trailing_stop_bps     REAL NOT NULL,
+    trailing_decay_ratio  REAL NOT NULL DEFAULT 0.5,
+    fill_delay_ms         INTEGER NOT NULL,
+    cooldown_ms           INTEGER NOT NULL,
+    taker_fee             REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS trades (
@@ -64,6 +65,10 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
     conn.execute_batch(SCHEMA)?;
+    // Migration: add trailing_decay_ratio if missing (existing DBs).
+    let _ = conn.execute_batch(
+        "ALTER TABLE configs ADD COLUMN trailing_decay_ratio REAL NOT NULL DEFAULT 0.5;"
+    );
     Ok(conn)
 }
 
@@ -71,9 +76,9 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
 pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
         "INSERT OR IGNORE INTO configs (id, spike_threshold_bps, spike_window_ms, target_ratio,
-         stop_loss_bps, max_hold_ms, max_spread_bps, trailing_stop_bps, fill_delay_ms,
-         cooldown_ms, taker_fee)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+         stop_loss_bps, max_hold_ms, max_spread_bps, trailing_stop_bps, trailing_decay_ratio,
+         fill_delay_ms, cooldown_ms, taker_fee)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
     )?;
     for c in configs {
         stmt.execute(params![
@@ -85,6 +90,7 @@ pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::
             c.max_hold_ms,
             c.max_spread_bps,
             c.trailing_stop_bps,
+            c.trailing_decay_ratio,
             c.fill_delay_ms,
             c.cooldown_ms,
             c.taker_fee,

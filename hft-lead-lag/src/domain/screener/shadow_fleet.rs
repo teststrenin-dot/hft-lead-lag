@@ -2,6 +2,7 @@
 //!
 //! Each trader gets the same `&PriceSamples` (zero-copy), only trading state differs.
 //! Completed trades are collected and can be drained for persistence.
+//! Auto-prunes configs with negative expectancy after enough trades.
 
 use std::collections::VecDeque;
 
@@ -11,39 +12,45 @@ use super::state::Quote;
 use super::trader_config::TraderConfig;
 
 /// Parameter grid values for fleet generation.
-/// Tuned from live data: gap 60bps sweet spot, SL 8bps too tight,
+/// Tuned from live data: gap 60bps sweet spot,
 /// alpha decay shows 2-5s holds profitable, tight spreads best.
-const SPIKE_THRESHOLDS: &[f64] = &[40.0, 50.0, 60.0, 70.0, 80.0, 100.0];
-const SPIKE_WINDOWS: &[i64] = &[500]; // not used for entry (gap-based), kept for stats
+const GAP_THRESHOLDS: &[f64] = &[40.0, 50.0, 60.0, 70.0, 80.0, 100.0];
 const TARGET_RATIOS: &[f64] = &[0.3, 0.5, 0.7];
 const STOP_LOSSES: &[f64] = &[8.0, 10.0, 15.0, 20.0, 30.0];
 const MAX_HOLDS: &[i64] = &[3_000, 5_000, 10_000];
 const MAX_SPREADS: &[f64] = &[3.0, 5.0, 8.0];
+const TRAILING_DECAYS: &[f64] = &[0.3, 0.5, 0.7];
+
+/// Min trades before a config can be pruned for poor performance.
+const PRUNE_MIN_TRADES: usize = 30;
+/// Expectancy threshold (avg PnL %) below which config is disabled.
+const PRUNE_EXPECTANCY_THRESHOLD: f64 = -0.05;
 
 /// Generate all parameter combinations from the grid.
 pub fn generate_grid() -> Vec<TraderConfig> {
-    let cap = SPIKE_THRESHOLDS.len()
-        * SPIKE_WINDOWS.len()
+    let cap = GAP_THRESHOLDS.len()
         * TARGET_RATIOS.len()
         * STOP_LOSSES.len()
         * MAX_HOLDS.len()
-        * MAX_SPREADS.len();
+        * MAX_SPREADS.len()
+        * TRAILING_DECAYS.len();
     let mut configs = Vec::with_capacity(cap);
     let base = TraderConfig::default();
 
-    for &spike in SPIKE_THRESHOLDS {
-        for &window in SPIKE_WINDOWS {
-            for &target in TARGET_RATIOS {
-                for &stop in STOP_LOSSES {
-                    for &hold in MAX_HOLDS {
-                        for &spread in MAX_SPREADS {
+    for &gap in GAP_THRESHOLDS {
+        for &target in TARGET_RATIOS {
+            for &stop in STOP_LOSSES {
+                for &hold in MAX_HOLDS {
+                    for &spread in MAX_SPREADS {
+                        for &decay in TRAILING_DECAYS {
                             configs.push(TraderConfig {
-                                spike_threshold_bps: spike,
-                                spike_window_ms: window,
+                                spike_threshold_bps: gap,
+                                spike_window_ms: 500,
                                 target_ratio: target,
                                 stop_loss_bps: stop,
                                 max_hold_ms: hold,
                                 max_spread_bps: spread,
+                                trailing_decay_ratio: decay,
                                 ..base
                             });
                         }
@@ -65,6 +72,7 @@ pub struct FleetTrade {
 
 /// Fleet of shadow traders for one symbol.
 /// Holds N traders with different configs, ticks all on shared samples.
+/// Auto-prunes configs with persistently negative expectancy.
 #[derive(Debug)]
 pub struct ShadowFleet {
     traders: Vec<(u64, ShadowTrader)>,
@@ -72,27 +80,38 @@ pub struct ShadowFleet {
     pending_trades: VecDeque<FleetTrade>,
     /// Monotonic session trade count per trader — never decreases.
     last_session_trades: Vec<usize>,
+    /// Disabled flags — pruned configs skip ticking.
+    disabled: Vec<bool>,
+    /// Number of active (non-pruned) traders.
+    active_count: usize,
 }
 
 impl ShadowFleet {
     pub fn new(configs: &[TraderConfig]) -> Self {
+        let n = configs.len();
         let traders: Vec<(u64, ShadowTrader)> = configs
             .iter()
             .map(|c| (c.config_id(), ShadowTrader::new(*c)))
             .collect();
-        let last_session_trades = vec![0; traders.len()];
+        let last_session_trades = vec![0; n];
         Self {
             traders,
             pending_trades: VecDeque::new(),
             last_session_trades,
+            disabled: vec![false; n],
+            active_count: n,
         }
     }
 
-    /// Number of traders in the fleet.
+    /// Total number of traders in the fleet (including pruned).
     #[inline]
     pub fn len(&self) -> usize { self.traders.len() }
 
-    /// Tick all traders with shared price data.
+    /// Number of active (non-pruned) traders.
+    #[inline]
+    pub fn active(&self) -> usize { self.active_count }
+
+    /// Tick all active traders with shared price data.
     pub fn tick_all(
         &mut self,
         ts_ms: i64,
@@ -103,24 +122,43 @@ impl ShadowFleet {
         symbol: &str,
     ) {
         for (idx, (config_id, trader)) in self.traders.iter_mut().enumerate() {
+            if self.disabled[idx] { continue; }
+
             trader.tick(ts_ms, binance, gate, samples, window_ms);
 
             // Detect new completed trades via monotonic session counter.
             let session_n = trader.session_trades();
             let prev_n = self.last_session_trades[idx];
             if session_n > prev_n {
-                // New trades are always at the tail of the deque.
                 let new_count = session_n - prev_n;
                 let deque = trader.completed_trades();
                 let start = deque.len().saturating_sub(new_count);
+                // Allocate symbol string only when there are actual trades.
+                let sym = symbol.to_string();
                 for trade in deque.iter().skip(start) {
                     self.pending_trades.push_back(FleetTrade {
                         config_id: *config_id,
-                        symbol: symbol.to_string(),
+                        symbol: sym.clone(),
                         trade: trade.clone(),
                     });
                 }
                 self.last_session_trades[idx] = session_n;
+
+                // Auto-prune: disable configs with negative expectancy after enough data.
+                if session_n >= PRUNE_MIN_TRADES {
+                    let avg_pnl = trader.session_pnl_pct() / session_n as f64;
+                    if avg_pnl < PRUNE_EXPECTANCY_THRESHOLD {
+                        self.disabled[idx] = true;
+                        self.active_count -= 1;
+                        tracing::debug!(
+                            config_id = *config_id,
+                            symbol,
+                            trades = session_n,
+                            avg_pnl_pct = format!("{avg_pnl:.4}"),
+                            "fleet: pruned config"
+                        );
+                    }
+                }
             }
         }
     }
@@ -138,7 +176,8 @@ mod tests {
     #[test]
     fn grid_size() {
         let grid = generate_grid();
-        assert_eq!(grid.len(), 6 * 1 * 3 * 5 * 3 * 3); // 810
+        // 6 gaps × 3 targets × 5 SLs × 3 holds × 3 spreads × 3 decays = 2430
+        assert_eq!(grid.len(), 6 * 3 * 5 * 3 * 3 * 3);
     }
 
     #[test]
@@ -154,6 +193,7 @@ mod tests {
     fn fleet_creation() {
         let configs = generate_grid();
         let fleet = ShadowFleet::new(&configs);
-        assert_eq!(fleet.len(), 810);
+        assert_eq!(fleet.len(), 2430);
+        assert_eq!(fleet.active(), 2430);
     }
 }

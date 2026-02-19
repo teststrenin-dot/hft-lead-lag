@@ -176,6 +176,8 @@ impl ShadowTrader {
 
     pub fn session_trades(&self) -> usize { self.session_trades }
 
+    pub fn session_pnl_pct(&self) -> f64 { self.session_total_pnl_pct }
+
     // -- Core tick -----------------------------------------------------------
 
     pub fn tick(

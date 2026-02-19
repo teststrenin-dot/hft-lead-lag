@@ -371,7 +371,7 @@ const FLEET_HTML: &str = r#"<!doctype html>
     <h2>🏆 Top Configs (global, by expectancy)</h2>
     <table id="tbl-global">
       <thead><tr>
-        <th>#</th><th>Gap</th><th>Tgt</th><th>SL</th><th data-key="max_hold_ms">Hold</th><th>Spread</th>
+        <th>#</th><th>Gap</th><th>Tgt</th><th>SL</th><th data-key="max_hold_ms">Hold</th><th>Spread</th><th>Decay</th>
         <th class="num" data-key="total_trades">Trades</th><th class="num" data-key="wins">Wins</th>
         <th class="num" data-key="win_rate_pct">WR%</th>
         <th class="num" data-key="total_pnl_pct">PnL%</th><th class="num" data-key="avg_pnl_pct">Avg%</th>
@@ -383,7 +383,7 @@ const FLEET_HTML: &str = r#"<!doctype html>
     <h2>🎯 Best Config Per Symbol</h2>
     <table id="tbl-symbol">
       <thead><tr>
-        <th>Symbol</th><th>Gap</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th>
+        <th>Symbol</th><th>Gap</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th><th>Decay</th>
         <th class="num" data-key="total_trades">Trades</th><th class="num" data-key="wins">Wins</th>
         <th class="num" data-key="win_rate_pct">WR%</th>
         <th class="num" data-key="total_pnl_pct">PnL%</th><th class="num" data-key="avg_pnl_pct">Avg%</th>
@@ -430,7 +430,7 @@ const FLEET_HTML: &str = r#"<!doctype html>
       `<tr class="${r.avg_pnl_pct>=0?'row-pos':'row-neg'}">
         <td>${i+1}</td><td>${r.spike_threshold_bps}</td>
         <td>${r.target_ratio}</td><td>${r.stop_loss_bps}</td><td>${holdFmt(r.max_hold_ms)}</td>
-        <td>${r.max_spread_bps}</td>
+        <td>${r.max_spread_bps}</td><td>${r.trailing_decay_ratio}</td>
         <td class="num">${r.total_trades}</td><td class="num">${r.wins}</td>
         <td class="num">${r.win_rate_pct.toFixed(1)}</td>
         <td class="num">${cl(r.total_pnl_pct,3)}</td>
@@ -446,7 +446,7 @@ const FLEET_HTML: &str = r#"<!doctype html>
       `<tr class="${r.avg_pnl_pct>=0?'row-pos':'row-neg'}">
         <td>${r.symbol}</td><td>${r.spike_threshold_bps}</td>
         <td>${r.target_ratio}</td><td>${r.stop_loss_bps}</td><td>${holdFmt(r.max_hold_ms)}</td>
-        <td>${r.max_spread_bps}</td>
+        <td>${r.max_spread_bps}</td><td>${r.trailing_decay_ratio}</td>
         <td class="num">${r.total_trades}</td><td class="num">${r.wins}</td>
         <td class="num">${r.win_rate_pct.toFixed(1)}</td>
         <td class="num">${cl(r.total_pnl_pct,3)}</td>
