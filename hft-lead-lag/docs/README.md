@@ -1,259 +1,183 @@
 # HFT Lead-Lag Documentation (Current)
 
-Актуальная документация по состоянию кода и runtime в `main`.
+Актуальная документация по состоянию `main` и запущенного runtime.
+
+**Snapshot:** 2026-02-19  
+**Branch/commit:** `main @ 807178a`  
+**Mode:** paper trading + shadow fleet optimizer
 
 ---
 
-## 1) Что читать в первую очередь
+## 1) Что обновлено в этой итерации
 
-- `docs/README.md` (этот файл): карта системы, формулы, API, runbook.
-- `docs/sprints/shadow-fleet-deep-dive.md`: deep dive по Shadow Fleet/optimizer.
-- `docs/review-2026-02-19-deep-dive.md`: инженерный аудит и риски.
-- `docs/studies/leadlag_classic+.md`: исследовательский материал и идеи (OBI/Kalman/hot-reload).
-- `docs/review-shadow-trader.md`: архивный документ по старой реализации.
-
----
-
-## 2) Серверный контекст (ground truth)
-
-| Параметр | Значение |
-|---|---|
-| OS | Linux 5.15 (KVM VM) |
-| CPU | 2 vCPU |
-| RAM | 3.8 GiB (+ swap) |
-| Runtime | Rust nightly 1.95 + Tokio |
-| HTTP | `:5000` |
-| WS | `:8181` |
+1. Введён гиперпараметр `baseline_window_ms` в fleet/grid и БД.
+2. `detect_gap()` теперь считает baseline только по окну `baseline_window_ms`, а не по всей 2-минутной истории.
+3. Грид пересобран под диапазон тайминга **10s..60s**.
+4. В API-выгрузки добавлен `baseline_window_ms`:
+   - `/api/v1/fleet`
+   - `/api/v1/fleet/ranked`
+   - `/api/v1/fleet/symbols`
 
 ---
 
-## 3) Архитектура в одном потоке
+## 2) Карта документации
 
-1. `main.rs` получает символы по 24h объёму с Binance/Gate.
-2. Берётся пересечение символов, применяется blacklist, поднимается runtime.
-3. Каждый тик идёт в `ScreenerStore::update()`.
-4. Для символа обновляется `PriceSamples` (2-мин история).
-5. Тикается:
-   - `shadow` (single paper trader),
-   - `fleet` (много конфигов на тех же samples).
-6. Fleet-трейды дренятся в `DbWriter` и батчами пишутся в SQLite.
-7. API/UI читают state + агрегаты из `optimizer.db`.
+- `docs/README.md` (этот файл): текущий статус, математика, runbook.
+- `docs/sprints/shadow-fleet-deep-dive.md`: полный deep dive по fleet/runtime/DB/API.
+- `docs/review-2026-02-19-deep-dive.md`: инженерный статус проекта, риски, next actions.
+- `docs/review-2026-02-19-multi-agent.md`: мультиагентное ревью (коммиты/архитектура/математика/дубли/god objects).
+- `docs/manifest/MANIFESTO.md`: принципы и текущий фокус.
+- `docs/review-shadow-trader.md`: архив (legacy, read-only).
+- `docs/studies/*.md`: исследовательские идеи, не source of truth.
 
 ---
 
-## 4) Математика стратегии (актуальная)
+## 3) Runtime snapshot (живой сервер)
 
-### 4.1 Entry (gap-based lead-lag with baseline)
+Метрики из текущего live paper запуска:
 
-Используется baseline-нормализация расхождения Binance vs Gate по истории samples.
+- `symbols_total`: **53**
+- `symbols_with_trades` (single shadow): **11**
+- `symbols_no_trades`: **42**
+- `fleet ranked rows (>=10 trades/config)`: **100**
+- `fleet/symbols` (best-by-symbol): **3 symbols**
+
+Лучший конфиг по `/api/v1/fleet/ranked` на snapshot:
+
+- `gap=30 bps`, `target=0.7`, `sl=40`, `hold=5s`, `spread=5`, `trailing=0.7`, `baseline=60s`
+- `trades=35`, `win_rate=60%`, `avg_pnl=0.0199%`, `composite=0.592`
+
+Распределение top-100 ranked по `baseline_window_ms`:
+
+- `20s`: 72
+- `60s`: 28
+
+---
+
+## 4) Архитектура потока
+
+1. `main.rs` собирает universe символов (пересечение Binance/Gate + volume filter + blacklist).
+2. `ScreenerStore::update()` обновляет symbol state и `PriceSamples`.
+3. На каждом тике работают:
+   - single `shadow` trader
+   - `ShadowFleet` (массив paper-конфигов на shared samples)
+4. Закрытые fleet сделки дренятся в `DbWriter` и пишутся в `data/optimizer.db`.
+5. HTTP/UI endpoints читают state и агрегаты из памяти + SQLite.
+
+---
+
+## 5) Математика (актуальная)
+
+### 5.1 Entry: baseline-adjusted gap
 
 Для LONG:
 
-- `baseline_ask_gap = mean((binance_ask - gate_ask) / gate_ask * 10_000)`
-- `current_ask_gap = (binance_ask - gate_ask) / gate_ask * 10_000`
-- `signal_long = current_ask_gap - baseline_ask_gap`
-- вход если `signal_long >= spike_threshold_bps`
+- `current_gap = (binance_ask - gate_ask) / gate_ask * 10_000`
+- `baseline_gap = mean(current_gap over samples where ts >= now - baseline_window_ms)`
+- `signal = current_gap - baseline_gap`
+- вход если `signal >= spike_threshold_bps` (историческое имя поля)
 
 Для SHORT:
 
-- `baseline_bid_gap = mean((gate_bid - binance_bid) / gate_bid * 10_000)`
-- `current_bid_gap = (gate_bid - binance_bid) / gate_bid * 10_000`
-- `signal_short = current_bid_gap - baseline_bid_gap`
-- вход если `signal_short >= spike_threshold_bps`
+- `current_gap = (gate_bid - binance_bid) / gate_bid * 10_000`
+- `baseline_gap = mean(...)` по bid-gap
+- вход если `signal >= spike_threshold_bps`
 
-> В коде имя поля историческое (`spike_threshold_bps`), но семантика сейчас именно **gap threshold**.
+`min_baseline_samples` ограничивает ранний шум (default: 20).
 
-### 4.2 Exit
+### 5.2 Exit: breakeven + trailing
 
-`unrealized_bps`:
+1. До breakeven: `stop_loss` и `timeout`.
+2. Breakeven активируется при `unrealized_bps >= spike_bps * target_ratio`.
+3. После breakeven:
+   - exit на `unrealized <= 0` (возврат к цене входа),
+   - или `unrealized <= peak_unrealized * trailing_decay_ratio`,
+   - или timeout.
 
-- LONG: `((gate_bid - entry_price) / entry_price) * 10_000`
-- SHORT: `((entry_price - gate_ask) / entry_price) * 10_000`
+### 5.3 PnL
 
-Условия выхода (двухфазная модель):
-
-**Фаза 1 (до breakeven):**
-1. `stop_loss`: `unrealized_bps <= -stop_loss_bps`
-2. `timeout`: `hold_ms >= max_hold_ms`
-
-**Breakeven-активация:** `unrealized_bps >= spike_bps * target_ratio`
-
-**Фаза 2 (после breakeven):**
-1. `breakeven`: `unrealized_bps <= 0` (стоп на цене входа)
-2. `trailing_take`: `unrealized_bps <= peak_unrealized_bps * trailing_decay_ratio`
-3. `timeout`: `hold_ms >= max_hold_ms`
-
-### 4.3 PnL
-
-- `raw_return` считается по bid/ask исполнения.
-- Комиссия: `taker_fee * 2` (вход + выход).
-- `pnl_pct = (raw_return - 2 * taker_fee) * 100`
-- `catchup_pct = raw_return * 100` (до комиссий).
+- `pnl_pct = (raw_return - 2*taker_fee) * 100`
+- комиссия двусторонняя (вход+выход), bid/ask-aware.
 
 ---
 
-## 5) Screener: что означают ключевые столбцы
-
-Все данные приходят из `ShadowStats` и `ScreenerRow`.
-
-| Колонка | Формула/смысл |
-|---|---|
-| `Spikes` | Кол-во entry-сигналов за последние 2 минуты (`spike_timestamps`) |
-| `PnL%` | Суммарный session PnL в процентах (`session_total_pnl_pct`) |
-| `Trd` | Кол-во закрытых сделок за сессию (`session_trades`) |
-| `Avg%` | `session_pnl_pct / session_trades` |
-| `Win%` | `(session_wins / session_trades) * 100` |
-| `Catch%` | Средний `catchup_pct` по rolling window закрытых сделок |
-| `Lag ms` | Средний `catchup_ms` по rolling window закрытых сделок |
-
----
-
-## 6) Shadow Fleet / Optimizer
-
-### 6.1 Grid (текущий)
+## 6) Shadow Fleet grid (текущий)
 
 ```text
-gap_threshold_bps (spike_threshold_bps): [50, 60, 70, 80, 100]     (5)
-target_ratio (breakeven trigger):        [0.3, 0.4, 0.5, 0.7]      (4)
-stop_loss_bps:                           [20, 30, 50, 80]           (4)
-max_hold_ms:                             [5000, 10000, 20000, 30000](4)
-max_spread_bps:                          [3, 5, 8]                  (3)
-trailing_decay_ratio (trailing take):    [0.3, 0.5, 0.7]            (3)
+gap_threshold_bps (spike_threshold_bps): [30, 50, 60, 80]           (4)
+target_ratio:                           [0.3, 0.5, 0.7]             (3)
+stop_loss_bps:                          [8, 15, 25, 40]              (4)
+max_hold_ms:                            [5000, 10000, 30000]         (3)
+max_spread_bps:                         [3, 5]                        (2)
+trailing_decay_ratio:                   [0.3, 0.7]                    (2)
+baseline_window_ms:                     [10000, 20000, 30000, 60000]  (4)
 
-TOTAL: 5 * 4 * 4 * 4 * 3 * 3 = 2880 configs
+TOTAL: 4 * 3 * 4 * 3 * 2 * 2 * 4 = 2304
 ```
 
-> Двухфазная exit-модель: target_ratio = порог breakeven-активации (не немедленный выход).
-> После breakeven стоп переносится на entry price, trailing take-profit пускает профит расти.
+Pruning:
 
-### 6.2 Авто-прунинг конфигов
-
-В `ShadowFleet::tick_all()`:
-
-1. **Negative expectancy prune**  
-   Если `session_trades >= 30` и `avg_pnl_pct < -0.05`, конфиг отключается.
-
-2. **Inactive prune**  
-   Если за `10 минут` после старта symbol-fleet у конфига `0 трейдов`, он отключается.
-
-Отключённые конфиги не тикаются дальше, но остаются в памяти/истории как pruned.
-
-### 6.3 Ranking endpoints
-
-- `GET /api/v1/fleet`
-  - `GROUP BY config_id`
-  - `HAVING total >= 10`
-  - `ORDER BY total_pnl / total DESC` (**expectancy**, не win-rate)
-  - `LIMIT 50`
-
-- `GET /api/v1/fleet/symbols`
-  - лучший конфиг на символ (`ROW_NUMBER() OVER (PARTITION BY symbol ...)`)
-  - `HAVING total >= 5`
-  - сортировка по expectancy.
+- `session_trades >= 30 && avg_pnl_pct < -0.05` -> disable config
+- `session_trades == 0` после `10m` -> disable as inactive
 
 ---
 
-## 7) БД и надежность записи
+## 7) API surface
 
-Файл: `data/optimizer.db`
-
-### 7.1 Таблицы
-
-- `configs`:
-  - ключевые параметры стратегии, включая `trailing_decay_ratio`
-- `trades`:
-  - закрытые сделки (`config_id`, symbol, entry/exit, `pnl_pct`, `spike_bps`, reason)
-
-### 7.2 Индексы/идемпотентность
-
-- `idx_trades_config`
-- `idx_trades_symbol`
-- `idx_trades_exit_ts`
-- `UNIQUE(config_id, symbol, entry_ts_ms, exit_ts_ms)` natural key
-- `INSERT OR IGNORE` для idempotent persistence
-
-### 7.3 Writer semantics
-
-- `mpsc` capacity = `10_000`
-- flush interval = `5s`
-- WAL + `synchronous=NORMAL`
-- flush error: буфер **не очищается** (повторная попытка позже)
-- channel overflow: batch drop с warn-логом (осознанный fail-open)
-
----
-
-## 8) Universe символов
-
-В `main.rs`:
-
-- фильтр объёма: `MIN_VOLUME_USD = 2_500_000`
-- universe = пересечение Binance/Gate символов
-- blacklist = env blacklist + strategy blacklist
-- strategy blacklist (текущий): `BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `DYDXUSDT`
-- fallback при проблемах REST: `BTCUSDT`, `ETHUSDT`
-
----
-
-## 9) HTTP/WS маршруты
-
-| Метод | Путь | Назначение |
+| Method | Path | Назначение |
 |---|---|---|
-| GET | `/health` | статус runtime и коннектов |
-| GET | `/api/v1/symbols` | список символов + объёмы |
-| GET | `/api/v1/screener` | таблица screener |
-| GET | `/api/v1/shadow/:symbol` | debug single shadow |
-| GET | `/api/v1/chart/:symbol` | исторические ряды + сделки |
-| GET | `/api/v1/fleet` | глобальный ranking конфигов |
-| GET | `/api/v1/fleet/symbols` | лучший конфиг на символ |
-| GET | `/screener` | HTML screener page |
-| GET | `/fleet` | HTML fleet optimizer page |
-| WS | `ws://host:8181/ws` | live market ticks |
+| GET | `/health` | health/runtime status |
+| GET | `/api/v1/symbols` | universe symbols |
+| GET | `/api/v1/screener` | screener rows + shadow stats |
+| GET | `/api/v1/shadow/:symbol` | per-symbol shadow debug |
+| GET | `/api/v1/chart/:symbol` | chart + trades |
+| GET | `/api/v1/fleet` | expectancy ranking |
+| GET | `/api/v1/fleet/ranked` | composite ranking (sharpe/pf/composite) |
+| GET | `/api/v1/fleet/symbols` | best config per symbol |
+| GET | `/screener` | HTML page |
+| GET | `/fleet` | HTML fleet page |
+| WS | `ws://host:8181/ws` | live ticks |
 
 ---
 
-## 10) Runbook
+## 8) Runbook
 
 ```bash
 # build/test
 cargo build
 cargo test
 
-# release
+# release run
 cargo build --release
 ./target/release/hft-lead-lag
-```
 
-Быстрая проверка:
-
-```bash
+# quick checks
 curl -s http://localhost:5000/health
 curl -s http://localhost:5000/api/v1/fleet | head
+curl -s http://localhost:5000/api/v1/fleet/ranked | head
 curl -s http://localhost:5000/api/v1/fleet/symbols | head
 ```
 
 ---
 
-## 11) Ограничения текущей версии
+## 9) Ограничения текущей версии
 
-1. Paper trading, не real execution.
-2. Авто-прунинг локальный (per symbol fleet), но нет полноценного online policy engine.
-3. Нет portfolio allocator между конфигами.
-4. Channel overflow в writer дропает batch (с логом).
-5. OBI/Kalman/hot-reload описаны в studies, но ещё не интегрированы в runtime.
+1. Это paper execution (real order routing ещё не интегрирован).
+2. Universe coverage пока узкий: многие символы не проходят пороги сигналов.
+3. Policy allocator между конфигами отсутствует (есть ranking, но нет auto-capital routing).
+4. Есть fail-open поведение в `DbWriter` при переполнении канала (batch drop с warn).
 
 ---
 
-## 12) Источник правды
+## 10) Source of truth
 
-Если есть конфликт между документом и кодом:
+При конфликте docs vs code приоритет у кода:
 
 1. `src/domain/screener/*`
-2. `src/api/*`
-3. `src/infrastructure/db.rs`
+2. `src/infrastructure/db.rs`
+3. `src/api/*`
 4. `src/main.rs`
-
-Код имеет приоритет, docs синхронизируются с `main`.
 
 ---
 
-*Last updated: 2026-02-19 (post fleet optimizer upgrades: expectancy ranking, decay grid, auto-pruning, zero-trade pruning)*
+*Last updated: 2026-02-19 (baseline_window rollout + multi-agent review added)*

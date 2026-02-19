@@ -1,111 +1,150 @@
-# Deep-Dive Review: hft-lead-lag (Current)
+# Deep-Dive Review: Project Status (Current)
 
-**Дата:** 2026-02-19  
-**Scope:** runtime + стратегия + fleet optimizer + persistence + API/docs consistency
+**Date:** 2026-02-19  
+**Scope:** strategy math, fleet optimizer, DB/API consistency, live runtime behavior  
+**Code base:** `main @ 807178a`
 
 ---
 
 ## 1) Executive verdict
 
-Текущее состояние: **рабочий HFT-oriented paper-trading stack с real-time optimizer контуром**.
+Проект в рабочем состоянии для paper-loop и online optimizer цикла.
 
-- Архитектура: практичная для MVP, без лишнего распределённого оверхеда.
-- Математика: корректная для gap-based гипотезы (baseline-normalized divergence).
-- Fleet: рабочий end-to-end (generate -> trade -> persist -> rank -> UI).
-- Главный прогресс: переход от старого spike-подхода к baseline gap и введение авто-прунинга.
+Сильные стороны:
 
----
+- pipeline end-to-end стабилен (market data -> shadow/fleet -> DB -> ranking/UI),
+- математика стратегии последовательна и прозрачна,
+- baseline-window hyperparameter успешно интегрирован в code + DB + API.
 
-## 2) Что изменилось относительно старого состояния
+Главный системный риск сейчас не в "поломке кода", а в **coverage**:
 
-1. **Entry logic**
-   - было: spike за окно на Binance;
-   - стало: baseline-adjusted gap Binance vs Gate.
-
-2. **Ranking objective**
-   - было: win-rate heavy;
-   - стало: expectancy (`total_pnl / total`) для `/api/v1/fleet`.
-
-3. **Fleet space**
-   - было: 810/1152 исторические сетки;
-   - сейчас: 2430 конфигов (включая `trailing_decay_ratio`).
-
-4. **Runtime pruning**
-   - негативные конфиги отключаются после достаточной статистики;
-   - нулевые (без сделок) отключаются после warmup времени.
-
-5. **UI/API**
-   - `/fleet` + `/api/v1/fleet/symbols` дают глобальный и per-symbol срез.
+- много символов без сигналов при текущих порогах,
+- ranking строится на узком активном подмножестве.
 
 ---
 
-## 3) Техническая оценка по слоям
+## 2) Что реально изменилось (важное)
 
-| Слой | Оценка | Комментарий |
-|---|---|---|
-| `domain/screener` | ✅ good | state machine читаемая, явные gates, формулы прозрачны |
-| `infrastructure/db` | ✅ good | WAL, batch writer, dedupe, миграция колонки |
-| `api` | ✅ good | полезные endpoint-ы + рабочий fleet dashboard |
-| `main` wiring | ✅ good | fail-fast bind, symbol filtering, clear startup flow |
-| Docs sync | ✅ updated | ключевые расхождения 1152/win-rate/spike-window закрыты |
+1. **Baseline window стал гиперпараметром**
+   - `baseline_window_ms` добавлен в:
+     - `TraderConfig`
+     - `config_id()`
+     - grid generation
+     - DB schema/migrations/upsert
+     - API ranking payloads
 
----
+2. **detect_gap() фикс**
+   - baseline считается по срезу `now - baseline_window_ms`, а не по всей retention-истории.
 
-## 4) Математическая корректность (коротко)
+3. **Грид синхронизирован под тайминг 10s..60s**
+   - текущий размер: **2304 configs**.
 
-Корректно реализовано:
-
-- baseline gap signal (long/short симметрия),
-- entry по threshold в bps,
-- exit target/SL/trailing/timeout,
-- session-level PnL/trades/win-rate,
-- fee-adjusted pnl с двухсторонней комиссией.
-
-Риск модели (не баг):  
-стратегия всё ещё чувствительна к regime shifts и не учитывает market microstructure фильтры типа OBI в production-логике.
+4. **Endpoint surface**
+   - рабочие:
+     - `/api/v1/fleet`
+     - `/api/v1/fleet/ranked`
+     - `/api/v1/fleet/symbols`
+     - `/fleet`
 
 ---
 
-## 5) Optimizer maturity
+## 3) Математика и логика — ревью
 
-**Что уже production-готово для paper-loop:**
+### 3.1 Entry
 
-- генерация большого grid,
-- параллельное shadow-исполнение на shared samples,
-- persistence в SQLite,
-- ranking endpoint-ы,
-- runtime pruning для снижения бесполезной нагрузки.
+Текущая формулировка корректна для lead-lag гипотезы:
 
-**Что ещё не сделано (осознанно):**
+- сигнал = текущий gap относительно baseline gap,
+- baseline и threshold в bps консистентны,
+- long/short симметрия соблюдена.
 
-1. online policy selection (Thompson/UCB),
-2. portfolio allocator между конфигами,
-3. robust score с profit factor / drawdown / symbol coverage.
+### 3.2 Exit
 
----
+Двухфазная exit-модель (SL/timeout -> breakeven/trailing) реализована корректно и практична:
 
-## 6) Операционные риски
+- `target_ratio` не является TP-выходом, а порогом перехода в фазу защиты прибыли,
+- trailing логика не конфликтует с breakeven.
 
-1. `DbWriter` при переполнении канала дропает batch (с warn) — это fail-open выбор.
-2. Fleet адаптация пока rule-based pruning, не полноценный adaptive optimizer.
-3. Нейминг `spike_*` частично устарел семантически (фактически используется gap threshold).
-4. Реальные ордера не подключены (paper only).
+### 3.3 PnL
 
----
+- bid/ask-aware расчёт,
+- двухсторонняя комиссия,
+- session-метрики консистентны.
 
-## 7) Практический приоритет next
-
-1. Ввести multi-factor ranking score (expectancy + PF + robustness).
-2. Добавить robust endpoint с фильтром по symbol coverage.
-3. Включить lightweight policy loop поверх уже существующих метрик.
-4. Подключить OBI/ingress-drift фильтры после стабилизации data pipeline.
+Итог: явных математических багов в текущей ветке не обнаружено.
 
 ---
 
-## 8) Финальный вывод
+## 4) Runtime status snapshot
 
-Проект готов к следующей фазе: **не переписывать**, а дорастить optimizer policy и risk allocation поверх уже рабочей базы.
+Срез с живого сервера на момент обновления:
+
+- universe: **53 symbols**
+- symbols with single-shadow trades: **11**
+- symbols without single-shadow activity: **42**
+- fleet ranked configs (`>=10 trades`): **100**
+- best-by-symbol (`/fleet/symbols`): **3 symbols**
+
+Top ranked config:
+
+- `gap=30`, `target=0.7`, `sl=40`, `hold=5s`, `spread=5`, `trailing=0.7`, `baseline=60s`
+- `trades=35`, `win_rate≈60%`, `avg_pnl≈0.0199%`
 
 ---
 
-*Last updated: 2026-02-19 (docs/code synchronized to current fleet runtime)*
+## 5) Ключевая диагностика текущего bottleneck
+
+Почему кажется, что система "торгует мало":
+
+1. Большая часть universe не достигает signal threshold с текущим grid-профилем.
+2. В ranking попадают только конфиги с `>=10 trades`, поэтому видим узкую выборку.
+3. Отдельные волатильные символы (малые/средние) вытягивают основную активность.
+
+Это не ошибка DB/API; это сочетание параметров и рыночного режима.
+
+---
+
+## 6) Latency notes (проверено)
+
+- Gate WS drift по screener в текущем запуске: низкие десятки ms (не сотни).
+- REST-запросы ордерного API имеют другой профиль и не эквивалентны WS feed latency.
+- `fill_delay_ms=6` остаётся paper-level допущением; для реал-исполнения нужен отдельный calibration слой.
+
+---
+
+## 7) Что хорошо / что сдерживает
+
+### Хорошо
+
+- Полный optimizer loop работает.
+- Доки синхронизированы с текущим кодом.
+- Введён полезный гиперпараметр тайминга baseline.
+
+### Сдерживает
+
+- Coverage символов ограничен.
+- Нет adaptive capital allocation между топ-конфигами.
+- Нет отдельного режима для low-gap/high-liquidity symbols.
+
+---
+
+## 8) P0 (обновлённый, практический)
+
+1. **Coverage P0:** добавить более мягкие gap уровни для части grid (например 20 bps сегмент) и валидировать прирост активных символов.
+2. **Execution realism P0:** вынести `fill_delay_ms` в отдельный profile (paper-fast vs realistic).
+3. **Stability P0:** закрепить текущий ranked-score как основной endpoint для отбора конфигов в UI/ops.
+
+---
+
+## 9) Финальный вывод
+
+Проект уже не в стадии "сломано/не работает"; он в стадии **quality scaling**:
+
+- ядро работает,
+- метрики собираются,
+- параметрический контур живой,
+- следующий выигрыш даёт расширение coverage и execution realism.
+
+---
+
+*Last updated: 2026-02-19 (full deep-dive refresh after baseline-window integration)*

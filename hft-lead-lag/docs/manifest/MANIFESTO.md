@@ -35,9 +35,10 @@
 ## Текущий фокус
 
 - Gap-based lead-lag с baseline нормализацией.
-- Shadow Fleet exploration: **2880 configs**.
-- Expectancy-first ranking + runtime pruning.
-- Подготовка к следующему шагу: policy selection + robust scoring.
+- Shadow Fleet exploration: **2304 configs**.
+- Baseline timing как гиперпараметр (`baseline_window_ms`: 10s/20s/30s/60s).
+- Expectancy + composite ranking + runtime pruning.
+- Подготовка к следующему шагу: coverage expansion + policy selection.
 
 ---
 
@@ -51,4 +52,4 @@
 
 ---
 
-*Manifest v2.1 — synchronized with current fleet optimizer runtime*
+*Manifest v2.2 — synchronized with baseline-window fleet runtime*
