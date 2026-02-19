@@ -16,7 +16,6 @@ use crate::domain::{
     ExchangeId, ExchangeError, ExchangeResult,
     MarketDataStream, SubscriptionId,
     BookTicker, Trade,
-    OrderExecutor, OrderRequest, OrderResponse, Position,
     symbols::SymbolCache,
 };
 use crate::infrastructure::exchanges::common::{
@@ -153,35 +152,6 @@ impl GateMarketData {
         Self::extract_nested_price(data, parent, field)
     }
 
-    /// Parse trade message from Gate.io format
-    fn parse_trade(&self, data: &[u8], local_ts_ns: i64) -> Option<Trade> {
-        let contract = extract_json_string_field(data, "c")
-            .or_else(|| extract_json_string_field(data, "contract"))?;
-        
-        let symbol_str = String::from_utf8_lossy(&contract)
-            .replace("_USDT", "USDT")
-            .replace("_USD", "USDT");
-        let symbol = Bytes::from(symbol_str);
-        
-        let trade_id = extract_json_i64_field(data, "i")?;
-        let price = Self::extract_nested_price(data, "data", "p")
-            .or_else(|| extract_json_string_field(data, "p").and_then(|p| price_to_ticks(&p)))?;
-        let qty = Self::extract_nested_qty(data, "data", "s")
-            .or_else(|| extract_json_string_field(data, "s").and_then(|q| qty_to_ticks(&q)))?;
-        
-        let is_buyer_maker = extract_json_i64_field(data, "T") == Some(1);
-        let exchange_ts = extract_json_i64_field(data, "t").unwrap_or(0);
-
-        Some(Trade::new(
-            self.symbol_cache.intern_bytes(&symbol),
-            trade_id,
-            price,
-            qty,
-            is_buyer_maker,
-            exchange_ts.saturating_mul(1_000_000),
-            local_ts_ns,
-        ))
-    }
 }
 
 impl Default for GateMarketData {
@@ -490,59 +460,8 @@ impl GateMarketData {
     }
 }
 
-/// Gate.io Futures order executor
-pub struct GateOrderExecutor {
-    api_key: String,
-    api_secret: String,
-    client: reqwest::Client,
-}
-
-impl GateOrderExecutor {
-    pub fn new(api_key: String, api_secret: String) -> Self {
-        Self {
-            api_key,
-            api_secret,
-            client: reqwest::Client::new(),
-        }
-    }
-
-    /// Generate Gate.io signature
-    fn generate_signature(&self, method: &str, path: &str, body: &str, timestamp: i64) -> String {
-        use sha2::Sha512;
-        use sha2::Digest;
-        let sign_payload = format!("{}\n{}\n{}\n{}\n{}", 
-            method,
-            path,
-            body,
-            hex::encode(Sha512::digest(body.as_bytes())),
-            timestamp
-        );
-        HmacSha512::sign_static(self.api_secret.as_bytes(), sign_payload.as_bytes())
-    }
-}
-
-#[async_trait::async_trait]
-impl OrderExecutor for GateOrderExecutor {
-    fn exchange_id(&self) -> ExchangeId {
-        ExchangeId::GateFutures
-    }
-
-    async fn place_order(&self, _request: OrderRequest) -> ExchangeResult<OrderResponse> {
-        Err(ExchangeError::Internal("Not implemented".into()))
-    }
-
-    async fn cancel_order(&self, _symbol: &str, _order_id: &str) -> ExchangeResult<OrderResponse> {
-        Err(ExchangeError::Internal("Not implemented".into()))
-    }
-
-    async fn cancel_all_orders(&self, _symbol: &str) -> ExchangeResult<Vec<OrderResponse>> {
-        Ok(vec![])
-    }
-
-    async fn get_position(&self, _symbol: &str) -> ExchangeResult<Position> {
-        Ok(Position::default())
-    }
-}
+pub mod executor;
+pub use executor::GateOrderExecutor;
 
 #[cfg(test)]
 mod tests {

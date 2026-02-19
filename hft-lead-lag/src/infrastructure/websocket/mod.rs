@@ -57,6 +57,7 @@ pub enum WsEvent {
 }
 
 /// WebSocket manager for handling connection lifecycle
+#[allow(dead_code)]
 pub struct WsManager {
     config: WsConfig,
     state: WsState,
@@ -88,6 +89,7 @@ impl WsManager {
         self.state == WsState::Connected
     }
 
+    #[allow(dead_code)]
     fn set_state(&mut self, new_state: WsState) {
         debug!("WebSocket state change: {:?} -> {:?}", self.state, new_state);
         self.state = new_state;

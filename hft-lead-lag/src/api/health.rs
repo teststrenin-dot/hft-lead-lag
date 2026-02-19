@@ -1,10 +1,14 @@
 //! Health check utilities
+//!
+//! Legacy module — primary health tracking uses `HealthState` in `http_server.rs`.
+//! Kept for potential future use with richer health aggregation.
 
 use std::time::Duration;
 use tokio::time::Instant;
 
 /// Health status
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HealthStatus {
     pub is_healthy: bool,
     pub status: String,
@@ -13,6 +17,7 @@ pub struct HealthStatus {
 
 /// Individual health check
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HealthCheck {
     pub name: String,
     pub is_healthy: bool,
@@ -21,6 +26,7 @@ pub struct HealthCheck {
 }
 
 /// Health checker for the application
+#[allow(dead_code)]
 pub struct HealthChecker {
     start_time: Instant,
     binance_connected: bool,
