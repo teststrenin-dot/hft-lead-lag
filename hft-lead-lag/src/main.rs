@@ -104,10 +104,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     info!("Common symbols: {}", common_symbols.len());
 
-    // Strategy checks run on a bounded subset.
+    // Strategy fleet runs on all common symbols.
     let mut strategy_symbols: Vec<String> = common_symbols
         .iter()
-        .take(MAX_STRATEGY_SYMBOLS)
         .cloned()
         .collect();
     if strategy_symbols.is_empty() {
