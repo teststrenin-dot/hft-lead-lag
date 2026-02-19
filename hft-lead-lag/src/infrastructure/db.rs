@@ -4,16 +4,20 @@
 //! flushes every 5s — zero impact on trading hot path.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::{Connection, params};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+/// Cumulative count of dropped trade batches (for monitoring/alerting).
+static DROPPED_BATCHES: AtomicU64 = AtomicU64::new(0);
+
 use crate::domain::screener::shadow_fleet::FleetTrade;
 use crate::domain::screener::trader_config::TraderConfig;
 
 const FLUSH_INTERVAL_SECS: u64 = 5;
-const CHANNEL_CAPACITY: usize = 10_000;
+const CHANNEL_CAPACITY: usize = 100_000;
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -114,8 +118,14 @@ impl DbWriter {
     pub fn send(&self, trades: Vec<FleetTrade>) {
         if trades.is_empty() { return; }
         if let Err(e) = self.tx.try_send(trades) {
-            warn!("db writer channel full, dropping batch: {}", e);
+            let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+            warn!("db writer channel full, dropping batch (total dropped: {n}): {e}");
         }
+    }
+
+    /// Number of trade batches lost to channel overflow since process start.
+    pub fn dropped_batches() -> u64 {
+        DROPPED_BATCHES.load(Ordering::Relaxed)
     }
 }
 

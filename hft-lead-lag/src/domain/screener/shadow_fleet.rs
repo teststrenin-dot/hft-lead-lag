@@ -52,6 +52,7 @@ pub fn generate_grid() -> Vec<TraderConfig> {
                                 stop_loss_bps: stop,
                                 max_hold_ms: hold,
                                 max_spread_bps: spread,
+                                trailing_stop_bps: gap * 0.5,
                                 trailing_decay_ratio: decay,
                                 ..base
                             });
