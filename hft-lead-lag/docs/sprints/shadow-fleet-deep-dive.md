@@ -41,10 +41,12 @@ stop_loss_bps:                           [8, 10, 15, 20, 30]        (5)
 max_hold_ms:                             [3000, 5000, 10000]         (3)
 max_spread_bps:                          [3, 5, 8]                   (3)
 trailing_decay_ratio:                    [0.3, 0.5, 0.7]             (3)
-spike_window_ms:                         500 (fixed)
+trailing_stop_bps:                       gap * 0.5 (computed)        (-)
 
 TOTAL: 6 * 3 * 5 * 3 * 3 * 3 = 2430
 ```
+
+> `spike_window_ms` удалён — baseline считается по всему PriceSamples (2 мин).
 
 ### Почему в поле остался `spike_*` нейминг
 
@@ -127,10 +129,10 @@ TOTAL: 6 * 3 * 5 * 3 * 3 * 3 = 2430
 ### 7.1 Schema
 
 `configs`:
-- `id`, `spike_threshold_bps`, `spike_window_ms`, `target_ratio`,
+- `id`, `spike_threshold_bps`, `target_ratio`,
 - `stop_loss_bps`, `max_hold_ms`, `max_spread_bps`,
 - `trailing_stop_bps`, `trailing_decay_ratio`,
-- `fill_delay_ms`, `cooldown_ms`, `taker_fee`.
+- `fill_delay_ms`, `cooldown_ms`, `warmup_ms`, `quote_freshness_ms`, `taker_fee`.
 
 `trades`:
 - `config_id`, `symbol`, `direction`,

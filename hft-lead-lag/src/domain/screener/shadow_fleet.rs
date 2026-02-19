@@ -47,7 +47,6 @@ pub fn generate_grid() -> Vec<TraderConfig> {
                         for &decay in TRAILING_DECAYS {
                             configs.push(TraderConfig {
                                 spike_threshold_bps: gap,
-                                spike_window_ms: 500,
                                 target_ratio: target,
                                 stop_loss_bps: stop,
                                 max_hold_ms: hold,

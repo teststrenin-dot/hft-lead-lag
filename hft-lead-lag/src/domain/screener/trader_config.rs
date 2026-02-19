@@ -8,8 +8,6 @@ use serde::Serialize;
 pub struct TraderConfig {
     /// Min Binance move to trigger entry (bps). Ask for longs, bid for shorts.
     pub spike_threshold_bps: f64,
-    /// Window to measure Binance spike (ms).
-    pub spike_window_ms: i64,
     /// Target as fraction of detected spike (1.0 = full catchup).
     pub target_ratio: f64,
     /// Stop-loss (bps).
@@ -37,15 +35,16 @@ pub struct TraderConfig {
 }
 
 impl Default for TraderConfig {
+    /// Defaults aligned with grid medians so bare `Default::default()`
+    /// produces a representative mid-grid configuration.
     fn default() -> Self {
         Self {
-            spike_threshold_bps: 30.0,
-            spike_window_ms: 500,
-            target_ratio: 1.0,
-            stop_loss_bps: 10.0,
-            max_hold_ms: 30_000,
-            max_spread_bps: 0.0,
-            trailing_stop_bps: 0.0,
+            spike_threshold_bps: 60.0,
+            target_ratio: 0.5,
+            stop_loss_bps: 15.0,
+            max_hold_ms: 5_000,
+            max_spread_bps: 5.0,
+            trailing_stop_bps: 30.0,
             trailing_decay_ratio: 0.5,
             fill_delay_ms: 6,
             cooldown_ms: 3_000,
@@ -64,7 +63,6 @@ impl TraderConfig {
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
         self.spike_threshold_bps.to_bits().hash(&mut h);
-        self.spike_window_ms.hash(&mut h);
         self.target_ratio.to_bits().hash(&mut h);
         self.stop_loss_bps.to_bits().hash(&mut h);
         self.max_hold_ms.hash(&mut h);

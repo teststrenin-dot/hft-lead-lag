@@ -27,7 +27,6 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS configs (
     id                    INTEGER PRIMARY KEY,
     spike_threshold_bps   REAL NOT NULL,
-    spike_window_ms       INTEGER NOT NULL,
     target_ratio          REAL NOT NULL,
     stop_loss_bps         REAL NOT NULL,
     max_hold_ms           INTEGER NOT NULL,
@@ -87,16 +86,15 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
 /// Insert configs into the database (idempotent — uses OR IGNORE).
 pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT OR IGNORE INTO configs (id, spike_threshold_bps, spike_window_ms, target_ratio,
+        "INSERT OR IGNORE INTO configs (id, spike_threshold_bps, target_ratio,
          stop_loss_bps, max_hold_ms, max_spread_bps, trailing_stop_bps, trailing_decay_ratio,
          fill_delay_ms, cooldown_ms, warmup_ms, quote_freshness_ms, taker_fee)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
     )?;
     for c in configs {
         stmt.execute(params![
             c.config_id() as i64,
             c.spike_threshold_bps,
-            c.spike_window_ms,
             c.target_ratio,
             c.stop_loss_bps,
             c.max_hold_ms,

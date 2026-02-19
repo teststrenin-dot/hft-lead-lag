@@ -56,14 +56,18 @@ impl ClosedTrade {
 }
 
 #[derive(Debug, Clone)]
-struct PendingOrder {
-    direction: Direction,
-    fire_ts_ms: i64,
-    is_exit: bool,
-    exit_pos: Option<OpenPosition>,
-    spike_bps: f64,
-    exit_reason: &'static str,
-    gate_spread_at_entry_bps: f64,
+enum PendingOrder {
+    Entry {
+        direction: Direction,
+        fire_ts_ms: i64,
+        spike_bps: f64,
+        gate_spread_at_entry_bps: f64,
+    },
+    Exit {
+        fire_ts_ms: i64,
+        pos: OpenPosition,
+        reason: &'static str,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -217,29 +221,32 @@ impl ShadowTrader {
 
     fn try_fill(&mut self, ts_ms: i64, gate: &Quote, window_ms: i64) {
         let Some(pending) = self.pending.take() else { return };
-        if ts_ms < pending.fire_ts_ms + self.config.fill_delay_ms {
+        let fire_ts = match &pending {
+            PendingOrder::Entry { fire_ts_ms, .. } => *fire_ts_ms,
+            PendingOrder::Exit { fire_ts_ms, .. } => *fire_ts_ms,
+        };
+        if ts_ms < fire_ts + self.config.fill_delay_ms {
             self.pending = Some(pending);
             return;
         }
-        if pending.is_exit {
-            if let Some(pos) = pending.exit_pos {
-                self.fill_exit(ts_ms, gate, window_ms, pos, pending.exit_reason);
-            } else {
-                tracing::warn!("exit order with exit_pos=None — dropping");
+        match pending {
+            PendingOrder::Exit { pos, reason, .. } => {
+                self.fill_exit(ts_ms, gate, window_ms, pos, reason);
             }
-        } else {
-            let gate_price = match pending.direction {
-                Direction::Long => gate.ask,
-                Direction::Short => gate.bid,
-            };
-            self.position = Some(OpenPosition {
-                direction: pending.direction,
-                gate_entry_price: gate_price,
-                entry_ts_ms: ts_ms,
-                spike_bps: pending.spike_bps,
-                gate_spread_at_entry_bps: pending.gate_spread_at_entry_bps,
-                peak_unrealized_bps: 0.0,
-            });
+            PendingOrder::Entry { direction, spike_bps, gate_spread_at_entry_bps, .. } => {
+                let gate_price = match direction {
+                    Direction::Long => gate.ask,
+                    Direction::Short => gate.bid,
+                };
+                self.position = Some(OpenPosition {
+                    direction,
+                    gate_entry_price: gate_price,
+                    entry_ts_ms: ts_ms,
+                    spike_bps,
+                    gate_spread_at_entry_bps,
+                    peak_unrealized_bps: 0.0,
+                });
+            }
         }
     }
 
@@ -274,14 +281,10 @@ impl ShadowTrader {
                 else if trailing_stopped { "trailing_stop" }
                 else { "timeout" };
             let pos = self.position.take().unwrap();
-            self.pending = Some(PendingOrder {
-                direction: pos.direction,
+            self.pending = Some(PendingOrder::Exit {
                 fire_ts_ms: ts_ms,
-                is_exit: true,
-                exit_pos: Some(pos),
-                spike_bps: 0.0,
-                exit_reason: reason,
-                gate_spread_at_entry_bps: 0.0,
+                pos,
+                reason,
             });
         }
     }
@@ -309,13 +312,10 @@ impl ShadowTrader {
             let spread_bps = if gate_mid > 0.0 {
                 ((gate.ask - gate.bid) / gate_mid) * 10_000.0
             } else { 0.0 };
-            self.pending = Some(PendingOrder {
+            self.pending = Some(PendingOrder::Entry {
                 direction,
                 fire_ts_ms: ts_ms,
-                is_exit: false,
-                exit_pos: None,
                 spike_bps: gap_bps,
-                exit_reason: "",
                 gate_spread_at_entry_bps: spread_bps,
             });
         }
@@ -521,5 +521,299 @@ impl ShadowTrader {
             entry_price: self.position.as_ref().map(|p| p.gate_entry_price),
             entry_ts_ms: self.position.as_ref().map(|p| p.entry_ts_ms),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::price_samples::{PriceSample, PriceSamples};
+
+    const WINDOW_MS: i64 = 120_000;
+
+    /// Build a trader with explicit overrides on top of defaults.
+    fn make_trader(f: impl FnOnce(&mut TraderConfig)) -> ShadowTrader {
+        let mut cfg = TraderConfig::default();
+        f(&mut cfg);
+        ShadowTrader::new(cfg)
+    }
+
+    fn quote(bid: f64, ask: f64, ts_ms: i64) -> Quote {
+        Quote { bid, ask, ts_ms }
+    }
+
+    /// Fill samples with `n` identical snapshots so baseline is stable.
+    fn stable_samples(n: usize, gate: f64, binance: f64, ts_ms: i64) -> PriceSamples {
+        let mut ps = PriceSamples::default();
+        for i in 0..n {
+            ps.push(PriceSample {
+                ts_ms: ts_ms - (n as i64 - i as i64) * 100,
+                gate_bid: gate, gate_ask: gate,
+                binance_bid: binance, binance_ask: binance,
+            });
+        }
+        ps
+    }
+
+    // -- Baseline & entry signal ------------------------------------------------
+
+    #[test]
+    fn baseline_needs_min_samples() {
+        let trader = make_trader(|c| { c.min_baseline_samples = 20; });
+        let samples = stable_samples(19, 100.0, 100.0, 50_000);
+        let bn = quote(100.0, 100.0, 50_000);
+        let gt = quote(100.0, 100.0, 50_000);
+        assert!(trader.detect_gap(&bn, &gt, &samples).is_none());
+    }
+
+    #[test]
+    fn entry_signal_long_fires_above_threshold() {
+        let trader = make_trader(|c| {
+            c.spike_threshold_bps = 50.0;
+            c.warmup_ms = 0;
+            c.min_baseline_samples = 5;
+        });
+        // baseline: binance_ask == gate_ask == 100 → baseline_ask_gap = 0
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+        // current: binance_ask = 100.60, gate_ask = 100 → current_gap = 60 bps
+        let bn = quote(100.60, 100.60, 50_000);
+        let gt = quote(100.0, 100.0, 50_000);
+        let result = trader.detect_gap(&bn, &gt, &samples);
+        assert!(result.is_some());
+        let (dir, gap_bps) = result.unwrap();
+        assert_eq!(dir, Direction::Long);
+        assert!((gap_bps - 60.0).abs() < 1.0, "expected ~60 bps, got {gap_bps}");
+    }
+
+    #[test]
+    fn entry_signal_below_threshold_no_fire() {
+        let trader = make_trader(|c| {
+            c.spike_threshold_bps = 50.0;
+            c.min_baseline_samples = 5;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+        // 30 bps gap — below 50 bps threshold
+        let bn = quote(100.30, 100.30, 50_000);
+        let gt = quote(100.0, 100.0, 50_000);
+        assert!(trader.detect_gap(&bn, &gt, &samples).is_none());
+    }
+
+    // -- PnL with fees ----------------------------------------------------------
+
+    #[test]
+    fn pnl_long_with_fees() {
+        let mut trader = make_trader(|c| {
+            c.spike_threshold_bps = 10.0;
+            c.warmup_ms = 0;
+            c.fill_delay_ms = 0;
+            c.cooldown_ms = 0;
+            c.min_baseline_samples = 5;
+            c.max_spread_bps = 0.0;
+            c.taker_fee = 0.000_5;
+            c.max_hold_ms = 100;
+            c.target_ratio = 99.0;
+            c.stop_loss_bps = 999.0;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+        // Entry: binance spikes to 100.20 (20 bps gap)
+        let bn_entry = quote(100.20, 100.20, 50_100);
+        let gt_entry = quote(100.0, 100.0, 50_100);
+        trader.tick(50_100, &bn_entry, &gt_entry, &samples, WINDOW_MS);
+        // Fill entry (fill_delay=0): gate.ask = 100.0
+        trader.tick(50_200, &bn_entry, &gt_entry, &samples, WINDOW_MS);
+        assert_eq!(trader.position_label(), "LONG_GT");
+
+        // Force timeout: gate.bid = 100.10 → raw = 0.001
+        let gt_exit = quote(100.10, 100.20, 50_500);
+        trader.tick(50_500, &bn_entry, &gt_exit, &samples, WINDOW_MS);
+        // Fill exit
+        trader.tick(50_600, &bn_entry, &gt_exit, &samples, WINDOW_MS);
+
+        let trades = trader.completed_trades();
+        assert_eq!(trades.len(), 1);
+        let t = &trades[0];
+        // raw = (100.10 - 100.0) / 100.0 = 0.001
+        // fees = 0.0005 * 2 = 0.001
+        // pnl = (0.001 - 0.001) * 100 = 0.0
+        assert!(t.pnl_pct.abs() < 0.01, "expected ~0% pnl, got {}", t.pnl_pct);
+    }
+
+    // -- Exit conditions --------------------------------------------------------
+
+    #[test]
+    fn stop_loss_triggers() {
+        let mut trader = make_trader(|c| {
+            c.spike_threshold_bps = 10.0;
+            c.stop_loss_bps = 5.0;
+            c.warmup_ms = 0;
+            c.fill_delay_ms = 0;
+            c.min_baseline_samples = 5;
+            c.max_hold_ms = 999_999;
+            c.max_spread_bps = 0.0;
+            c.target_ratio = 99.0;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+        let bn = quote(100.20, 100.20, 50_100);
+        let gt = quote(100.0, 100.0, 50_100);
+        trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
+        // Fill
+        trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS);
+        assert_eq!(trader.position_label(), "LONG_GT");
+        // Price drops: gate.bid = 99.93 → unrealized = -7 bps < -5 bps SL
+        let gt_drop = quote(99.93, 100.0, 50_300);
+        trader.tick(50_300, &bn, &gt_drop, &samples, WINDOW_MS);
+        // Fill exit
+        trader.tick(50_400, &bn, &gt_drop, &samples, WINDOW_MS);
+        assert_eq!(trader.position_label(), "FLAT");
+        let t = &trader.completed_trades()[0];
+        assert_eq!(t.exit_reason, "stop_loss");
+    }
+
+    #[test]
+    fn target_exit_triggers() {
+        let mut trader = make_trader(|c| {
+            c.spike_threshold_bps = 10.0;
+            c.target_ratio = 0.5; // target = spike_bps * 0.5
+            c.warmup_ms = 0;
+            c.fill_delay_ms = 0;
+            c.min_baseline_samples = 5;
+            c.max_hold_ms = 999_999;
+            c.stop_loss_bps = 999.0;
+            c.max_spread_bps = 0.0;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+        // 20 bps gap → spike_bps = 20, target = 20 * 0.5 = 10 bps
+        let bn = quote(100.20, 100.20, 50_100);
+        let gt = quote(100.0, 100.0, 50_100);
+        trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
+        trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS); // fill entry at 100.0
+        // gate.bid moves to 100.11 → unrealized = 11 bps >= 10 bps target
+        let gt_up = quote(100.11, 100.20, 50_300);
+        trader.tick(50_300, &bn, &gt_up, &samples, WINDOW_MS);
+        trader.tick(50_400, &bn, &gt_up, &samples, WINDOW_MS); // fill exit
+        assert_eq!(trader.position_label(), "FLAT");
+        let t = &trader.completed_trades()[0];
+        assert_eq!(t.exit_reason, "target");
+    }
+
+    #[test]
+    fn trailing_stop_exit() {
+        let mut trader = make_trader(|c| {
+            c.spike_threshold_bps = 10.0;
+            c.trailing_stop_bps = 8.0;    // activate trailing after 8 bps unrealized
+            c.trailing_decay_ratio = 0.5;  // exit when unrealized < peak * 0.5
+            c.target_ratio = 99.0;         // disable target exit
+            c.warmup_ms = 0;
+            c.fill_delay_ms = 0;
+            c.min_baseline_samples = 5;
+            c.max_hold_ms = 999_999;
+            c.stop_loss_bps = 999.0;
+            c.max_spread_bps = 0.0;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+        let bn = quote(100.20, 100.20, 50_100);
+        let gt = quote(100.0, 100.0, 50_100);
+        trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
+        trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS); // fill at 100.0
+        // Peak: gate.bid = 100.12 → 12 bps (> 8 bps activation)
+        let gt_peak = quote(100.12, 100.20, 50_300);
+        trader.tick(50_300, &bn, &gt_peak, &samples, WINDOW_MS);
+        // Drop: gate.bid = 100.05 → 5 bps < 12 * 0.5 = 6 bps → trailing triggers
+        let gt_drop = quote(100.05, 100.20, 50_400);
+        trader.tick(50_400, &bn, &gt_drop, &samples, WINDOW_MS);
+        trader.tick(50_500, &bn, &gt_drop, &samples, WINDOW_MS); // fill exit
+        assert_eq!(trader.position_label(), "FLAT");
+        let t = &trader.completed_trades()[0];
+        assert_eq!(t.exit_reason, "trailing_stop");
+    }
+
+    #[test]
+    fn timeout_exit() {
+        let mut trader = make_trader(|c| {
+            c.spike_threshold_bps = 10.0;
+            c.max_hold_ms = 100;
+            c.warmup_ms = 0;
+            c.fill_delay_ms = 0;
+            c.min_baseline_samples = 5;
+            c.stop_loss_bps = 999.0;
+            c.target_ratio = 99.0;
+            c.max_spread_bps = 0.0;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+        let bn = quote(100.20, 100.20, 50_100);
+        let gt = quote(100.0, 100.0, 50_100);
+        trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
+        trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS); // fill
+        // Advance past max_hold_ms=100
+        let gt_flat = quote(100.0, 100.0, 50_400);
+        trader.tick(50_400, &bn, &gt_flat, &samples, WINDOW_MS); // timeout fires
+        trader.tick(50_500, &bn, &gt_flat, &samples, WINDOW_MS); // fill exit
+        assert_eq!(trader.position_label(), "FLAT");
+        let t = &trader.completed_trades()[0];
+        assert_eq!(t.exit_reason, "timeout");
+    }
+
+    // -- Spread filter ----------------------------------------------------------
+
+    #[test]
+    fn spread_filter_blocks_entry() {
+        let mut trader = make_trader(|c| {
+            c.spike_threshold_bps = 10.0;
+            c.max_spread_bps = 5.0;
+            c.warmup_ms = 0;
+            c.fill_delay_ms = 0;
+            c.min_baseline_samples = 5;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+        let bn = quote(100.20, 100.20, 50_100);
+        // Gate spread = 0.10 / 100.0 * 10000 = 10 bps > max_spread 5 bps
+        let gt = quote(99.95, 100.05, 50_100);
+        trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
+        assert_eq!(trader.position_label(), "FLAT"); // entry blocked
+    }
+
+    // -- Session stats ----------------------------------------------------------
+
+    #[test]
+    fn session_stats_accumulate() {
+        let mut trader = make_trader(|c| {
+            c.spike_threshold_bps = 10.0;
+            c.target_ratio = 0.3;
+            c.warmup_ms = 0;
+            c.fill_delay_ms = 0;
+            c.min_baseline_samples = 5;
+            c.max_spread_bps = 0.0;
+            c.stop_loss_bps = 999.0;
+            c.max_hold_ms = 999_999;
+            c.cooldown_ms = 0;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+
+        // Trade 1: entry at 100.0, exit target at ~100.06+ (20*0.3=6 bps)
+        let bn = quote(100.20, 100.20, 50_100);
+        let gt = quote(100.0, 100.0, 50_100);
+        trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
+        trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS);
+        let gt_up = quote(100.10, 100.20, 50_300);
+        trader.tick(50_300, &bn, &gt_up, &samples, WINDOW_MS);
+        trader.tick(50_400, &bn, &gt_up, &samples, WINDOW_MS);
+
+        // Trade 2
+        let gt2 = quote(100.0, 100.0, 50_500);
+        trader.tick(50_500, &bn, &gt2, &samples, WINDOW_MS);
+        trader.tick(50_600, &bn, &gt2, &samples, WINDOW_MS);
+        let gt_up2 = quote(100.10, 100.20, 50_700);
+        trader.tick(50_700, &bn, &gt_up2, &samples, WINDOW_MS);
+        trader.tick(50_800, &bn, &gt_up2, &samples, WINDOW_MS);
+
+        let stats = trader.stats();
+        assert_eq!(stats.session_trades, 2);
+        assert!(stats.session_pnl_pct != 0.0 || stats.session_trades > 0);
+        // Win rate may be 0 if fees exceed raw profit; just check it's computed.
+        assert!(stats.win_rate_pct >= 0.0);
     }
 }

@@ -113,10 +113,13 @@ stop_loss_bps:                           [8, 10, 15, 20, 30]        (5)
 max_hold_ms:                             [3000, 5000, 10000]         (3)
 max_spread_bps:                          [3, 5, 8]                   (3)
 trailing_decay_ratio:                    [0.3, 0.5, 0.7]             (3)
-spike_window_ms:                         [500] (fixed for id/compat) (1)
+trailing_stop_bps:                       gap * 0.5 (computed)        (-)
 
 TOTAL: 6 * 3 * 5 * 3 * 3 * 3 = 2430 configs
 ```
+
+> `spike_window_ms` удалён — baseline считается по всему PriceSamples (2 мин).
+> `trailing_stop_bps` вычисляется как `gap_threshold * 0.5` — не отдельная ось.
 
 ### 6.2 Авто-прунинг конфигов
 
