@@ -487,9 +487,6 @@ impl GateMarketData {
     }
 }
 
-pub mod executor;
-pub use executor::GateOrderExecutor;
-
 #[cfg(test)]
 mod tests {
     use super::*;

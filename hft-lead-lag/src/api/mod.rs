@@ -9,11 +9,9 @@ pub mod ws_server;
 pub mod http_server;
 pub mod handlers;
 pub mod templates;
-pub mod health;
 
 pub use ws_server::*;
 pub use http_server::*;
-pub use health::*;
 
 // Re-export screener types from domain layer for backwards compatibility.
 pub use crate::domain::screener::{ScreenerStore, ScreenerRow};

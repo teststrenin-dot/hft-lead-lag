@@ -83,8 +83,7 @@ pub use domain::{
 };
 
 pub use infrastructure::exchanges::{
-    BinanceMarketData, BinanceOrderExecutor,
-    GateMarketData, GateOrderExecutor,
+    BinanceMarketData, GateMarketData,
 };
 
 pub use application::services::{

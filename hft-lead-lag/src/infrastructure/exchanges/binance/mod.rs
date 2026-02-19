@@ -414,6 +414,3 @@ impl MarketDataStream for BinanceMarketData {
         }
     }
 }
-
-pub mod executor;
-pub use executor::BinanceOrderExecutor;
