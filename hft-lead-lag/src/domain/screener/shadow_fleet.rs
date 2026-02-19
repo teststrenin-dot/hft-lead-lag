@@ -25,6 +25,8 @@ const TRAILING_DECAYS: &[f64] = &[0.3, 0.5, 0.7];
 const PRUNE_MIN_TRADES: usize = 30;
 /// Expectancy threshold (avg PnL %) below which config is disabled.
 const PRUNE_EXPECTANCY_THRESHOLD: f64 = -0.05;
+/// Time (ms) after which zero-trade configs are pruned as inactive.
+const PRUNE_INACTIVE_MS: i64 = 10 * 60 * 1000; // 10 minutes
 
 /// Generate all parameter combinations from the grid.
 pub fn generate_grid() -> Vec<TraderConfig> {
@@ -72,7 +74,7 @@ pub struct FleetTrade {
 
 /// Fleet of shadow traders for one symbol.
 /// Holds N traders with different configs, ticks all on shared samples.
-/// Auto-prunes configs with persistently negative expectancy.
+/// Auto-prunes configs with negative expectancy or zero trades after warmup.
 #[derive(Debug)]
 pub struct ShadowFleet {
     traders: Vec<(u64, ShadowTrader)>,
@@ -84,6 +86,8 @@ pub struct ShadowFleet {
     disabled: Vec<bool>,
     /// Number of active (non-pruned) traders.
     active_count: usize,
+    /// Timestamp of first tick (for inactive pruning).
+    first_tick_ms: Option<i64>,
 }
 
 impl ShadowFleet {
@@ -100,6 +104,7 @@ impl ShadowFleet {
             last_session_trades,
             disabled: vec![false; n],
             active_count: n,
+            first_tick_ms: None,
         }
     }
 
@@ -121,19 +126,21 @@ impl ShadowFleet {
         window_ms: i64,
         symbol: &str,
     ) {
+        let first = *self.first_tick_ms.get_or_insert(ts_ms);
+        let elapsed = ts_ms - first;
+
         for (idx, (config_id, trader)) in self.traders.iter_mut().enumerate() {
             if self.disabled[idx] { continue; }
 
             trader.tick(ts_ms, binance, gate, samples, window_ms);
 
-            // Detect new completed trades via monotonic session counter.
             let session_n = trader.session_trades();
             let prev_n = self.last_session_trades[idx];
+
             if session_n > prev_n {
                 let new_count = session_n - prev_n;
                 let deque = trader.completed_trades();
                 let start = deque.len().saturating_sub(new_count);
-                // Allocate symbol string only when there are actual trades.
                 let sym = symbol.to_string();
                 for trade in deque.iter().skip(start) {
                     self.pending_trades.push_back(FleetTrade {
@@ -144,21 +151,28 @@ impl ShadowFleet {
                 }
                 self.last_session_trades[idx] = session_n;
 
-                // Auto-prune: disable configs with negative expectancy after enough data.
+                // Prune configs with negative expectancy after enough data.
                 if session_n >= PRUNE_MIN_TRADES {
                     let avg_pnl = trader.session_pnl_pct() / session_n as f64;
                     if avg_pnl < PRUNE_EXPECTANCY_THRESHOLD {
                         self.disabled[idx] = true;
                         self.active_count -= 1;
                         tracing::debug!(
-                            config_id = *config_id,
-                            symbol,
-                            trades = session_n,
-                            avg_pnl_pct = format!("{avg_pnl:.4}"),
-                            "fleet: pruned config"
+                            config_id = *config_id, symbol,
+                            trades = session_n, avg_pnl_pct = format!("{avg_pnl:.4}"),
+                            "fleet: pruned (negative expectancy)"
                         );
                     }
                 }
+            } else if session_n == 0 && elapsed >= PRUNE_INACTIVE_MS {
+                // Prune configs that never traded after warmup period.
+                self.disabled[idx] = true;
+                self.active_count -= 1;
+                tracing::debug!(
+                    config_id = *config_id, symbol,
+                    elapsed_min = elapsed / 60_000,
+                    "fleet: pruned (zero trades)"
+                );
             }
         }
     }
