@@ -286,7 +286,7 @@ impl ShadowTrader {
 
     // -- Entry logic ---------------------------------------------------------
 
-    fn try_entry(&mut self, ts_ms: i64, binance: &Quote, gate: &Quote, _samples: &PriceSamples) {
+    fn try_entry(&mut self, ts_ms: i64, binance: &Quote, gate: &Quote, samples: &PriceSamples) {
         if self.position.is_some() || self.pending.is_some() || ts_ms < self.cooldown_until_ms {
             return;
         }
@@ -301,7 +301,7 @@ impl ShadowTrader {
             }
         }
 
-        if let Some((direction, gap_bps)) = self.detect_gap(binance, gate) {
+        if let Some((direction, gap_bps)) = self.detect_gap(binance, gate, samples) {
             self.spike_timestamps.push_back(ts_ms);
             let gate_mid = (gate.bid + gate.ask) * 0.5;
             let spread_bps = if gate_mid > 0.0 {
@@ -321,24 +321,45 @@ impl ShadowTrader {
 
     // -- Gap detection (lead-lag) --------------------------------------------
 
-    /// Classic lead-lag: enter when Binance price diverges from Gate.
-    /// Long: Binance ask > Gate ask → Gate should catch up.
-    /// Short: Binance bid < Gate bid → Gate should catch down.
-    fn detect_gap(&self, binance: &Quote, gate: &Quote) -> Option<(Direction, f64)> {
+    /// Lead-lag with baseline: enter when current gap EXCEEDS the average gap.
+    /// Baseline = mean(binance - gate) over PriceSamples history (~2 min).
+    /// Signal = current_gap - baseline_gap. Enter when signal > threshold.
+    fn detect_gap(
+        &self, binance: &Quote, gate: &Quote, samples: &PriceSamples,
+    ) -> Option<(Direction, f64)> {
+        if samples.len() < 20 { return None; } // need enough history for baseline
+
+        // Compute baseline gap (average ask-gap and bid-gap over history)
+        let (mut ask_gap_sum, mut bid_gap_sum, mut count) = (0.0_f64, 0.0_f64, 0_u32);
+        for s in samples.iter() {
+            if s.gate_ask > 0.0 && s.binance_ask > 0.0 {
+                ask_gap_sum += ((s.binance_ask - s.gate_ask) / s.gate_ask) * 10_000.0;
+            }
+            if s.gate_bid > 0.0 && s.binance_bid > 0.0 {
+                bid_gap_sum += ((s.gate_bid - s.binance_bid) / s.gate_bid) * 10_000.0;
+            }
+            count += 1;
+        }
+        if count == 0 { return None; }
+        let baseline_ask_gap = ask_gap_sum / count as f64;
+        let baseline_bid_gap = bid_gap_sum / count as f64;
+
         let threshold = self.config.spike_threshold_bps;
 
-        // Long signal: Binance ask jumped above Gate ask
+        // Long: current ask-gap exceeds baseline by threshold
         if gate.ask > 0.0 {
-            let gap_bps = ((binance.ask - gate.ask) / gate.ask) * 10_000.0;
-            if gap_bps >= threshold {
-                return Some((Direction::Long, gap_bps));
+            let current_gap = ((binance.ask - gate.ask) / gate.ask) * 10_000.0;
+            let signal = current_gap - baseline_ask_gap;
+            if signal >= threshold {
+                return Some((Direction::Long, signal));
             }
         }
-        // Short signal: Binance bid dropped below Gate bid
+        // Short: current bid-gap exceeds baseline by threshold
         if gate.bid > 0.0 {
-            let gap_bps = ((gate.bid - binance.bid) / gate.bid) * 10_000.0;
-            if gap_bps >= threshold {
-                return Some((Direction::Short, gap_bps));
+            let current_gap = ((gate.bid - binance.bid) / gate.bid) * 10_000.0;
+            let signal = current_gap - baseline_bid_gap;
+            if signal >= threshold {
+                return Some((Direction::Short, signal));
             }
         }
         None
