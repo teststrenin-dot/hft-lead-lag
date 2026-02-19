@@ -68,8 +68,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_natural_key ON trades(config_id, sy
 pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+
+    // Migration: drop legacy configs table if it has removed columns.
+    // Config IDs changed (hash fields updated), so old rows are stale anyway.
+    let has_legacy_col: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='trailing_stop_bps'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if has_legacy_col {
+        conn.execute_batch("DROP TABLE IF EXISTS configs;")?;
+    }
+
     conn.execute_batch(SCHEMA)?;
-    // Migration: add trailing_decay_ratio if missing (existing DBs).
+    // Migration: add columns if missing (older DBs without these columns).
     let _ = conn.execute_batch(
         "ALTER TABLE configs ADD COLUMN trailing_decay_ratio REAL NOT NULL DEFAULT 0.5;"
     );
