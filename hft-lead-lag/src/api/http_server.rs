@@ -473,9 +473,8 @@ async fn screener_page() -> Html<&'static str> {
       gtAsk = (c.gate_ask || []).slice();
       bnBid = (c.binance_bid || []).slice();
       bnAsk = (c.binance_ask || []).slice();
-      // If bid/ask arrays missing, fall back to mid
-      if (gtBid.length === 0 && c.gate_mid) { gtBid = c.gate_mid.slice(); gtAsk = c.gate_mid.slice(); }
-      if (bnBid.length === 0 && c.binance_mid) { bnBid = c.binance_mid.slice(); bnAsk = c.binance_mid.slice(); }
+      if (gtBid.length === 0) return;
+      if (bnBid.length === 0) return;
       // Set last known prices
       if (gtBid.length > 0) { lastGate.bid = gtBid[gtBid.length-1]; lastGate.ask = gtAsk[gtAsk.length-1]; }
       if (bnBid.length > 0) { lastBn.bid = bnBid[bnBid.length-1]; lastBn.ask = bnAsk[bnAsk.length-1]; }

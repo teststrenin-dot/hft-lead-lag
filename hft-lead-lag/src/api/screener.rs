@@ -464,8 +464,6 @@ pub struct ChartTrade {
 pub struct ChartData {
     pub symbol: String,
     pub ts: Vec<f64>,
-    pub binance_mid: Vec<f64>,
-    pub gate_mid: Vec<f64>,
     pub gate_bid: Vec<f64>,
     pub gate_ask: Vec<f64>,
     pub binance_bid: Vec<f64>,
@@ -490,9 +488,11 @@ pub struct ShadowStats {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ShadowDebug {
-    pub binance_mid_samples: usize,
-    pub last_binance_mid: f64,
-    pub last_gate_mid: f64,
+    pub samples: usize,
+    pub last_binance_bid: f64,
+    pub last_binance_ask: f64,
+    pub last_gate_bid: f64,
+    pub last_gate_ask: f64,
     pub completed_trades_in_window: usize,
     pub cooldown_remaining_ms: i64,
     pub warmup_remaining_ms: i64,
@@ -508,12 +508,15 @@ pub struct ShadowDebug {
 #[derive(Debug, Clone)]
 struct MidSample {
     ts_ms: i64,
-    binance_mid: f64,
-    gate_mid: f64,
     gate_bid: f64,
     gate_ask: f64,
     binance_bid: f64,
     binance_ask: f64,
+}
+
+impl MidSample {
+    fn binance_mid(&self) -> f64 { (self.binance_bid + self.binance_ask) / 2.0 }
+    fn gate_mid(&self) -> f64 { (self.gate_bid + self.gate_ask) / 2.0 }
 }
 
 #[derive(Debug, Clone)]
@@ -555,10 +558,9 @@ impl ShadowTrader {
         }
 
         let bn_mid = ((binance.bid + binance.ask) / 2.0).max(1e-12);
-        let gt_mid = ((gate.bid + gate.ask) / 2.0).max(1e-12);
 
         self.mid_samples.push_back(MidSample {
-            ts_ms, binance_mid: bn_mid, gate_mid: gt_mid,
+            ts_ms,
             gate_bid: gate.bid, gate_ask: gate.ask,
             binance_bid: binance.bid, binance_ask: binance.ask,
         });
@@ -665,11 +667,12 @@ impl ShadowTrader {
         let baseline = self.mid_samples.iter()
             .find(|s| s.ts_ms >= cutoff)?;
 
-        if baseline.binance_mid <= 0.0 {
+        let baseline_mid = baseline.binance_mid();
+        if baseline_mid <= 0.0 {
             return None;
         }
 
-        let move_bps = ((current_mid - baseline.binance_mid) / baseline.binance_mid) * 10_000.0;
+        let move_bps = ((current_mid - baseline_mid) / baseline_mid) * 10_000.0;
 
         if move_bps >= SPIKE_THRESHOLD_BPS {
             Some((ShadowDirection::Long, move_bps))
@@ -803,13 +806,15 @@ impl ShadowTrader {
         let cooldown_remaining = (self.cooldown_until_ms - self.latest_ts_ms).max(0);
         let last_5: Vec<f64> = self.completed_trades.iter()
             .rev().take(5).map(|t| t.pnl_pct).collect();
-        let last_bn = self.mid_samples.back().map(|s| s.binance_mid).unwrap_or(0.0);
-        let last_gt = self.mid_samples.back().map(|s| s.gate_mid).unwrap_or(0.0);
+        let last_bn = self.mid_samples.back();
+        let last_gt = self.mid_samples.back();
 
         ShadowDebug {
-            binance_mid_samples: self.mid_samples.len(),
-            last_binance_mid: last_bn,
-            last_gate_mid: last_gt,
+            samples: self.mid_samples.len(),
+            last_binance_bid: last_bn.map(|s| s.binance_bid).unwrap_or(0.0),
+            last_binance_ask: last_bn.map(|s| s.binance_ask).unwrap_or(0.0),
+            last_gate_bid: last_gt.map(|s| s.gate_bid).unwrap_or(0.0),
+            last_gate_ask: last_gt.map(|s| s.gate_ask).unwrap_or(0.0),
             completed_trades_in_window: self.completed_trades.len(),
             cooldown_remaining_ms: cooldown_remaining,
             warmup_remaining_ms: warmup_remaining,
@@ -829,8 +834,6 @@ impl ShadowTrader {
         let step = (len / 600).max(1);
         let cap = len / step + 1;
         let mut ts = Vec::with_capacity(cap);
-        let mut bn_vals = Vec::with_capacity(cap);
-        let mut gt_vals = Vec::with_capacity(cap);
         let mut gt_bid = Vec::with_capacity(cap);
         let mut gt_ask = Vec::with_capacity(cap);
         let mut bn_bid = Vec::with_capacity(cap);
@@ -838,8 +841,6 @@ impl ShadowTrader {
         for (i, s) in self.mid_samples.iter().enumerate() {
             if i % step == 0 {
                 ts.push(s.ts_ms as f64 / 1000.0);
-                bn_vals.push(s.binance_mid);
-                gt_vals.push(s.gate_mid);
                 gt_bid.push(s.gate_bid);
                 gt_ask.push(s.gate_ask);
                 bn_bid.push(s.binance_bid);
@@ -864,8 +865,6 @@ impl ShadowTrader {
         ChartData {
             symbol: symbol.to_string(),
             ts,
-            binance_mid: bn_vals,
-            gate_mid: gt_vals,
             gate_bid: gt_bid,
             gate_ask: gt_ask,
             binance_bid: bn_bid,
