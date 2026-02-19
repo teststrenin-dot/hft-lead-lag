@@ -11,12 +11,14 @@ use super::state::Quote;
 use super::trader_config::TraderConfig;
 
 /// Parameter grid values for fleet generation.
-const SPIKE_THRESHOLDS: &[f64] = &[30.0, 40.0, 50.0, 60.0, 80.0];
+/// Tuned from live data: gap 60bps sweet spot, SL 8bps too tight,
+/// alpha decay shows 2-5s holds profitable, tight spreads best.
+const SPIKE_THRESHOLDS: &[f64] = &[40.0, 50.0, 60.0, 70.0, 80.0, 100.0];
 const SPIKE_WINDOWS: &[i64] = &[500]; // not used for entry (gap-based), kept for stats
-const TARGET_RATIOS: &[f64] = &[0.3, 0.5, 0.7, 1.0];
-const STOP_LOSSES: &[f64] = &[8.0, 10.0, 15.0, 20.0];
-const MAX_HOLDS: &[i64] = &[10_000, 30_000];
-const MAX_SPREADS: &[f64] = &[5.0, 10.0, 15.0];
+const TARGET_RATIOS: &[f64] = &[0.3, 0.5, 0.7];
+const STOP_LOSSES: &[f64] = &[10.0, 15.0, 20.0, 30.0];
+const MAX_HOLDS: &[i64] = &[3_000, 5_000, 10_000];
+const MAX_SPREADS: &[f64] = &[3.0, 5.0, 8.0];
 
 /// Generate all parameter combinations from the grid.
 pub fn generate_grid() -> Vec<TraderConfig> {
@@ -136,7 +138,7 @@ mod tests {
     #[test]
     fn grid_size() {
         let grid = generate_grid();
-        assert_eq!(grid.len(), 5 * 1 * 4 * 4 * 2 * 3); // 480
+        assert_eq!(grid.len(), 6 * 1 * 3 * 4 * 3 * 3); // 648
     }
 
     #[test]
@@ -152,6 +154,6 @@ mod tests {
     fn fleet_creation() {
         let configs = generate_grid();
         let fleet = ShadowFleet::new(&configs);
-        assert_eq!(fleet.len(), 480);
+        assert_eq!(fleet.len(), 648);
     }
 }

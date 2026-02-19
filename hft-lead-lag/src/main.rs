@@ -18,8 +18,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// Minimum 24h USD volume for symbol filtering
 const MIN_VOLUME_USD: f64 = 2_500_000.0;  // 2.5 million USD
-const MAX_STRATEGY_SYMBOLS: usize = 8;
 const SUBSCRIBE_DELAY_MS: u64 = 15;
+/// Symbols excluded from strategy — consistently unprofitable or structurally unsuitable.
+const STRATEGY_BLACKLIST: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "DYDXUSDT"];
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -91,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .iter()
         .chain(config_manager.gate_blacklist().iter())
         .map(|s| s.as_str())
+        .chain(STRATEGY_BLACKLIST.iter().copied())
         .collect();
     let mut common_symbols: Vec<String> = binance_set
         .intersection(&gate_set)
