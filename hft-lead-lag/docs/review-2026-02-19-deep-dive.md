@@ -1,126 +1,111 @@
-# Deep-Dive Review: hft-lead-lag (Updated after Shadow Fleet)
+# Deep-Dive Review: hft-lead-lag (Current)
 
 **Дата:** 2026-02-19  
-**Формат:** deep-dive (code + runtime + commits + server constraints)  
-**Статус:** актуализировано после Sprint 1-6 по Shadow Fleet
+**Scope:** runtime + стратегия + fleet optimizer + persistence + API/docs consistency
 
 ---
 
 ## 1) Executive verdict
 
-Проект в текущем состоянии — **сильный HFT-oriented MVP foundation** с рабочим runtime и рабочим optimizer-пайплайном.
+Текущее состояние: **рабочий HFT-oriented paper-trading stack с real-time optimizer контуром**.
 
-- **Инженерное качество:** good (после закрытия P0/P1 и декомпозиции монолитов)
-- **Математика стратегии:** корректная для текущей гипотезы (spike-follow + bid/ask only)
-- **Логика и state-machine:** консистентна, без пирамидинга, с контролируемыми exit rules
-- **Архитектура:** достаточно компактна для MVP, без избыточного enterprise-overhead
-- **Shadow Fleet:** внедрён корректно и производительно для 2 vCPU / 3.8 GiB
-
----
-
-## 2) Серверная привязка (ground truth)
-
-| Параметр | Значение |
-|---|---|
-| CPU | 2 vCPU |
-| RAM | 3.8 GiB |
-| Swap | 9 GiB |
-| Runtime ports | 5000 / 8181 |
-| Release process | live |
-| Health | ok |
-
-Почему это важно: все выводы ниже валидированы под реальный лимитный сервер, не под абстрактный high-end стенд.
+- Архитектура: практичная для MVP, без лишнего распределённого оверхеда.
+- Математика: корректная для gap-based гипотезы (baseline-normalized divergence).
+- Fleet: рабочий end-to-end (generate -> trade -> persist -> rank -> UI).
+- Главный прогресс: переход от старого spike-подхода к baseline gap и введение авто-прунинга.
 
 ---
 
-## 3) Качество по категориям
+## 2) Что изменилось относительно старого состояния
 
-| Категория | Оценка | Комментарий |
+1. **Entry logic**
+   - было: spike за окно на Binance;
+   - стало: baseline-adjusted gap Binance vs Gate.
+
+2. **Ranking objective**
+   - было: win-rate heavy;
+   - стало: expectancy (`total_pnl / total`) для `/api/v1/fleet`.
+
+3. **Fleet space**
+   - было: 810/1152 исторические сетки;
+   - сейчас: 2430 конфигов (включая `trailing_decay_ratio`).
+
+4. **Runtime pruning**
+   - негативные конфиги отключаются после достаточной статистики;
+   - нулевые (без сделок) отключаются после warmup времени.
+
+5. **UI/API**
+   - `/fleet` + `/api/v1/fleet/symbols` дают глобальный и per-symbol срез.
+
+---
+
+## 3) Техническая оценка по слоям
+
+| Слой | Оценка | Комментарий |
 |---|---|---|
-| Общая инженерия | ✅ Good | clear module boundaries, predictable runtime |
-| Математика | ✅ Good | bps math корректна, win-rate/PnL считаются корректно |
-| Логика | ✅ Good | entry/exit lifecycle последовательный, fill-delay симулируется |
-| Баги | ✅ Good | критичные P0/P1 закрыты, warnings=0 |
-| Слои | ✅ Good | domain/api/infra разделены | 
-| Дублирование | ✅ Better | ключевые дубли убраны (включая parser/logic churn) |
-| God objects | ✅ Fixed | screener/http_server декомпозированы, shadow разделён на 3 модуля |
+| `domain/screener` | ✅ good | state machine читаемая, явные gates, формулы прозрачны |
+| `infrastructure/db` | ✅ good | WAL, batch writer, dedupe, миграция колонки |
+| `api` | ✅ good | полезные endpoint-ы + рабочий fleet dashboard |
+| `main` wiring | ✅ good | fail-fast bind, symbol filtering, clear startup flow |
+| Docs sync | ✅ updated | ключевые расхождения 1152/win-rate/spike-window закрыты |
 
 ---
 
-## 4) Проверка Shadow Fleet (deep-dive)
+## 4) Математическая корректность (коротко)
 
-### 4.1 Реализация
+Корректно реализовано:
 
-Внедрён полный цикл:
-- `generate_grid()` => 1152 конфигов
-- `ShadowFleet::tick_all()` на shared `PriceSamples`
-- `drain_trades()` -> `DbWriter`
-- SQLite WAL batch flush (5s)
-- `/api/v1/fleet` ranking endpoint
+- baseline gap signal (long/short симметрия),
+- entry по threshold в bps,
+- exit target/SL/trailing/timeout,
+- session-level PnL/trades/win-rate,
+- fee-adjusted pnl с двухсторонней комиссией.
 
-### 4.2 Производительность
-
-Для MVP на 2 vCPU решение рабочее:
-- shared samples исключили N-копий истории для каждого трейдера
-- batch persistence уносит I/O из hot path
-- процесс стабилен при live потоке
-
-### 4.3 Корректность метрик
-
-Что корректно:
-- `wins` = `pnl_pct > 0`
-- `win_rate_pct` = `wins / total`
-- сортировка ranking: win-rate, затем total_pnl
-
-Ограничение:
-- высокий win-rate может быть с отрицательным expectancy (видно на некоторых конфигурациях), поэтому для финального fine-tune нужен multi-metric ranking.
+Риск модели (не баг):  
+стратегия всё ещё чувствительна к regime shifts и не учитывает market microstructure фильтры типа OBI в production-логике.
 
 ---
 
-## 5) Баги / риски (актуально)
+## 5) Optimizer maturity
 
-### Закрыто
-- P0 security/reconnect/health/bounded-channels/fail-fast
-- P1 decomposition/dead-code cleanup/layer cleanup
-- shadow trade marker fixes, mid-price removal, stop-loss/fill-delay adjustments
+**Что уже production-готово для paper-loop:**
 
-### Оставшиеся риски (не критично для MVP)
-1. Ranking сейчас win-rate heavy, нужен profitability-weighted score.
-2. Нет online Thompson Sampling policy-loop (есть инфраструктурная база, нет loop управления arms).
-3. Нет portfolio-level budget allocator на fleet config уровне.
-4. Нет отдельного robust-segment ranking (by symbol cluster/tier).
+- генерация большого grid,
+- параллельное shadow-исполнение на shared samples,
+- persistence в SQLite,
+- ranking endpoint-ы,
+- runtime pruning для снижения бесполезной нагрузки.
 
----
+**Что ещё не сделано (осознанно):**
 
-## 6) Архитектура: избыточность vs MVP
-
-Вердикт: **не избыточно для MVP**.
-
-Почему:
-- Нет тяжёлых оркестраторов, брокеров, distributed infra.
-- SQLite выбран уместно (single-node, быстрый локальный write/read, WAL).
-- Большая часть сложности — полезная и напрямую обслуживает целевую задачу fine-tune.
+1. online policy selection (Thompson/UCB),
+2. portfolio allocator между конфигами,
+3. robust score с profit factor / drawdown / symbol coverage.
 
 ---
 
-## 7) Commit trajectory (deep-dive summary)
+## 6) Операционные риски
 
-- `3eaf827`: правильно устранён mini-god-object в shadow модуле, добавлены config/samples abstractions.
-- `b093af5`: завершён вертикальный срез fleet (grid + storage + API + wiring) — это хороший production-style commit.
+1. `DbWriter` при переполнении канала дропает batch (с warn) — это fail-open выбор.
+2. Fleet адаптация пока rule-based pruning, не полноценный adaptive optimizer.
+3. Нейминг `spike_*` частично устарел семантически (фактически используется gap threshold).
+4. Реальные ордера не подключены (paper only).
 
-Итог по коммитам: trajectory улучшилась от feature-churn к более системной инженерии с закрытием циклов (implement + test + deploy + verify).
+---
+
+## 7) Практический приоритет next
+
+1. Ввести multi-factor ranking score (expectancy + PF + robustness).
+2. Добавить robust endpoint с фильтром по symbol coverage.
+3. Включить lightweight policy loop поверх уже существующих метрик.
+4. Подключить OBI/ingress-drift фильтры после стабилизации data pipeline.
 
 ---
 
 ## 8) Финальный вывод
 
-Проект в текущей точке:
-- **готов к фазе fine-tuning экспериментов**, 
-- имеет достаточную инфраструктуру для сбора статистики,
-- имеет рабочий и проверенный shadow-fleet runtime на реальном сервере.
-
-Для перехода к “полноценному заработку” нужен не rewrite, а эволюция scoring и policy (Thompson + robust objective), используя уже внедрённую базу.
+Проект готов к следующей фазе: **не переписывать**, а дорастить optimizer policy и risk allocation поверх уже рабочей базы.
 
 ---
 
-*Last updated: 2026-02-19 (post Shadow Fleet sprints 1-6, commit b093af5)*
+*Last updated: 2026-02-19 (docs/code synchronized to current fleet runtime)*

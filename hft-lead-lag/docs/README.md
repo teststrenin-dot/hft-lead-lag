@@ -1,218 +1,251 @@
 # HFT Lead-Lag Documentation (Current)
 
-Актуальная документация по состоянию кода и production runtime.
+Актуальная документация по состоянию кода и runtime в `main`.
 
 ---
 
-## 1) Где что читать
+## 1) Что читать в первую очередь
 
-- **`docs/README.md`** (этот файл) — актуальный overview, API, runtime, запуск.
-- **`docs/shadow-fleet-deep-dive.md`** — супер-детальный deep-dive по Shadow Fleet (архитектура, математика, persistence, ranking).
-- **`docs/review-2026-02-19-deep-dive.md`** — полный аудит проекта (качество, баги, слои, god objects, commits, серверная привязка).
-
-Исторические task/sprint документы оставлены в `docs/` как архив и не являются source of truth.
+- `docs/README.md` (этот файл): карта системы, формулы, API, runbook.
+- `docs/sprints/shadow-fleet-deep-dive.md`: deep dive по Shadow Fleet/optimizer.
+- `docs/review-2026-02-19-deep-dive.md`: инженерный аудит и риски.
+- `docs/studies/leadlag_classic+.md`: исследовательский материал и идеи (OBI/Kalman/hot-reload).
+- `docs/review-shadow-trader.md`: архивный документ по старой реализации.
 
 ---
 
-## 2) Проверенный серверный контекст
+## 2) Серверный контекст (ground truth)
 
 | Параметр | Значение |
 |---|---|
 | OS | Linux 5.15 (KVM VM) |
-| CPU | 2 vCPU Intel Xeon Skylake |
-| RAM | 3.8 GiB + 9 GiB swap |
-| Локация | Tokyo, Japan |
-| Rust | nightly 1.95 |
-| Runtime порты | HTTP 5000, WS 8181 |
+| CPU | 2 vCPU |
+| RAM | 3.8 GiB (+ swap) |
+| Runtime | Rust nightly 1.95 + Tokio |
+| HTTP | `:5000` |
+| WS | `:8181` |
 
 ---
 
-## 3) Текущее состояние проекта
+## 3) Архитектура в одном потоке
 
-| Область | Статус | Комментарий |
-|---|---|---|
-| Binance/Gate WS коннекторы | ✅ | reconnect + replay + bounded channels |
-| Screener runtime | ✅ | lag/drift/half-life + NATR enrichment |
-| Shadow Trader (single) | ✅ | spike-follow на bid/ask, без mid |
-| Shadow Fleet (multi-config) | ✅ | 1152 конфигурации на символ |
-| SQLite persistence optimizer | ✅ | WAL + async batch writer |
-| Fleet ranking API | ✅ | `GET /api/v1/fleet` |
-| Реальные ордера | ⚠️ | executor-стабы, не подключены |
+1. `main.rs` получает символы по 24h объёму с Binance/Gate.
+2. Берётся пересечение символов, применяется blacklist, поднимается runtime.
+3. Каждый тик идёт в `ScreenerStore::update()`.
+4. Для символа обновляется `PriceSamples` (2-мин история).
+5. Тикается:
+   - `shadow` (single paper trader),
+   - `fleet` (много конфигов на тех же samples).
+6. Fleet-трейды дренятся в `DbWriter` и батчами пишутся в SQLite.
+7. API/UI читают state + агрегаты из `optimizer.db`.
 
 ---
 
-## 4) Архитектура (факт по коду)
+## 4) Математика стратегии (актуальная)
+
+### 4.1 Entry (gap-based lead-lag with baseline)
+
+Используется baseline-нормализация расхождения Binance vs Gate по истории samples.
+
+Для LONG:
+
+- `baseline_ask_gap = mean((binance_ask - gate_ask) / gate_ask * 10_000)`
+- `current_ask_gap = (binance_ask - gate_ask) / gate_ask * 10_000`
+- `signal_long = current_ask_gap - baseline_ask_gap`
+- вход если `signal_long >= spike_threshold_bps`
+
+Для SHORT:
+
+- `baseline_bid_gap = mean((gate_bid - binance_bid) / gate_bid * 10_000)`
+- `current_bid_gap = (gate_bid - binance_bid) / gate_bid * 10_000`
+- `signal_short = current_bid_gap - baseline_bid_gap`
+- вход если `signal_short >= spike_threshold_bps`
+
+> В коде имя поля историческое (`spike_threshold_bps`), но семантика сейчас именно **gap threshold**.
+
+### 4.2 Exit
+
+`unrealized_bps`:
+
+- LONG: `((gate_bid - entry_price) / entry_price) * 10_000`
+- SHORT: `((entry_price - gate_ask) / entry_price) * 10_000`
+
+Условия выхода:
+
+1. `target`: `unrealized_bps >= spike_bps * target_ratio`
+2. `stop_loss`: `unrealized_bps <= -stop_loss_bps`
+3. `trailing_stop` (если включён): падение ниже `peak_unrealized_bps * trailing_decay_ratio`
+4. `timeout`: `hold_ms >= max_hold_ms`
+
+### 4.3 PnL
+
+- `raw_return` считается по bid/ask исполнения.
+- Комиссия: `taker_fee * 2` (вход + выход).
+- `pnl_pct = (raw_return - 2 * taker_fee) * 100`
+- `catchup_pct = raw_return * 100` (до комиссий).
+
+---
+
+## 5) Screener: что означают ключевые столбцы
+
+Все данные приходят из `ShadowStats` и `ScreenerRow`.
+
+| Колонка | Формула/смысл |
+|---|---|
+| `Spikes` | Кол-во entry-сигналов за последние 2 минуты (`spike_timestamps`) |
+| `PnL%` | Суммарный session PnL в процентах (`session_total_pnl_pct`) |
+| `Trd` | Кол-во закрытых сделок за сессию (`session_trades`) |
+| `Avg%` | `session_pnl_pct / session_trades` |
+| `Win%` | `(session_wins / session_trades) * 100` |
+| `Catch%` | Средний `catchup_pct` по rolling window закрытых сделок |
+| `Lag ms` | Средний `catchup_ms` по rolling window закрытых сделок |
+
+---
+
+## 6) Shadow Fleet / Optimizer
+
+### 6.1 Grid (текущий)
 
 ```text
-src/ (Rust): 39 files, 6079 LOC
+gap_threshold_bps (spike_threshold_bps): [40, 50, 60, 70, 80, 100]  (6)
+target_ratio:                            [0.3, 0.5, 0.7]            (3)
+stop_loss_bps:                           [8, 10, 15, 20, 30]        (5)
+max_hold_ms:                             [3000, 5000, 10000]         (3)
+max_spread_bps:                          [3, 5, 8]                   (3)
+trailing_decay_ratio:                    [0.3, 0.5, 0.7]             (3)
+spike_window_ms:                         [500] (fixed for id/compat) (1)
 
-api/
-  http_server.rs     — router + health state
-  handlers.rs        — HTTP handlers incl. /api/v1/fleet
-  templates.rs       — screener UI + chart markers
-  ws_server.rs       — ws broadcast
-
-domain/screener/
-  mod.rs             — ScreenerStore facade, update pipeline
-  state.rs           — SymbolState + Quote + fleet field
-  trader_config.rs   — all strategy params (Copy)
-  price_samples.rs   — shared price ring (per symbol)
-  shadow_trader.rs   — single-trader engine
-  shadow_fleet.rs    — fleet grid + tick_all + drain
-  cycle_tracker.rs   — divergence/convergence metrics
-
-infrastructure/
-  db.rs              — SQLite schema + writer
-  exchanges/*        — Binance/Gate connectors
-  enrichment.rs      — NATR enrichment
-  rest/mod.rs        — REST clients
+TOTAL: 6 * 3 * 5 * 3 * 3 * 3 = 2430 configs
 ```
 
----
+### 6.2 Авто-прунинг конфигов
 
-## 5) API endpoints (актуально)
+В `ShadowFleet::tick_all()`:
 
-| Метод | Путь | Что возвращает |
-|---|---|---|
-| GET | `/health` | `{status, binance, gate}`; 200/503 |
-| GET | `/api/v1/symbols` | universe символов и 24h данные |
-| GET | `/api/v1/screener` | таблица screener метрик |
-| GET | `/screener` | HTML dashboard |
-| GET | `/api/v1/shadow/:symbol` | debug single ShadowTrader |
-| GET | `/api/v1/chart/:symbol` | chart series + trades |
-| GET | `/api/v1/fleet` | top-50 config ranking по win-rate (min 10 trades) |
+1. **Negative expectancy prune**  
+   Если `session_trades >= 30` и `avg_pnl_pct < -0.05`, конфиг отключается.
 
----
+2. **Inactive prune**  
+   Если за `10 минут` после старта symbol-fleet у конфига `0 трейдов`, он отключается.
 
-## 6) Shadow Trader (single)
+Отключённые конфиги не тикаются дальше, но остаются в памяти/истории как pruned.
 
-Файл: `src/domain/screener/shadow_trader.rs`
+### 6.3 Ranking endpoints
 
-### Вход
-1. Котировки Binance/Gate свежие (`quote_freshness_ms`).
-2. Прошли warmup/cooldown.
-3. LONG: Binance ask move >= `spike_threshold_bps` за `spike_window_ms`.
-4. SHORT: Binance bid move >= `spike_threshold_bps` за `spike_window_ms`.
+- `GET /api/v1/fleet`
+  - `GROUP BY config_id`
+  - `HAVING total >= 10`
+  - `ORDER BY total_pnl / total DESC` (**expectancy**, не win-rate)
+  - `LIMIT 50`
 
-### Выход
-- `target`: unrealized_bps >= `spike_bps * target_ratio`
-- `stop_loss`: unrealized_bps <= `-stop_loss_bps`
-- `trailing_stop`: если включён (`trailing_stop_bps > 0`)
-- `timeout`: hold >= `max_hold_ms`
-
-### Дефолтные параметры
-`TraderConfig::default()`:
-- spike_threshold=30bps
-- spike_window=500ms
-- target_ratio=1.0
-- stop_loss=10bps
-- max_hold=30s
-- fill_delay=6ms
-- cooldown=3s
-- warmup=30s
-- quote_freshness=1s
-- taker_fee=0.05% (round-trip 0.1%)
+- `GET /api/v1/fleet/symbols`
+  - лучший конфиг на символ (`ROW_NUMBER() OVER (PARTITION BY symbol ...)`)
+  - `HAVING total >= 5`
+  - сортировка по expectancy.
 
 ---
 
-## 7) Shadow Fleet (в production)
+## 7) БД и надежность записи
 
-Файлы:
-- `src/domain/screener/shadow_fleet.rs`
-- `src/infrastructure/db.rs`
-- `src/domain/screener/mod.rs` (wire)
-- `src/main.rs` (db init + seeding + writer spawn)
+Файл: `data/optimizer.db`
 
-### 7.1 Parameter grid
+### 7.1 Таблицы
 
-```text
-spike_threshold_bps: [20, 30, 40, 50]      (4)
-spike_window_ms:     [300, 500, 1000]      (3)
-target_ratio:        [0.3, 0.5, 0.7, 1.0]  (4)
-stop_loss_bps:       [8, 10, 15, 20]       (4)
-max_hold_ms:         [10000, 30000]        (2)
-max_spread_bps:      [5, 10, 15]           (3)
-TOTAL: 4*3*4*4*2*3 = 1152 configs
-```
+- `configs`:
+  - ключевые параметры стратегии, включая `trailing_decay_ratio`
+- `trades`:
+  - закрытые сделки (`config_id`, symbol, entry/exit, `pnl_pct`, `spike_bps`, reason)
 
-### 7.2 Data flow
+### 7.2 Индексы/идемпотентность
 
-1. `ScreenerStore::update()` получает бинанс/гейт quote.
-2. Пишет `PriceSample` в shared `PriceSamples` (на символ).
-3. Тикает single `shadow` и fleet (`tick_all`) на одних и тех же samples.
-4. Fleet собирает новые `ClosedTrade` как `FleetTrade`.
-5. `DbWriter` получает батчи через `mpsc`.
-6. Фоновая задача flush в SQLite каждые 5 секунд.
-
-### 7.3 SQLite
-
-DB: `data/optimizer.db`
-
-Таблицы:
-- `configs` (параметры конфига)
-- `trades` (каждая сделка с config_id)
-
-Индексы:
 - `idx_trades_config`
 - `idx_trades_symbol`
 - `idx_trades_exit_ts`
+- `UNIQUE(config_id, symbol, entry_ts_ms, exit_ts_ms)` natural key
+- `INSERT OR IGNORE` для idempotent persistence
 
-Режим:
-- `WAL`
-- `synchronous=NORMAL`
+### 7.3 Writer semantics
 
-Writer:
-- channel capacity: `10_000`
-- flush interval: `5s`
-
-### 7.4 Fleet ranking endpoint
-
-`GET /api/v1/fleet`:
-- `JOIN trades + configs`
-- `GROUP BY config_id`
-- `HAVING total >= 10`
-- `ORDER BY wins/total DESC, total_pnl DESC`
-- `LIMIT 50`
+- `mpsc` capacity = `10_000`
+- flush interval = `5s`
+- WAL + `synchronous=NORMAL`
+- flush error: буфер **не очищается** (повторная попытка позже)
+- channel overflow: batch drop с warn-логом (осознанный fail-open)
 
 ---
 
-## 8) Runtime validation snapshot
+## 8) Universe символов
 
-Проверено на live runtime:
-- `health`: `{"status":"ok","binance":true,"gate":true}`
-- optimizer db: `configs=1152`, `trades` активно растёт
-- fleet endpoint отдаёт непустой ranking
-- release процесс стабильно запущен
+В `main.rs`:
+
+- фильтр объёма: `MIN_VOLUME_USD = 2_500_000`
+- universe = пересечение Binance/Gate символов
+- blacklist = env blacklist + strategy blacklist
+- strategy blacklist (текущий): `BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `DYDXUSDT`
+- fallback при проблемах REST: `BTCUSDT`, `ETHUSDT`
 
 ---
 
-## 9) Quality gates
+## 9) HTTP/WS маршруты
+
+| Метод | Путь | Назначение |
+|---|---|---|
+| GET | `/health` | статус runtime и коннектов |
+| GET | `/api/v1/symbols` | список символов + объёмы |
+| GET | `/api/v1/screener` | таблица screener |
+| GET | `/api/v1/shadow/:symbol` | debug single shadow |
+| GET | `/api/v1/chart/:symbol` | исторические ряды + сделки |
+| GET | `/api/v1/fleet` | глобальный ranking конфигов |
+| GET | `/api/v1/fleet/symbols` | лучший конфиг на символ |
+| GET | `/screener` | HTML screener page |
+| GET | `/fleet` | HTML fleet optimizer page |
+| WS | `ws://host:8181/ws` | live market ticks |
+
+---
+
+## 10) Runbook
 
 ```bash
+# build/test
 cargo build
 cargo test
+
+# release
+cargo build --release
+./target/release/hft-lead-lag
 ```
 
-Текущий результат:
-- 0 warnings
-- tests: 17 + 1 doctest (всего 18), все pass
+Быстрая проверка:
+
+```bash
+curl -s http://localhost:5000/health
+curl -s http://localhost:5000/api/v1/fleet | head
+curl -s http://localhost:5000/api/v1/fleet/symbols | head
+```
 
 ---
 
-## 10) Ключевые ограничения (честно)
+## 11) Ограничения текущей версии
 
-1. Это paper trading, не реальное исполнение на бирже.
-2. Ранжирование сейчас по win-rate; нужен второй фильтр по expectancy/profit factor.
-3. /api/v1/fleet не делает Thompson Sampling online (это следующий шаг).
-4. Нет portfolio-level risk allocation по флоту.
-
----
-
-## 11) Последние важные коммиты
-
-- `3eaf827` — декомпозиция shadow trader на модули config/samples/trader.
-- `b093af5` — Shadow Fleet + SQLite + `/api/v1/fleet` + wiring.
+1. Paper trading, не real execution.
+2. Авто-прунинг локальный (per symbol fleet), но нет полноценного online policy engine.
+3. Нет portfolio allocator между конфигами.
+4. Channel overflow в writer дропает batch (с логом).
+5. OBI/Kalman/hot-reload описаны в studies, но ещё не интегрированы в runtime.
 
 ---
 
-*Last updated: 2026-02-19 (post Shadow Fleet Sprints 1-6)*
+## 12) Источник правды
+
+Если есть конфликт между документом и кодом:
+
+1. `src/domain/screener/*`
+2. `src/api/*`
+3. `src/infrastructure/db.rs`
+4. `src/main.rs`
+
+Код имеет приоритет, docs синхронизируются с `main`.
+
+---
+
+*Last updated: 2026-02-19 (post fleet optimizer upgrades: expectancy ranking, decay grid, auto-pruning, zero-trade pruning)*

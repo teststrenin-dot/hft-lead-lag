@@ -1,46 +1,54 @@
 # HFT Lead-Lag Manifest (Current)
 
 ## Миссия
-Построить HFT-oriented lead-lag платформу с измеримой задержкой, предсказуемым runtime и быстрым циклом fine-tune через Shadow Fleet.
+
+Построить практичный HFT-oriented lead-lag контур, который:
+
+1. измеряет задержки и расхождения в реальном времени;
+2. тестирует гипотезы через Shadow Fleet на live потоке;
+3. быстро переводит статистику в решения по параметрам.
 
 ---
 
 ## Принципы
 
-1. **MVP-first, no overengineering**
-   - Добавляем только то, что даёт измеримый результат в runtime.
+1. **MVP-first, no overengineering**  
+   Сначала работоспособный контур, потом усложнение.
 
-2. **Bid/Ask truth, no fake mid assumptions**
-   - Сигналы и сделки считаются от реальных сторон стакана.
+2. **Bid/Ask truth only**  
+   Никаких "красивых" mid-price допущений для execution/PnL.
 
-3. **Hot path must stay cheap**
-   - Shared samples, bounded queues, async persistence.
+3. **Data beats opinion**  
+   Все tuning-решения подтверждаются runtime-данными.
 
-4. **Measured over guessed**
-   - Решения подтверждаются метриками, логами и runtime evidence.
+4. **Hot path stays cheap**  
+   Shared samples, bounded queues, async persistence, pruning.
 
-5. **State clarity over cleverness**
-   - Явные lifecycle шаги: tick/fill/exit/entry/drain/flush.
+5. **Fail loudly, recover predictably**  
+   Ошибки логируются явно; поведение системы предсказуемо.
 
-6. **Docs must match code**
-   - Документация синхронизируется с фактическими route/параметрами/модулями.
+6. **Docs must track code**  
+   Документация синхронизируется с `main`, а не с историческими гипотезами.
 
 ---
 
 ## Текущий фокус
 
-- Shadow Fleet parameter exploration (1152 configs)
-- Persistence and ranking
-- Робастный fine-tune в условиях 2 vCPU / 3.8 GiB
+- Gap-based lead-lag с baseline нормализацией.
+- Shadow Fleet exploration: **2430 configs**.
+- Expectancy-first ranking + runtime pruning.
+- Подготовка к следующему шагу: policy selection + robust scoring.
 
 ---
 
 ## Source of truth
 
 - `docs/README.md`
-- `docs/shadow-fleet-deep-dive.md`
+- `docs/sprints/shadow-fleet-deep-dive.md`
 - `docs/review-2026-02-19-deep-dive.md`
+
+Архивные документы не должны использоваться как source of truth.
 
 ---
 
-*Manifest v2.0 — updated for Shadow Fleet phase*
+*Manifest v2.1 — synchronized with current fleet optimizer runtime*
