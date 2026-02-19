@@ -387,7 +387,9 @@ impl CycleTracker {
 
 /// Post-trade cooldown to prevent overtrading (ms).
 const COOLDOWN_MS: i64 = 3_000;
-/// Warmup duration: shadow trader ignores data until enough history (ms).
+/// Chart/mid_samples retention — 2 minutes is enough for chart + spike detection.
+const CHART_RETENTION_MS: i64 = 2 * 60 * 1000;
+
 const WARMUP_MS: i64 = 30_000; // 30 seconds — just need a few seconds of baseline
 /// Maximum age of a quote to be considered "fresh" (ms).
 const QUOTE_FRESHNESS_MS: i64 = 1_000;
@@ -786,14 +788,15 @@ impl ShadowTrader {
         }
     }
 
-    fn cleanup(&mut self, ts_ms: i64, window_ms: i64) {
-        let cutoff = ts_ms - window_ms;
+    fn cleanup(&mut self, ts_ms: i64, _window_ms: i64) {
+        let sample_cutoff = ts_ms - CHART_RETENTION_MS;
         while let Some(s) = self.mid_samples.front() {
-            if s.ts_ms >= cutoff { break; }
+            if s.ts_ms >= sample_cutoff { break; }
             self.mid_samples.pop_front();
         }
+        let spike_cutoff = ts_ms - CHART_RETENTION_MS;
         while let Some(s) = self.spike_history.front() {
-            if s.ts_ms >= cutoff { break; }
+            if s.ts_ms >= spike_cutoff { break; }
             self.spike_history.pop_front();
         }
     }

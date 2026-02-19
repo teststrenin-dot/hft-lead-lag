@@ -499,7 +499,7 @@ async fn screener_page() -> Html<&'static str> {
   }
 
   // --- Chart: 4 raw bid/ask lines via WS ---
-  const MAX_PTS = 36000;
+  const MAX_PTS = 7200;
   let tsBuf = [], gtBid = [], gtAsk = [], bnBid = [], bnAsk = [];
   let uplot = null, dirty = false, ws = null;
   let shadowZones = [];
