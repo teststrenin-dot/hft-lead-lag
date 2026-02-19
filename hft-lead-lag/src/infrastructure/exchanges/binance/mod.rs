@@ -195,8 +195,11 @@ impl BinanceMarketData {
             .cloned()
             .ok_or_else(|| ExchangeError::ConnectionClosed("Not connected".into()))?;
 
-        const SYMBOLS_PER_WS: usize = 2;
-        let required_ws_count = (symbols.len() + SYMBOLS_PER_WS - 1) / SYMBOLS_PER_WS;
+        let symbols_per_ws: usize = std::env::var("SYMBOLS_PER_WS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let required_ws_count = (symbols.len() + symbols_per_ws - 1) / symbols_per_ws;
         while self.ws_txs.len() < required_ws_count {
             let ws = Self::spawn_ws_worker(shared_msg_tx.clone()).await?;
             self.ws_txs.push(ws);
@@ -204,7 +207,7 @@ impl BinanceMarketData {
         }
 
         let mut subscribed = 0usize;
-        for (socket_idx, chunk) in symbols.chunks(SYMBOLS_PER_WS).enumerate() {
+        for (socket_idx, chunk) in symbols.chunks(symbols_per_ws).enumerate() {
             let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
             let msg = Self::build_book_ticker_subscription(&refs);
             if self.ws_txs[socket_idx].send(Message::Text(msg.clone())).is_err() {
@@ -222,7 +225,7 @@ impl BinanceMarketData {
             "Binance socket allocation: symbols={} sockets={} symbols_per_ws={}",
             symbols.len(),
             required_ws_count,
-            SYMBOLS_PER_WS
+            symbols_per_ws
         );
 
         Ok(subscribed)

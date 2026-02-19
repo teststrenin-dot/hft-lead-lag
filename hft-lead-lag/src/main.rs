@@ -14,7 +14,7 @@ use hft_lead_lag::infrastructure::rest::{BinanceRestClient, GateRestClient, Tick
 use tracing::{error, info, warn};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Minimum 24h USD volume for symbol filtering
 const MIN_VOLUME_USD: f64 = 1_000_000.0;  // 1 million USD
@@ -24,6 +24,9 @@ const SUBSCRIBE_DELAY_MS: u64 = 15;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_centralized_logging("logs", "runtime.log")?;
+
+    // Load .env file if present (before reading env vars)
+    dotenvy::dotenv().ok();
 
     info!("HFT Lead-Lag system starting");
 
@@ -268,6 +271,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut latest_bn: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> = std::collections::HashMap::new();
     let mut latest_gt: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> = std::collections::HashMap::new();
 
+    // Drift tracking for benchmarking
+    let mut drift_samples: Vec<i64> = Vec::with_capacity(8192);
+    let now_ms = || -> i64 {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64
+    };
+
     loop {
         tokio::select! {
             // Receive from Binance
@@ -284,6 +296,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                         for (symbol, ticker) in &latest_bn {
                             ticker_count += 1;
+                            let local_ms = now_ms();
+                            let exch_ms = ticker.exchange_ts_ns / 1_000_000;
+                            if exch_ms > 0 { drift_samples.push(local_ms - exch_ms); }
                             screener.update(
                                 symbol,
                                 "binance",
@@ -328,6 +343,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                         for (symbol, ticker) in &latest_gt {
                             ticker_count += 1;
+                            let local_ms = now_ms();
+                            let exch_ms = ticker.exchange_ts_ns / 1_000_000;
+                            if exch_ms > 0 { drift_samples.push(local_ms - exch_ms); }
                             screener.update(
                                 symbol,
                                 "gate",
@@ -376,9 +394,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 // Status report every 5 seconds
                 if last_status_at.elapsed() >= Duration::from_secs(5) {
                     let interval_tickers = ticker_count.saturating_sub(last_status_ticker_count);
+                    // Compute drift percentiles
+                    let drift_stats = if drift_samples.is_empty() {
+                        "no_data".to_string()
+                    } else {
+                        drift_samples.sort_unstable();
+                        let n = drift_samples.len();
+                        let p50 = drift_samples[n / 2];
+                        let p95 = drift_samples[n * 95 / 100];
+                        let p99 = drift_samples[n * 99 / 100];
+                        let max = drift_samples[n - 1];
+                        let avg = drift_samples.iter().sum::<i64>() / n as i64;
+                        format!("n={} avg={}ms p50={}ms p95={}ms p99={}ms max={}ms", n, avg, p50, p95, p99, max)
+                    };
+                    drift_samples.clear();
                     info!(
-                        "Status: total_tickers={} (+{} / 5s) signals={} strategy_symbols={}",
-                        ticker_count, interval_tickers, signal_count, strategy_symbols.len()
+                        "Status: tickers={} (+{}/5s) signals={} drift=[{}]",
+                        ticker_count, interval_tickers, signal_count, drift_stats
                     );
                     last_status_ticker_count = ticker_count;
                     last_status_at = Instant::now();
