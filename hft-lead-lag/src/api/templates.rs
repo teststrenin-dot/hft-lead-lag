@@ -344,27 +344,38 @@ const FLEET_HTML: &str = r#"<!doctype html>
     nav a { color:#93c5fd; text-decoration:none; margin-right:16px; font-size:13px; }
     nav a:hover { text-decoration:underline; }
     h2 { font-size: 14px; color: #93c5fd; margin: 16px 0 6px; }
+    .summary { display:flex; gap:24px; margin:12px 0; flex-wrap:wrap; }
+    .card { background:#111827; border:1px solid #1f2937; border-radius:6px; padding:10px 14px; min-width:120px; }
+    .card .label { font-size:11px; color:#9ca3af; }
+    .card .value { font-size:20px; font-weight:600; margin-top:2px; }
     table { width: 100%; border-collapse: collapse; background:#111827; font-size: 12px; margin-bottom: 24px; }
     th, td { padding: 4px 6px; border-bottom: 1px solid #1f2937; text-align: left; }
     th { position: sticky; top: 0; background:#111827; color:#93c5fd; font-size: 11px; cursor: pointer; user-select: none; }
+    th.sort-asc::after { content: ' ▲'; font-size: 9px; }
+    th.sort-desc::after { content: ' ▼'; font-size: 9px; }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
     .pos { color: #34d399; }
     .neg { color: #f87171; }
-    tr:hover { background: #162032; }
+    .row-pos { background: rgba(52,211,153,0.05); }
+    .row-neg { background: rgba(248,113,113,0.05); }
+    tr:hover { background: #162032 !important; }
   </style>
 </head>
 <body>
   <div class="top">
     <h1>⚡ Fleet Optimizer</h1>
     <nav><a href="/screener">← Screener</a></nav>
+    <div class="summary" id="summary"></div>
     <div class="meta" id="meta">Loading…</div>
 
     <h2>🏆 Top Configs (global, by expectancy)</h2>
     <table id="tbl-global">
       <thead><tr>
-        <th>#</th><th>Spike</th><th>Win</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th>
-        <th class="num">Trades</th><th class="num">Wins</th><th class="num">WR%</th>
-        <th class="num">PnL%</th><th class="num">Avg%</th><th class="num">Syms</th>
+        <th>#</th><th>Gap</th><th>Tgt</th><th>SL</th><th data-key="max_hold_ms">Hold</th><th>Spread</th>
+        <th class="num" data-key="total_trades">Trades</th><th class="num" data-key="wins">Wins</th>
+        <th class="num" data-key="win_rate_pct">WR%</th>
+        <th class="num" data-key="total_pnl_pct">PnL%</th><th class="num" data-key="avg_pnl_pct">Avg%</th>
+        <th class="num" data-key="symbols_traded">Syms</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -372,9 +383,10 @@ const FLEET_HTML: &str = r#"<!doctype html>
     <h2>🎯 Best Config Per Symbol</h2>
     <table id="tbl-symbol">
       <thead><tr>
-        <th>Symbol</th><th>Spike</th><th>Win</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th>
-        <th class="num">Trades</th><th class="num">Wins</th><th class="num">WR%</th>
-        <th class="num">PnL%</th><th class="num">Avg%</th>
+        <th>Symbol</th><th>Gap</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th>
+        <th class="num" data-key="total_trades">Trades</th><th class="num" data-key="wins">Wins</th>
+        <th class="num" data-key="win_rate_pct">WR%</th>
+        <th class="num" data-key="total_pnl_pct">PnL%</th><th class="num" data-key="avg_pnl_pct">Avg%</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -382,47 +394,65 @@ const FLEET_HTML: &str = r#"<!doctype html>
 
   <script>
   const cl = (v, d=4) => { const s = v.toFixed(d); return `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${s}</span>`; };
+  const holdFmt = ms => ms >= 1000 ? (ms/1000)+'s' : ms+'ms';
+
+  let globalData = [], symbolData = [];
 
   async function refresh() {
     try {
       const [gRes, sRes] = await Promise.all([
         fetch('/api/v1/fleet'), fetch('/api/v1/fleet/symbols')
       ]);
-      const global = await gRes.json();
-      const symbols = await sRes.json();
+      globalData = await gRes.json();
+      symbolData = await sRes.json();
       const now = new Date().toLocaleTimeString();
-      document.getElementById('meta').textContent =
-        `Global: ${global.length} configs | Symbols: ${symbols.length} | Updated: ${now}`;
 
-      // Global table
-      const gb = document.querySelector('#tbl-global tbody');
-      gb.innerHTML = global.map((r, i) =>
-        `<tr>
-          <td>${i+1}</td><td>${r.spike_threshold_bps}</td><td>${r.spike_window_ms}</td>
-          <td>${r.target_ratio}</td><td>${r.stop_loss_bps}</td><td>${r.max_hold_ms}</td>
-          <td>${r.max_spread_bps}</td>
-          <td class="num">${r.total_trades}</td><td class="num">${r.wins}</td>
-          <td class="num">${r.win_rate_pct.toFixed(1)}</td>
-          <td class="num">${cl(r.total_pnl_pct,3)}</td>
-          <td class="num">${cl(r.avg_pnl_pct)}</td>
-          <td class="num">${r.symbols_traded}</td>
-        </tr>`
-      ).join('');
-
-      // Per-symbol table
-      const sb = document.querySelector('#tbl-symbol tbody');
-      sb.innerHTML = symbols.map(r =>
-        `<tr>
-          <td>${r.symbol}</td><td>${r.spike_threshold_bps}</td><td>${r.spike_window_ms}</td>
-          <td>${r.target_ratio}</td><td>${r.stop_loss_bps}</td><td>${r.max_hold_ms}</td>
-          <td>${r.max_spread_bps}</td>
-          <td class="num">${r.total_trades}</td><td class="num">${r.wins}</td>
-          <td class="num">${r.win_rate_pct.toFixed(1)}</td>
-          <td class="num">${cl(r.total_pnl_pct,3)}</td>
-          <td class="num">${cl(r.avg_pnl_pct)}</td>
-        </tr>`
-      ).join('');
+      // Summary cards
+      const totalTrades = globalData.reduce((s,r) => s + r.total_trades, 0);
+      const profConfigs = globalData.filter(r => r.avg_pnl_pct > 0).length;
+      const profSymbols = symbolData.filter(r => r.avg_pnl_pct > 0).length;
+      const bestAvg = globalData.length ? globalData[0].avg_pnl_pct : 0;
+      document.getElementById('summary').innerHTML = `
+        <div class="card"><div class="label">Total Trades</div><div class="value">${totalTrades.toLocaleString()}</div></div>
+        <div class="card"><div class="label">Profitable Configs</div><div class="value ${profConfigs?'pos':'neg'}">${profConfigs}/${globalData.length}</div></div>
+        <div class="card"><div class="label">Profitable Symbols</div><div class="value ${profSymbols?'pos':'neg'}">${profSymbols}/${symbolData.length}</div></div>
+        <div class="card"><div class="label">Best Avg PnL</div><div class="value ${bestAvg>=0?'pos':'neg'}">${bestAvg>=0?'+':''}${bestAvg.toFixed(4)}%</div></div>
+      `;
+      document.getElementById('meta').textContent = `Updated: ${now} | Auto-refresh 30s`;
+      renderGlobal();
+      renderSymbols();
     } catch(e) { document.getElementById('meta').textContent = 'Error: ' + e; }
+  }
+
+  function renderGlobal() {
+    const gb = document.querySelector('#tbl-global tbody');
+    gb.innerHTML = globalData.map((r, i) =>
+      `<tr class="${r.avg_pnl_pct>=0?'row-pos':'row-neg'}">
+        <td>${i+1}</td><td>${r.spike_threshold_bps}</td>
+        <td>${r.target_ratio}</td><td>${r.stop_loss_bps}</td><td>${holdFmt(r.max_hold_ms)}</td>
+        <td>${r.max_spread_bps}</td>
+        <td class="num">${r.total_trades}</td><td class="num">${r.wins}</td>
+        <td class="num">${r.win_rate_pct.toFixed(1)}</td>
+        <td class="num">${cl(r.total_pnl_pct,3)}</td>
+        <td class="num">${cl(r.avg_pnl_pct)}</td>
+        <td class="num">${r.symbols_traded}</td>
+      </tr>`
+    ).join('');
+  }
+
+  function renderSymbols() {
+    const sb = document.querySelector('#tbl-symbol tbody');
+    sb.innerHTML = symbolData.map(r =>
+      `<tr class="${r.avg_pnl_pct>=0?'row-pos':'row-neg'}">
+        <td>${r.symbol}</td><td>${r.spike_threshold_bps}</td>
+        <td>${r.target_ratio}</td><td>${r.stop_loss_bps}</td><td>${holdFmt(r.max_hold_ms)}</td>
+        <td>${r.max_spread_bps}</td>
+        <td class="num">${r.total_trades}</td><td class="num">${r.wins}</td>
+        <td class="num">${r.win_rate_pct.toFixed(1)}</td>
+        <td class="num">${cl(r.total_pnl_pct,3)}</td>
+        <td class="num">${cl(r.avg_pnl_pct)}</td>
+      </tr>`
+    ).join('');
   }
 
   refresh();

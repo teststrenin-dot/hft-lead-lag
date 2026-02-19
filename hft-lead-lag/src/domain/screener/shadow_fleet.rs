@@ -16,7 +16,7 @@ use super::trader_config::TraderConfig;
 const SPIKE_THRESHOLDS: &[f64] = &[40.0, 50.0, 60.0, 70.0, 80.0, 100.0];
 const SPIKE_WINDOWS: &[i64] = &[500]; // not used for entry (gap-based), kept for stats
 const TARGET_RATIOS: &[f64] = &[0.3, 0.5, 0.7];
-const STOP_LOSSES: &[f64] = &[10.0, 15.0, 20.0, 30.0];
+const STOP_LOSSES: &[f64] = &[8.0, 10.0, 15.0, 20.0, 30.0];
 const MAX_HOLDS: &[i64] = &[3_000, 5_000, 10_000];
 const MAX_SPREADS: &[f64] = &[3.0, 5.0, 8.0];
 
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn grid_size() {
         let grid = generate_grid();
-        assert_eq!(grid.len(), 6 * 1 * 3 * 4 * 3 * 3); // 648
+        assert_eq!(grid.len(), 6 * 1 * 3 * 5 * 3 * 3); // 810
     }
 
     #[test]
@@ -154,6 +154,6 @@ mod tests {
     fn fleet_creation() {
         let configs = generate_grid();
         let fleet = ShadowFleet::new(&configs);
-        assert_eq!(fleet.len(), 648);
+        assert_eq!(fleet.len(), 810);
     }
 }
