@@ -67,14 +67,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(|t| (t.symbol.clone(), t.quote_volume))
         .collect();
     if binance_symbols.is_empty() && !gate_symbols.is_empty() {
-        warn!("Using Gate symbol universe as temporary Binance fallback");
-        binance_symbols = gate_symbols.clone();
-    }
-    if gate_symbols.is_empty() && !binance_symbols.is_empty() {
-        warn!("Using Binance symbol universe as temporary Gate fallback");
+        warn!("Binance volume fetch failed — cannot safely copy Gate symbols (different listing). Using BTC/ETH fallback for both.");
+        binance_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
         gate_symbols = binance_symbols.clone();
-    }
-    if binance_symbols.is_empty() && gate_symbols.is_empty() {
+    } else if gate_symbols.is_empty() && !binance_symbols.is_empty() {
+        warn!("Gate volume fetch failed — cannot safely copy Binance symbols (different listing). Using BTC/ETH fallback for both.");
+        binance_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        gate_symbols = binance_symbols.clone();
+    } else if binance_symbols.is_empty() && gate_symbols.is_empty() {
         warn!("No symbols from REST; using BTC/ETH fallback");
         binance_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
         gate_symbols = binance_symbols.clone();

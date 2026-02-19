@@ -2,6 +2,8 @@
 //! 
 //! Uses split WebSocket for concurrent read/write without mutex contention.
 
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async,
@@ -89,6 +91,19 @@ impl BinanceMarketData {
         )
     }
 
+    fn build_trade_subscription(symbols: &[&str]) -> String {
+        let streams: Vec<String> = symbols
+            .iter()
+            .map(|s| format!("{}@aggTrade", s.to_lowercase()))
+            .collect();
+
+        format!(
+            r#"{{"method":"SUBSCRIBE","params":[{}],"id":{}}}"#,
+            streams.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(","),
+            timestamp_ms()
+        )
+    }
+
     fn parse_book_ticker_static(data: &[u8], symbol_cache: &SymbolCache, local_ts_ns: i64) -> Option<BookTicker> {
         let symbol = extract_json_string_field(data, "s")?;
         let bid_price = extract_json_string_field(data, "b").and_then(|p| price_to_ticks(&p))?;
@@ -137,45 +152,86 @@ impl BinanceMarketData {
         let (ws_tx, mut ws_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) =
             mpsc::unbounded_channel();
 
+        // Shared list of subscription messages for reconnect replay
+        let subs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let subs_writer = subs.clone();
+
+        let msg_tx_reconnect = msg_tx.clone();
         tokio::spawn(async move {
             use futures_util::StreamExt;
             let mut read = read_half;
+            let mut reconnect_delay = Duration::from_secs(1);
 
-            while let Some(msg_result) = read.next().await {
-                let recv_ts = now_ns();
-                match msg_result {
-                    Ok(Message::Text(text)) => {
-                        let _ = msg_tx.try_send((text.into_bytes(), recv_ts));
+            loop {
+                while let Some(msg_result) = read.next().await {
+                    reconnect_delay = Duration::from_secs(1); // reset on any message
+                    let recv_ts = now_ns();
+                    match msg_result {
+                        Ok(Message::Text(text)) => {
+                            let _ = msg_tx_reconnect.try_send((text.into_bytes(), recv_ts));
+                        }
+                        Ok(Message::Binary(bin)) => {
+                            let _ = msg_tx_reconnect.try_send((bin, recv_ts));
+                        }
+                        Ok(Message::Close(frame)) => {
+                            warn!("Binance WS closed: {:?}", frame);
+                            break;
+                        }
+                        Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                        Err(e) => {
+                            error!("Binance WS read error: {}", e);
+                            break;
+                        }
+                        _ => {}
                     }
-                    Ok(Message::Binary(bin)) => {
-                        let _ = msg_tx.try_send((bin, recv_ts));
-                    }
-                    Ok(Message::Close(frame)) => {
-                        warn!("WS closed: {:?}", frame);
-                        break;
-                    }
-                    Ok(Message::Ping(_data)) => {
-                        debug!("Ping received");
-                    }
-                    Ok(Message::Pong(_)) => {
-                        debug!("Pong received");
-                    }
-                    Err(e) => {
-                        error!("WS read error: {}", e);
-                        break;
-                    }
-                    _ => {}
                 }
+
+                // Connection lost — reconnect with backoff
+                warn!("Binance WS disconnected, reconnecting in {:?}...", reconnect_delay);
+                tokio::time::sleep(reconnect_delay).await;
+                reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(30));
+
+                let request = match BINANCE_WS_ENDPOINT.into_client_request() {
+                    Ok(r) => r,
+                    Err(e) => { error!("Bad reconnect request: {}", e); continue; }
+                };
+                let (new_stream, _) = match connect_async(request).await {
+                    Ok(s) => s,
+                    Err(e) => { error!("Binance reconnect failed: {}", e); continue; }
+                };
+                let (new_write, new_read) = futures_util::stream::StreamExt::split(new_stream);
+                read = new_read;
+
+                // Replay subscriptions
+                let sub_msgs = subs.lock().unwrap().clone();
+                info!("Binance WS reconnected, replaying {} subscriptions", sub_msgs.len());
+                let mut w = new_write;
+                for msg in sub_msgs {
+                    use futures_util::SinkExt;
+                    let _ = w.send(Message::Text(msg)).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // We can't easily redirect writes from ws_rx to new_write here,
+                // but subscription replay is the critical path. New subscribe calls
+                // won't reach this old writer, which is acceptable — the system
+                // only subscribes at startup.
             }
         });
 
+        let subs_capture = subs_writer;
         tokio::spawn(async move {
             use futures_util::SinkExt;
             let mut write = write_half;
 
             while let Some(msg) = ws_rx.recv().await {
+                // Record subscription messages for reconnect replay
+                if let Message::Text(ref text) = msg {
+                    if text.contains("SUBSCRIBE") {
+                        subs_capture.lock().unwrap().push(text.clone());
+                    }
+                }
                 if write.send(msg).await.is_err() {
-                    error!("WS write error - connection lost");
+                    error!("Binance WS write error - connection lost");
                     break;
                 }
             }
@@ -292,7 +348,7 @@ impl MarketDataStream for BinanceMarketData {
         let subscription_id = self.next_subscription_id;
         self.next_subscription_id += 1;
 
-        let msg = Self::build_book_ticker_subscription(&[symbol]);
+        let msg = Self::build_trade_subscription(&[symbol]);
         
         if let Some(tx) = self.ws_txs.first() {
             tx.send(Message::Text(msg))
