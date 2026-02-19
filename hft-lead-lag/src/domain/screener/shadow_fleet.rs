@@ -11,7 +11,7 @@ use super::state::Quote;
 use super::trader_config::TraderConfig;
 
 /// Parameter grid values for fleet generation.
-const SPIKE_THRESHOLDS: &[f64] = &[20.0, 30.0, 40.0, 50.0];
+const SPIKE_THRESHOLDS: &[f64] = &[30.0, 40.0, 50.0, 60.0, 80.0];
 const SPIKE_WINDOWS: &[i64] = &[300, 500, 1000];
 const TARGET_RATIOS: &[f64] = &[0.3, 0.5, 0.7, 1.0];
 const STOP_LOSSES: &[f64] = &[8.0, 10.0, 15.0, 20.0];
@@ -110,7 +110,8 @@ impl ShadowFleet {
                 // New trades are always at the tail of the deque.
                 let new_count = session_n - prev_n;
                 let deque = trader.completed_trades();
-                for trade in deque.iter().rev().take(new_count) {
+                let start = deque.len().saturating_sub(new_count);
+                for trade in deque.iter().skip(start) {
                     self.pending_trades.push_back(FleetTrade {
                         config_id: *config_id,
                         symbol: symbol.to_string(),
@@ -135,7 +136,7 @@ mod tests {
     #[test]
     fn grid_size() {
         let grid = generate_grid();
-        assert_eq!(grid.len(), 4 * 3 * 4 * 4 * 2 * 3); // 1152
+        assert_eq!(grid.len(), 5 * 3 * 4 * 4 * 2 * 3); // 1440
     }
 
     #[test]
@@ -151,6 +152,6 @@ mod tests {
     fn fleet_creation() {
         let configs = generate_grid();
         let fleet = ShadowFleet::new(&configs);
-        assert_eq!(fleet.len(), 1152);
+        assert_eq!(fleet.len(), 1440);
     }
 }

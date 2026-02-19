@@ -20,6 +20,8 @@ pub struct TraderConfig {
     pub max_spread_bps: f64,
     /// Trailing stop activation threshold (bps of unrealized profit). 0 = disabled.
     pub trailing_stop_bps: f64,
+    /// Trailing stop decay ratio — exit when unrealized drops below peak * ratio.
+    pub trailing_decay_ratio: f64,
     /// Simulated order-to-fill latency (ms).
     pub fill_delay_ms: i64,
     /// Post-trade cooldown (ms).
@@ -42,6 +44,7 @@ impl Default for TraderConfig {
             max_hold_ms: 30_000,
             max_spread_bps: 0.0,
             trailing_stop_bps: 0.0,
+            trailing_decay_ratio: 0.5,
             fill_delay_ms: 6,
             cooldown_ms: 3_000,
             warmup_ms: 30_000,
@@ -64,6 +67,7 @@ impl TraderConfig {
         self.max_hold_ms.hash(&mut h);
         self.max_spread_bps.to_bits().hash(&mut h);
         self.trailing_stop_bps.to_bits().hash(&mut h);
+        self.trailing_decay_ratio.to_bits().hash(&mut h);
         h.finish()
     }
 }

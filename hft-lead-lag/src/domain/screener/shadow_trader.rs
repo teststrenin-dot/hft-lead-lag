@@ -222,6 +222,8 @@ impl ShadowTrader {
         if pending.is_exit {
             if let Some(pos) = pending.exit_pos {
                 self.fill_exit(ts_ms, gate, window_ms, pos, pending.exit_reason);
+            } else {
+                tracing::warn!("exit order with exit_pos=None — dropping");
             }
         } else {
             let gate_price = match pending.direction {
@@ -262,7 +264,7 @@ impl ShadowTrader {
         let stopped_out = unrealized_bps <= -cfg.stop_loss_bps;
         let trailing_stopped = cfg.trailing_stop_bps > 0.0
             && pos.peak_unrealized_bps >= cfg.trailing_stop_bps
-            && unrealized_bps <= pos.peak_unrealized_bps * 0.5;
+            && unrealized_bps <= pos.peak_unrealized_bps * cfg.trailing_decay_ratio;
 
         if gate_moved_enough || timed_out || stopped_out || trailing_stopped {
             let reason = if gate_moved_enough { "target" }

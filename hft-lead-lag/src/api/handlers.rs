@@ -173,7 +173,7 @@ pub(crate) async fn get_fleet_ranking(
          JOIN configs c ON t.config_id = c.id
          GROUP BY c.id
          HAVING total >= 10
-         ORDER BY CAST(wins AS REAL) / total DESC, total_pnl DESC
+         ORDER BY total_pnl / total DESC
          LIMIT 50"
     ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
 
