@@ -340,29 +340,48 @@ impl EventLoopState {
     }
 }
 
+#[derive(Clone, Copy)]
+enum GateSubscribeAttempt {
+    Success,
+    Error,
+    Timeout,
+}
+
+fn should_delay_after_gate_subscribe_attempt(attempt: GateSubscribeAttempt) -> bool {
+    match attempt {
+        GateSubscribeAttempt::Success | GateSubscribeAttempt::Error | GateSubscribeAttempt::Timeout => true,
+    }
+}
+
 async fn subscribe_gate_symbols(gate: &mut GateMarketData, symbols: &[String]) {
     let mut ok = 0usize;
     let mut errs = 0usize;
     let mut timeouts = 0usize;
     for symbol in symbols {
-        match tokio::time::timeout(
+        let attempt = match tokio::time::timeout(
             tokio::time::Duration::from_millis(500),
             gate.subscribe_book_ticker(symbol),
         )
         .await
         {
-            Ok(Ok(_)) => ok += 1,
+            Ok(Ok(_)) => {
+                ok += 1;
+                GateSubscribeAttempt::Success
+            }
             Ok(Err(e)) => {
                 errs += 1;
                 error!("Gate subscribe error {}: {}", symbol, e);
+                GateSubscribeAttempt::Error
             }
             Err(_) => {
                 timeouts += 1;
                 warn!("Gate subscription timeout on {}; proceeding with available streams", symbol);
-                continue;
+                GateSubscribeAttempt::Timeout
             }
+        };
+        if should_delay_after_gate_subscribe_attempt(attempt) {
+            tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
     }
     info!(
         "Gate subscription summary: ok={} err={} timeout={}",
@@ -1041,5 +1060,22 @@ mod tests {
         let event = ws_rx.try_recv().expect("ws event");
         assert_eq!(event.symbol, "BTCUSDT");
         assert_eq!(event.exchange, "gate");
+    }
+
+    #[test]
+    fn gate_subscribe_delay_applies_after_timeout() {
+        assert!(should_delay_after_gate_subscribe_attempt(
+            GateSubscribeAttempt::Timeout
+        ));
+    }
+
+    #[test]
+    fn gate_subscribe_delay_applies_after_success_and_error() {
+        assert!(should_delay_after_gate_subscribe_attempt(
+            GateSubscribeAttempt::Success
+        ));
+        assert!(should_delay_after_gate_subscribe_attempt(
+            GateSubscribeAttempt::Error
+        ));
     }
 }

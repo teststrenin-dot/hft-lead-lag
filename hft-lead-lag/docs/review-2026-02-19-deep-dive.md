@@ -147,4 +147,34 @@ Top ranked config:
 
 ---
 
-*Last updated: 2026-02-19 (full deep-dive refresh after baseline-window integration)*
+## 10) Addendum — commit review 2026-02-20 (`9ba7ee1..5c69ec1`)
+
+Проведён отдельный аудит серии cognitive-complexity refactor + phase10.
+
+### Что проверено
+
+- Диффы коммитов в диапазоне `9ba7ee1..5c69ec1`.
+- Поведенческая эквивалентность ключевых extraction-блоков (`main.rs`, `shadow_trader.rs`, `gate/mod.rs`).
+- Полная валидация:
+  - `cargo check --all-targets`
+  - `cargo build`
+  - `cargo test`
+
+### Результат валидации
+
+- Новых регрессий уровня **P0/P1**, внесённых этой серией коммитов, не подтверждено.
+- Подтверждённый риск P1 в bootstrap подписках Gate **исправлен**:
+  - `hft-lead-lag/src/main.rs` (`subscribe_gate_symbols`, timeout-ветка)
+  - удалён `continue`, который пропускал `SUBSCRIBE_DELAY_MS` после timeout;
+  - теперь delay применяется после каждой попытки подписки (success/error/timeout).
+- Добавлены regression-тесты:
+  - `gate_subscribe_delay_applies_after_timeout`
+  - `gate_subscribe_delay_applies_after_success_and_error`
+
+### Статус рекомендации
+
+Рекомендация реализована: инвариант "delay обязателен после любой попытки подписки" зафиксирован в коде и тестах.
+
+---
+
+*Last updated: 2026-02-20 (Gate subscribe timeout-delay fix documented and validated)*
