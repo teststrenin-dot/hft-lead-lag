@@ -1,5 +1,5 @@
 //! Configuration module for API keys and exchange settings
-//! 
+//!
 //! Loads configuration from environment variables or config files.
 
 use serde::Deserialize;
@@ -69,6 +69,50 @@ pub enum ExchangeId {
     Gate,
 }
 
+/// Runtime strategy selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyKind {
+    LeadLagClassic,
+    DislocationReversion,
+}
+
+impl StrategyKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LeadLagClassic => "lead_lag_classic",
+            Self::DislocationReversion => "dislocation_reversion",
+        }
+    }
+}
+
+impl Default for StrategyKind {
+    fn default() -> Self {
+        Self::LeadLagClassic
+    }
+}
+
+impl std::fmt::Display for StrategyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Strategy selection config.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StrategyRuntimeConfig {
+    #[serde(default)]
+    pub active: StrategyKind,
+}
+
+impl Default for StrategyRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            active: StrategyKind::LeadLagClassic,
+        }
+    }
+}
+
 /// Full application configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -76,6 +120,8 @@ pub struct AppConfig {
     pub gate: GateConfig,
     pub trading: Option<TradingConfig>,
     pub lead_lag: Option<LeadLagConfig>,
+    #[serde(default)]
+    pub strategy: StrategyRuntimeConfig,
 }
 
 impl Default for AppConfig {
@@ -95,6 +141,7 @@ impl Default for AppConfig {
             },
             trading: None,
             lead_lag: None,
+            strategy: StrategyRuntimeConfig::default(),
         }
     }
 }
@@ -181,18 +228,81 @@ impl ConfigManager {
     pub fn lead_lag_config(&self) -> Option<&LeadLagConfig> {
         self.config.lead_lag.as_ref()
     }
+
+    /// Get active runtime strategy kind.
+    pub fn strategy_kind(&self) -> StrategyKind {
+        self.config.strategy.active
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn test_config_from_env() {
         std::env::set_var("BINANCE_API_KEY", "test_key");
         std::env::set_var("BINANCE_API_SECRET", "test_secret");
-        
+
         let config = ConfigManager::from_env();
         assert!(config.binance_credentials().is_some());
+    }
+
+    fn write_temp_config(name: &str, content: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "hft-lead-lag-config-{name}-{}.toml",
+            std::process::id()
+        ));
+        fs::write(&path, content).expect("write temp config");
+        path
+    }
+
+    #[test]
+    fn config_defaults_to_lead_lag_strategy_when_field_is_missing() {
+        let path = write_temp_config(
+            "default-strategy",
+            r#"
+[binance]
+enabled = true
+blacklist = []
+
+[gate]
+enabled = true
+blacklist = []
+"#,
+        );
+
+        let manager =
+            ConfigManager::from_file(path.to_str().expect("utf-8 temp path")).expect("load config");
+        assert_eq!(manager.strategy_kind(), StrategyKind::LeadLagClassic);
+
+        fs::remove_file(path).expect("cleanup temp config");
+    }
+
+    #[test]
+    fn config_reads_explicit_strategy_selection() {
+        let path = write_temp_config(
+            "explicit-strategy",
+            r#"
+[binance]
+enabled = true
+blacklist = []
+
+[gate]
+enabled = true
+blacklist = []
+
+[strategy]
+active = "dislocation_reversion"
+"#,
+        );
+
+        let manager =
+            ConfigManager::from_file(path.to_str().expect("utf-8 temp path")).expect("load config");
+        assert_eq!(manager.strategy_kind(), StrategyKind::DislocationReversion);
+
+        fs::remove_file(path).expect("cleanup temp config");
     }
 }

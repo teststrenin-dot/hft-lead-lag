@@ -31,3 +31,6 @@ hedge_exchange = "gate"
 trigger_spread_bps = 5.0
 max_position_age_ms = 5000
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+[strategy]
+active = "lead_lag_classic"

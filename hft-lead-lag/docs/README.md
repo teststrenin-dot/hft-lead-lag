@@ -24,8 +24,10 @@
 
 - `docs/README.md` (этот файл): текущий статус, математика, runbook.
 - `docs/sprints/shadow-fleet-deep-dive.md`: полный deep dive по fleet/runtime/DB/API.
+- `docs/sprints/strategy-runtime-modularity.md`: модульность runtime-стратегий и выбор через конфиг.
 - `docs/review-2026-02-19-deep-dive.md`: инженерный статус проекта, риски, next actions.
 - `docs/review-2026-02-19-multi-agent.md`: мультиагентное ревью (коммиты/архитектура/математика/дубли/god objects).
+- `docs/review-2026-02-20-comprehensive-audit.md`: полный аудит (коммиты, баги, архитектура, математика, dead code, Screener/Shadow Fleet отдельно).
 - `docs/manifest/MANIFESTO.md`: принципы и текущий фокус.
 - `docs/review-shadow-trader.md`: архив (legacy, read-only).
 - `docs/studies/*.md`: исследовательские идеи, не source of truth.
@@ -180,4 +182,4 @@ curl -s http://localhost:5000/api/v1/fleet/symbols | head
 
 ---
 
-*Last updated: 2026-02-19 (baseline_window rollout + multi-agent review added)*
+*Last updated: 2026-02-20 (strategy runtime modularity + comprehensive audit docs added)*

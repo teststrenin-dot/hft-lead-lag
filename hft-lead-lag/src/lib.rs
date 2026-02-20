@@ -1,10 +1,10 @@
 //! HFT Lead-Lag Trading System
-//! 
+//!
 //! A high-frequency trading system implementing lead-lag arbitrage
 //! between Binance Futures and Gate.io Futures exchanges.
-//! 
+//!
 //! # Architecture
-//! 
+//!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                         API Layer                            │
@@ -28,22 +28,22 @@
 //! │  └──────────────┘  └──────────────┘  └──────────────┘       │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
-//! 
+//!
 //! # Design Principles
-//! 
+//!
 //! - **SOLID**: Each module has single responsibility
 //! - **Zero-copy hot path**: Market data parsing avoids allocations
 //! - **WebSocket-first**: All market data via WS (except cold auth)
 //! - **Deterministic cognitive load**: Each module < 500 LOC
 //! - **No god objects**: Clear separation of concerns
-//! 
+//!
 //! # Example Usage
-//! 
+//!
 //! ```rust,no_run
 //! use hft_lead_lag::domain::{MarketDataStream, ExchangeId};
 //! use hft_lead_lag::infrastructure::exchanges::{BinanceMarketData, GateMarketData};
 //! use hft_lead_lag::application::services::{LeadLagStrategy, LeadLagStrategyConfig};
-//! 
+//!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Initialize connectors
@@ -66,29 +66,27 @@
 //! }
 //! ```
 
-pub mod domain;
-pub mod infrastructure;
 pub mod application;
 pub mod config;
+pub mod domain;
+pub mod infrastructure;
 
 /// API layer for external integrations
 pub mod api;
 
 // Re-export commonly used types
 pub use domain::{
-    ExchangeId, ExchangeError, ExchangeResult,
-    MarketDataStream, OrderExecutor, Exchange,
-    BookTicker, Trade, SubscriptionId,
-    OrderRequest, OrderResponse, Position, Side,
+    BookTicker, Exchange, ExchangeError, ExchangeId, ExchangeResult, MarketDataStream,
+    OrderExecutor, OrderRequest, OrderResponse, Position, Side, SubscriptionId, Trade,
 };
 
-pub use infrastructure::exchanges::{
-    BinanceMarketData, GateMarketData,
-};
+pub use infrastructure::exchanges::{BinanceMarketData, GateMarketData};
 
 pub use application::services::{
-    LeadLagStrategy, LeadLagStrategyConfig, LeadLagSignal,
-    RiskManager, RiskLimits,
+    LeadLagSignal, LeadLagStrategy, LeadLagStrategyConfig, RiskLimits, RiskManager,
+};
+pub use application::strategies::{
+    build_runtime_strategy, RuntimeStrategy, StrategyBuildError, StrategySignal,
 };
 
-pub use config::{ConfigManager, AppConfig, ExchangeCredentials};
+pub use config::{AppConfig, ConfigManager, ExchangeCredentials, StrategyKind};
