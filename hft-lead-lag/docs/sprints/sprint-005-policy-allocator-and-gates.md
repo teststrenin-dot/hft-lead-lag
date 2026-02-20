@@ -3,6 +3,44 @@
 **Window:** 4 рабочих дня  
 **Primary objective:** перейти от "один статичный конфиг" к адаптивной policy-модели по символам.
 
+## Execution Update — 2026-02-20
+
+Status this cycle:
+
+1. Phase 0 executed (scoring model freeze + thresholds versioned in code/docs).
+2. Phase 1 started and executed (policy state model with rolling/decayed aggregates).
+3. Phase 2+ not started yet (allocator decisions are still shadow diagnostics only).
+
+Scoring model (frozen v1):
+
+1. `score = 1.0 * avg_pnl_6h + 0.20 * win_rate_6h - 0.50 * stop_loss_share_6h`
+2. `win_rate_6h` and `stop_loss_share_6h` are used as fractions `[0..1]` inside formula.
+
+Gate thresholds (shadow mode, v1):
+
+1. `min_trades_6h >= 5`
+2. `rolling_expectancy_6h > 0`
+3. `stop_loss_share_6h <= 55%`
+
+Implemented in code:
+
+1. Added decayed windows for `1h/6h/24h` policy metrics.
+2. Added per-config policy state and snapshots:
+   - score,
+   - gate enabled/reason,
+   - rolling metrics (trades/win-rate/stop-loss-share/avg-pnl).
+3. Added `top_policy_configs(k)` helper (gate-filtered + score-sorted shortlist).
+4. Added deterministic unit tests for:
+   - min-trades gate,
+   - positive profile enablement,
+   - exponential decay behavior,
+   - top-K shortlist filtering.
+
+Current safety posture:
+
+1. Policy currently runs in diagnostics/shadow-decision mode only.
+2. Existing trading tick path behavior is unchanged by allocator decisions.
+
 ---
 
 ## 1) Scope
