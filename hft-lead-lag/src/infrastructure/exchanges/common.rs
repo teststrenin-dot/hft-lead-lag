@@ -19,16 +19,16 @@ impl HmacSha256 {
     }
 
     pub fn sign(&self, data: &[u8]) -> String {
-        let mut mac = Hmac::<Sha256>::new_from_slice(&self.key)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.key).expect("HMAC can take key of any size");
         mac.update(data);
         let result = mac.finalize();
         hex::encode(result.into_bytes())
     }
 
     pub fn sign_static(secret: &[u8], data: &[u8]) -> String {
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(secret).expect("HMAC can take key of any size");
         mac.update(data);
         let result = mac.finalize();
         hex::encode(result.into_bytes())
@@ -49,16 +49,16 @@ impl HmacSha512 {
     }
 
     pub fn sign(&self, data: &[u8]) -> String {
-        let mut mac = Hmac::<Sha512>::new_from_slice(&self.key)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            Hmac::<Sha512>::new_from_slice(&self.key).expect("HMAC can take key of any size");
         mac.update(data);
         let result = mac.finalize();
         hex::encode(result.into_bytes())
     }
 
     pub fn sign_static(secret: &[u8], data: &[u8]) -> String {
-        let mut mac = Hmac::<Sha512>::new_from_slice(secret)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            Hmac::<Sha512>::new_from_slice(secret).expect("HMAC can take key of any size");
         mac.update(data);
         let result = mac.finalize();
         hex::encode(result.into_bytes())
@@ -127,7 +127,11 @@ pub fn qty_to_ticks(qty_str: &[u8]) -> Option<i64> {
 
 /// Extract string value from JSON field using simd-json style parsing
 /// Returns the value as Bytes for zero-copy processing
-fn find_json_field_value_start(json: &[u8], field_bytes: &[u8], search_from: usize) -> Option<usize> {
+fn find_json_field_value_start(
+    json: &[u8],
+    field_bytes: &[u8],
+    search_from: usize,
+) -> Option<usize> {
     let idx = json[search_from..]
         .windows(field_bytes.len())
         .position(|w| w == field_bytes)?;
@@ -157,6 +161,29 @@ pub fn extract_json_string_field(json: &[u8], field: &str) -> Option<Bytes> {
                 }
             }
             return Some(Bytes::copy_from_slice(&json[start..value_pos]));
+        }
+        pos = value_pos.saturating_add(1);
+    }
+    None
+}
+
+/// Extract bool value from JSON field.
+/// Supports native booleans (`true`/`false`) and numeric fallback (`0`/`1`).
+pub fn extract_json_bool_field(json: &[u8], field: &str) -> Option<bool> {
+    let field_pattern = format!("\"{}\"", field);
+    let field_bytes = field_pattern.as_bytes();
+
+    let mut pos = 0;
+    while let Some(value_pos) = find_json_field_value_start(json, field_bytes, pos) {
+        let tail = &json[value_pos..];
+        if tail.starts_with(b"true") {
+            return Some(true);
+        }
+        if tail.starts_with(b"false") {
+            return Some(false);
+        }
+        if json[value_pos] == b'-' || json[value_pos].is_ascii_digit() {
+            return extract_json_i64_field(json, field).map(|v| v != 0);
         }
         pos = value_pos.saturating_add(1);
     }
@@ -193,7 +220,7 @@ mod tests {
     fn test_hmac_sha256() {
         let secret = b"test_secret";
         let data = b"test_data";
-        
+
         let result = HmacSha256::sign_static(secret, data);
         assert!(!result.is_empty());
     }
@@ -210,6 +237,20 @@ mod tests {
         let json = br#"{"T":1234567890,"p":50000}"#;
         let ts = extract_json_i64_field(json, "T").unwrap();
         assert_eq!(ts, 1234567890);
+    }
+
+    #[test]
+    fn test_extract_json_bool_true_false() {
+        let json = br#"{"m":true,"x":false}"#;
+        assert_eq!(extract_json_bool_field(json, "m"), Some(true));
+        assert_eq!(extract_json_bool_field(json, "x"), Some(false));
+    }
+
+    #[test]
+    fn test_extract_json_bool_numeric_fallback() {
+        let json = br#"{"m":1,"x":0}"#;
+        assert_eq!(extract_json_bool_field(json, "m"), Some(true));
+        assert_eq!(extract_json_bool_field(json, "x"), Some(false));
     }
 
     #[test]

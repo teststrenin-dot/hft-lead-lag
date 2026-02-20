@@ -114,11 +114,21 @@ impl ShadowFleet {
 
     /// Total number of traders in the fleet (including pruned).
     #[inline]
-    pub fn len(&self) -> usize { self.traders.len() }
+    pub fn len(&self) -> usize {
+        self.traders.len()
+    }
+
+    /// Returns true if fleet has no traders.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.traders.is_empty()
+    }
 
     /// Number of active (non-pruned) traders.
     #[inline]
-    pub fn active(&self) -> usize { self.active_count }
+    pub fn active(&self) -> usize {
+        self.active_count
+    }
 
     /// Tick all active traders with shared price data.
     pub fn tick_all(
@@ -134,7 +144,9 @@ impl ShadowFleet {
         let elapsed = ts_ms - first;
 
         for (idx, (config_id, trader)) in self.traders.iter_mut().enumerate() {
-            if self.disabled[idx] { continue; }
+            if self.disabled[idx] {
+                continue;
+            }
 
             trader.tick(ts_ms, binance, gate, samples, window_ms);
 
@@ -162,8 +174,10 @@ impl ShadowFleet {
                         self.disabled[idx] = true;
                         self.active_count -= 1;
                         tracing::debug!(
-                            config_id = *config_id, symbol,
-                            trades = session_n, avg_pnl_pct = format!("{avg_pnl:.4}"),
+                            config_id = *config_id,
+                            symbol,
+                            trades = session_n,
+                            avg_pnl_pct = format!("{avg_pnl:.4}"),
                             "fleet: pruned (negative expectancy)"
                         );
                     }
@@ -173,7 +187,8 @@ impl ShadowFleet {
                 self.disabled[idx] = true;
                 self.active_count -= 1;
                 tracing::debug!(
-                    config_id = *config_id, symbol,
+                    config_id = *config_id,
+                    symbol,
                     elapsed_min = elapsed / 60_000,
                     "fleet: pruned (zero trades)"
                 );

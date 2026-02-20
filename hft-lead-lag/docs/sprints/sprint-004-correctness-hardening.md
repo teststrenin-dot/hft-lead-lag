@@ -3,6 +3,39 @@
 **Window:** 3 рабочих дня  
 **Primary objective:** сделать pipeline данных надежным перед любым profit-tuning.
 
+## Execution Update — 2026-02-20
+
+Status this cycle:
+
+1. Phase 1 executed (parser correctness fixes + parser tests).
+2. Phase 3 executed (config identity/db parity for `min_baseline_samples`).
+3. Phase 4 executed (deterministic unit path + `clippy -D warnings` green).
+4. Phase 2 partially covered only by minor cleanup (`state.rs` retention loop), full time-policy refactor still pending.
+
+Implemented in code:
+
+1. Binance parser:
+   - bool parsing for `m` (`true/false` + numeric fallback).
+   - aggTrade ID fallback (`a` when `t` missing).
+2. Gate parser:
+   - fixed nested numeric parsing bug (`num_start` scan).
+   - side inference from `m`, `side`, and signed size.
+   - signed qty normalized to absolute quantity.
+3. Config/db parity:
+   - `min_baseline_samples` added to `TraderConfig::config_id()`.
+   - `configs` schema + migration + upsert extended with `min_baseline_samples`.
+4. Test quality:
+   - live REST tests marked `#[ignore]` (opt-in network), unit suite deterministic offline.
+   - parser regression tests added for Binance/Gate.
+5. Code quality:
+   - `cargo clippy --all-targets -- -D warnings` issues resolved across touched modules.
+
+Verification evidence:
+
+1. `cargo check --all-targets` -> PASS
+2. `cargo test` -> PASS (`43 passed`, `2 ignored` in lib tests; `27 passed` in main tests)
+3. `cargo clippy --all-targets -- -D warnings` -> PASS
+
 ---
 
 ## 1) Scope

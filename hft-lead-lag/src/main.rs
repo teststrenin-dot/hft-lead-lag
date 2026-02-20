@@ -112,29 +112,25 @@ fn strategy_ticks_in_order<'a>(
 
 fn ingest_latest_batch<F: Fn() -> i64>(
     latest: &std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
-    exchange: &'static str,
-    ticker_count: &mut usize,
-    metrics: &mut EventLoopMetrics,
-    now_ms: &F,
-    screener: &ScreenerStore,
-    ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+    ctx: &mut BatchIngestContext<'_, F>,
 ) {
     for (symbol, ticker) in latest {
-        *ticker_count += 1;
-        metrics.record_tick_drift(now_ms(), ticker.exchange_ts_ns);
+        *ctx.ticker_count += 1;
+        ctx.metrics
+            .record_tick_drift((ctx.now_ms)(), ticker.exchange_ts_ns);
         let bid = ticker.bid_price();
         let ask = ticker.ask_price();
-        screener.update(
+        ctx.screener.update(
             symbol,
-            exchange,
+            ctx.exchange,
             bid,
             ask,
             ticker.exchange_ts_ns,
             ticker.local_ts_ns,
         );
-        let _ = ws_tx.send(MarketDataEvent {
+        let _ = ctx.ws_tx.send(MarketDataEvent {
             symbol: symbol.clone(),
-            exchange,
+            exchange: ctx.exchange,
             bid,
             ask,
             timestamp_ns: ticker.exchange_ts_ns,
@@ -142,27 +138,23 @@ fn ingest_latest_batch<F: Fn() -> i64>(
     }
 }
 
+struct BatchIngestContext<'a, F: Fn() -> i64> {
+    exchange: &'static str,
+    ticker_count: &'a mut usize,
+    metrics: &'a mut EventLoopMetrics,
+    now_ms: &'a F,
+    screener: &'a ScreenerStore,
+    ws_tx: &'a tokio::sync::broadcast::Sender<MarketDataEvent>,
+}
+
 fn process_exchange_batch<F: Fn() -> i64>(
     latest: &mut std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
     first: hft_lead_lag::domain::BookTicker,
     drained: Vec<hft_lead_lag::domain::BookTicker>,
-    exchange: &'static str,
-    ticker_count: &mut usize,
-    metrics: &mut EventLoopMetrics,
-    now_ms: &F,
-    screener: &ScreenerStore,
-    ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+    ctx: &mut BatchIngestContext<'_, F>,
 ) {
     rebuild_latest_map(latest, first, drained);
-    ingest_latest_batch(
-        latest,
-        exchange,
-        ticker_count,
-        metrics,
-        now_ms,
-        screener,
-        ws_tx,
-    );
+    ingest_latest_batch(latest, ctx);
 }
 
 #[derive(Debug)]
@@ -275,29 +267,21 @@ impl EventLoopState {
         ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
     ) -> Result<(), hft_lead_lag::domain::ExchangeError> {
         let ticker = result?;
+        let mut ctx = BatchIngestContext {
+            exchange: side.exchange_name(),
+            ticker_count: &mut self.ticker_count,
+            metrics: &mut self.metrics,
+            now_ms: &Self::now_ms,
+            screener,
+            ws_tx,
+        };
         match side {
-            ExchangeSide::Binance => process_exchange_batch(
-                &mut self.latest_bn,
-                ticker,
-                drained,
-                side.exchange_name(),
-                &mut self.ticker_count,
-                &mut self.metrics,
-                &Self::now_ms,
-                screener,
-                ws_tx,
-            ),
-            ExchangeSide::Gate => process_exchange_batch(
-                &mut self.latest_gt,
-                ticker,
-                drained,
-                side.exchange_name(),
-                &mut self.ticker_count,
-                &mut self.metrics,
-                &Self::now_ms,
-                screener,
-                ws_tx,
-            ),
+            ExchangeSide::Binance => {
+                process_exchange_batch(&mut self.latest_bn, ticker, drained, &mut ctx)
+            }
+            ExchangeSide::Gate => {
+                process_exchange_batch(&mut self.latest_gt, ticker, drained, &mut ctx)
+            }
         }
         Ok(())
     }
@@ -674,7 +658,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             (0usize, screener_symbols.len())
         }
     };
-    let binance_ws_sockets = (screener_symbols.len() + 1) / 2;
+    let binance_ws_sockets = screener_symbols.len().div_ceil(2);
     info!(
         "Binance subscription summary: ok={} err={} sockets={} symbols_per_ws=2",
         binance_subscribed, binance_subscribe_errors, binance_ws_sockets
@@ -969,16 +953,16 @@ mod tests {
         let screener = ScreenerStore::default();
         let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
         let now_ms = || 130i64;
+        let mut ctx = BatchIngestContext {
+            exchange: "binance",
+            ticker_count: &mut ticker_count,
+            metrics: &mut metrics,
+            now_ms: &now_ms,
+            screener: &screener,
+            ws_tx: &ws_tx,
+        };
 
-        ingest_latest_batch(
-            &latest,
-            "binance",
-            &mut ticker_count,
-            &mut metrics,
-            &now_ms,
-            &screener,
-            &ws_tx,
-        );
+        ingest_latest_batch(&latest, &mut ctx);
 
         assert_eq!(ticker_count, 3);
         assert_eq!(metrics.drift_stats_string_and_reset(), "no_data");
@@ -998,16 +982,16 @@ mod tests {
         let screener = ScreenerStore::default();
         let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
         let now_ms = || 130i64;
+        let mut ctx = BatchIngestContext {
+            exchange: "gate",
+            ticker_count: &mut ticker_count,
+            metrics: &mut metrics,
+            now_ms: &now_ms,
+            screener: &screener,
+            ws_tx: &ws_tx,
+        };
 
-        ingest_latest_batch(
-            &latest,
-            "gate",
-            &mut ticker_count,
-            &mut metrics,
-            &now_ms,
-            &screener,
-            &ws_tx,
-        );
+        ingest_latest_batch(&latest, &mut ctx);
 
         assert_eq!(ticker_count, 1);
         assert_eq!(
@@ -1035,6 +1019,14 @@ mod tests {
         let screener = ScreenerStore::default();
         let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
         let now_ms = || 150i64;
+        let mut ctx = BatchIngestContext {
+            exchange: "binance",
+            ticker_count: &mut ticker_count,
+            metrics: &mut metrics,
+            now_ms: &now_ms,
+            screener: &screener,
+            ws_tx: &ws_tx,
+        };
 
         process_exchange_batch(
             &mut latest,
@@ -1043,12 +1035,7 @@ mod tests {
                 test_ticker("ETHUSDT", 110_000_000),
                 test_ticker("BTCUSDT", 120_000_000),
             ],
-            "binance",
-            &mut ticker_count,
-            &mut metrics,
-            &now_ms,
-            &screener,
-            &ws_tx,
+            &mut ctx,
         );
 
         assert!(!latest.contains_key("OLD"));
@@ -1060,7 +1047,7 @@ mod tests {
             "n=2 avg=35ms p50=40ms p95=40ms p99=40ms max=40ms"
         );
 
-        let mut events = vec![
+        let mut events = [
             ws_rx.try_recv().expect("first ws event"),
             ws_rx.try_recv().expect("second ws event"),
         ];
@@ -1090,17 +1077,20 @@ mod tests {
         let screener = ScreenerStore::default();
         let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
         let now_ms = || 130i64;
+        let mut ctx = BatchIngestContext {
+            exchange: "gate",
+            ticker_count: &mut ticker_count,
+            metrics: &mut metrics,
+            now_ms: &now_ms,
+            screener: &screener,
+            ws_tx: &ws_tx,
+        };
 
         process_exchange_batch(
             &mut latest,
             test_ticker("BTCUSDT", 100_000_000),
             Vec::new(),
-            "gate",
-            &mut ticker_count,
-            &mut metrics,
-            &now_ms,
-            &screener,
-            &ws_tx,
+            &mut ctx,
         );
 
         assert_eq!(latest.len(), 1);

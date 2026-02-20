@@ -1,26 +1,24 @@
 //! Binance Futures WebSocket connector
-//! 
+//!
 //! Uses split WebSocket for concurrent read/write without mutex contention.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::{Message, client::IntoClientRequest},
+    tungstenite::{client::IntoClientRequest, Message},
 };
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
 use crate::domain::{
-    ExchangeId, ExchangeError, ExchangeResult,
-    MarketDataStream, SubscriptionId,
-    BookTicker, Trade,
-    symbols::SymbolCache,
+    symbols::SymbolCache, BookTicker, ExchangeError, ExchangeId, ExchangeResult, MarketDataStream,
+    SubscriptionId, Trade,
 };
 use crate::infrastructure::exchanges::common::{
-    timestamp_ms, now_ns, StampedBytes, extract_json_string_field, 
-    extract_json_i64_field, price_to_ticks, qty_to_ticks,
+    extract_json_bool_field, extract_json_i64_field, extract_json_string_field, now_ns,
+    price_to_ticks, qty_to_ticks, timestamp_ms, StampedBytes,
 };
 
 const BINANCE_WS_ENDPOINT: &str = "wss://fstream.binance.com/ws";
@@ -60,18 +58,16 @@ impl BinanceMarketData {
             Some(rx) => rx,
             None => return Vec::new(),
         };
-        let mut latest: std::collections::HashMap<bytes::Bytes, BookTicker> = std::collections::HashMap::new();
-        loop {
-            match rx.try_recv() {
-                Ok((data, recv_ts_ns)) => {
-                    let data_str = String::from_utf8_lossy(&data);
-                    if data_str.contains("bookTicker") {
-                        if let Some(ticker) = Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns) {
-                            latest.insert(ticker.symbol.clone(), ticker);
-                        }
-                    }
+        let mut latest: std::collections::HashMap<bytes::Bytes, BookTicker> =
+            std::collections::HashMap::new();
+        while let Ok((data, recv_ts_ns)) = rx.try_recv() {
+            let data_str = String::from_utf8_lossy(&data);
+            if data_str.contains("bookTicker") {
+                if let Some(ticker) =
+                    Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns)
+                {
+                    latest.insert(ticker.symbol.clone(), ticker);
                 }
-                Err(_) => break,
             }
         }
         latest.into_values().collect()
@@ -86,10 +82,14 @@ impl BinanceMarketData {
             .iter()
             .map(|s| format!("{}@bookTicker", s.to_lowercase()))
             .collect();
-        
+
         format!(
             r#"{{"method":"SUBSCRIBE","params":[{}],"id":{}}}"#,
-            streams.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(","),
+            streams
+                .iter()
+                .map(|s| format!("\"{}\"", s))
+                .collect::<Vec<_>>()
+                .join(","),
             timestamp_ms()
         )
     }
@@ -102,12 +102,20 @@ impl BinanceMarketData {
 
         format!(
             r#"{{"method":"SUBSCRIBE","params":[{}],"id":{}}}"#,
-            streams.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(","),
+            streams
+                .iter()
+                .map(|s| format!("\"{}\"", s))
+                .collect::<Vec<_>>()
+                .join(","),
             timestamp_ms()
         )
     }
 
-    fn parse_book_ticker_static(data: &[u8], symbol_cache: &SymbolCache, local_ts_ns: i64) -> Option<BookTicker> {
+    fn parse_book_ticker_static(
+        data: &[u8],
+        symbol_cache: &SymbolCache,
+        local_ts_ns: i64,
+    ) -> Option<BookTicker> {
         let symbol = extract_json_string_field(data, "s")?;
         let bid_price = extract_json_string_field(data, "b").and_then(|p| price_to_ticks(&p))?;
         let bid_qty = extract_json_string_field(data, "B").and_then(|q| qty_to_ticks(&q))?;
@@ -119,23 +127,35 @@ impl BinanceMarketData {
 
         Some(BookTicker::new(
             symbol_cache.intern_bytes(&symbol),
-            bid_price, ask_price, bid_qty, ask_qty,
+            bid_price,
+            ask_price,
+            bid_qty,
+            ask_qty,
             exchange_ts_ms.saturating_mul(1_000_000),
             local_ts_ns,
         ))
     }
 
-    fn parse_trade_static(data: &[u8], symbol_cache: &SymbolCache, local_ts_ns: i64) -> Option<Trade> {
+    fn parse_trade_static(
+        data: &[u8],
+        symbol_cache: &SymbolCache,
+        local_ts_ns: i64,
+    ) -> Option<Trade> {
         let symbol = extract_json_string_field(data, "s")?;
-        let trade_id = extract_json_i64_field(data, "t")?;
+        let trade_id =
+            extract_json_i64_field(data, "t").or_else(|| extract_json_i64_field(data, "a"))?;
         let price = extract_json_string_field(data, "p").and_then(|p| price_to_ticks(&p))?;
         let qty = extract_json_string_field(data, "q").and_then(|q| qty_to_ticks(&q))?;
-        let is_buyer_maker = extract_json_i64_field(data, "m") == Some(1);
+        let is_buyer_maker = extract_json_bool_field(data, "m").unwrap_or(false);
         let exchange_ts = extract_json_i64_field(data, "T").unwrap_or(0);
 
         Some(Trade::new(
             symbol_cache.intern_bytes(&symbol),
-            trade_id, price, qty, is_buyer_maker, exchange_ts.saturating_mul(1_000_000),
+            trade_id,
+            price,
+            qty,
+            is_buyer_maker,
+            exchange_ts.saturating_mul(1_000_000),
             local_ts_ns,
         ))
     }
@@ -152,15 +172,17 @@ impl BinanceMarketData {
             .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
 
         let (write_half, read_half) = futures_util::stream::StreamExt::split(ws_stream);
-        let (ws_tx, ws_rx): (mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<Message>) =
-            mpsc::unbounded_channel();
+        let (ws_tx, ws_rx): (
+            mpsc::UnboundedSender<Message>,
+            mpsc::UnboundedReceiver<Message>,
+        ) = mpsc::unbounded_channel();
 
         let subs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         // Single unified task: owns both read and write halves.
         // On reconnect, both halves are replaced atomically.
         tokio::spawn(async move {
-            use futures_util::{StreamExt, SinkExt};
+            use futures_util::{SinkExt, StreamExt};
             let mut read = read_half;
             let mut write = write_half;
             let mut ws_rx = ws_rx;
@@ -176,9 +198,9 @@ impl BinanceMarketData {
                                 Some(Ok(Message::Text(text))) => {
                                     reconnect_delay = Duration::from_secs(1);
                                     let recv_ts = now_ns();
-                                    if let Err(_) = msg_tx.try_send((text.into_bytes(), recv_ts)) {
+                                    if msg_tx.try_send((text.into_bytes(), recv_ts)).is_err() {
                                         let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
-                                        if n.is_power_of_two() || n % 1000 == 0 {
+                                        if n.is_power_of_two() || n.is_multiple_of(1000) {
                                             warn!("Binance msg channel full, dropped total: {n}");
                                         }
                                     }
@@ -186,9 +208,9 @@ impl BinanceMarketData {
                                 Some(Ok(Message::Binary(bin))) => {
                                     reconnect_delay = Duration::from_secs(1);
                                     let recv_ts = now_ns();
-                                    if let Err(_) = msg_tx.try_send((bin, recv_ts)) {
+                                    if msg_tx.try_send((bin, recv_ts)).is_err() {
                                         let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
-                                        if n.is_power_of_two() || n % 1000 == 0 {
+                                        if n.is_power_of_two() || n.is_multiple_of(1000) {
                                             warn!("Binance msg channel full, dropped total: {n}");
                                         }
                                     }
@@ -226,17 +248,26 @@ impl BinanceMarketData {
                 }
 
                 // Connection lost — reconnect with backoff
-                warn!("Binance WS disconnected, reconnecting in {:?}...", reconnect_delay);
+                warn!(
+                    "Binance WS disconnected, reconnecting in {:?}...",
+                    reconnect_delay
+                );
                 tokio::time::sleep(reconnect_delay).await;
                 reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(30));
 
                 let request = match BINANCE_WS_ENDPOINT.into_client_request() {
                     Ok(r) => r,
-                    Err(e) => { error!("Bad reconnect request: {}", e); continue; }
+                    Err(e) => {
+                        error!("Bad reconnect request: {}", e);
+                        continue;
+                    }
                 };
                 let (new_stream, _) = match connect_async(request).await {
                     Ok(s) => s,
-                    Err(e) => { error!("Binance reconnect failed: {}", e); continue; }
+                    Err(e) => {
+                        error!("Binance reconnect failed: {}", e);
+                        continue;
+                    }
                 };
                 let (new_write, new_read) = futures_util::stream::StreamExt::split(new_stream);
                 read = new_read;
@@ -244,7 +275,10 @@ impl BinanceMarketData {
 
                 // Replay subscriptions on the new write half
                 let sub_msgs = subs.lock().unwrap().clone();
-                info!("Binance WS reconnected, replaying {} subscriptions", sub_msgs.len());
+                info!(
+                    "Binance WS reconnected, replaying {} subscriptions",
+                    sub_msgs.len()
+                );
                 for msg in sub_msgs {
                     let _ = write.send(Message::Text(msg)).await;
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -261,7 +295,10 @@ impl BinanceMarketData {
     }
 
     /// Subscribe to many symbols using chunked requests to respect WS rate limits.
-    pub async fn subscribe_book_tickers_batch(&mut self, symbols: &[String]) -> ExchangeResult<usize> {
+    pub async fn subscribe_book_tickers_batch(
+        &mut self,
+        symbols: &[String],
+    ) -> ExchangeResult<usize> {
         if symbols.is_empty() {
             return Ok(0);
         }
@@ -274,8 +311,9 @@ impl BinanceMarketData {
         let symbols_per_ws: usize = std::env::var("SYMBOLS_PER_WS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(20);
-        let required_ws_count = (symbols.len() + symbols_per_ws - 1) / symbols_per_ws;
+            .unwrap_or(20)
+            .max(1);
+        let required_ws_count = symbols.len().div_ceil(symbols_per_ws);
         while self.ws_txs.len() < required_ws_count {
             let ws = Self::spawn_ws_worker(shared_msg_tx.clone()).await?;
             self.ws_txs.push(ws);
@@ -286,7 +324,10 @@ impl BinanceMarketData {
         for (socket_idx, chunk) in symbols.chunks(symbols_per_ws).enumerate() {
             let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
             let msg = Self::build_book_ticker_subscription(&refs);
-            if self.ws_txs[socket_idx].send(Message::Text(msg.clone())).is_err() {
+            if self.ws_txs[socket_idx]
+                .send(Message::Text(msg.clone()))
+                .is_err()
+            {
                 let replacement = Self::spawn_ws_worker(shared_msg_tx.clone()).await?;
                 self.ws_txs[socket_idx] = replacement;
                 self.ws_txs[socket_idx]
@@ -351,7 +392,7 @@ impl MarketDataStream for BinanceMarketData {
         self.next_subscription_id += 1;
 
         let msg = Self::build_book_ticker_subscription(&[symbol]);
-        
+
         if let Some(tx) = self.ws_txs.first() {
             // NO MUTEX NEEDED! Just send to channel
             tx.send(Message::Text(msg))
@@ -369,7 +410,7 @@ impl MarketDataStream for BinanceMarketData {
         self.next_subscription_id += 1;
 
         let msg = Self::build_trade_subscription(&[symbol]);
-        
+
         if let Some(tx) = self.ws_txs.first() {
             tx.send(Message::Text(msg))
                 .map_err(|e| ExchangeError::WebSocketError(e.to_string()))?;
@@ -385,14 +426,22 @@ impl MarketDataStream for BinanceMarketData {
     }
 
     async fn recv_book_ticker(&mut self) -> ExchangeResult<BookTicker> {
-        let rx = self.msg_rx.as_mut().ok_or_else(|| ExchangeError::ConnectionClosed("Not connected".into()))?;
+        let rx = self
+            .msg_rx
+            .as_mut()
+            .ok_or_else(|| ExchangeError::ConnectionClosed("Not connected".into()))?;
 
         loop {
-            let (data, recv_ts_ns) = rx.recv().await.ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
+            let (data, recv_ts_ns) = rx
+                .recv()
+                .await
+                .ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
             let data_str = String::from_utf8_lossy(&data);
-            
+
             if data_str.contains("bookTicker") {
-                if let Some(ticker) = Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns) {
+                if let Some(ticker) =
+                    Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns)
+                {
                     return Ok(ticker);
                 }
             }
@@ -400,17 +449,69 @@ impl MarketDataStream for BinanceMarketData {
     }
 
     async fn recv_trade(&mut self) -> ExchangeResult<Trade> {
-        let rx = self.msg_rx.as_mut().ok_or_else(|| ExchangeError::ConnectionClosed("Not connected".into()))?;
+        let rx = self
+            .msg_rx
+            .as_mut()
+            .ok_or_else(|| ExchangeError::ConnectionClosed("Not connected".into()))?;
 
         loop {
-            let (data, recv_ts_ns) = rx.recv().await.ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
+            let (data, recv_ts_ns) = rx
+                .recv()
+                .await
+                .ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
             let data_str = String::from_utf8_lossy(&data);
-            
+
             if data_str.contains("\"e\":\"aggTrade\"") {
-                if let Some(trade) = Self::parse_trade_static(&data, &self.symbol_cache, recv_ts_ns) {
+                if let Some(trade) = Self::parse_trade_static(&data, &self.symbol_cache, recv_ts_ns)
+                {
                     return Ok(trade);
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_agg_trade_bool_and_id() {
+        let cache = SymbolCache::new();
+        let payload = br#"{
+            "e":"aggTrade",
+            "E":123456789,
+            "s":"BTCUSDT",
+            "a":5933014,
+            "p":"50000.12",
+            "q":"0.02",
+            "T":123456785,
+            "m":true
+        }"#;
+        let trade =
+            BinanceMarketData::parse_trade_static(payload, &cache, 42).expect("agg trade parses");
+
+        assert_eq!(trade.symbol.as_ref(), b"BTCUSDT");
+        assert_eq!(trade.trade_id, 5_933_014);
+        assert!(trade.is_buyer_maker);
+        assert!(trade.qty_ticks > 0);
+    }
+
+    #[test]
+    fn parse_trade_supports_numeric_m_flag() {
+        let cache = SymbolCache::new();
+        let payload = br#"{
+            "s":"ETHUSDT",
+            "t":1234,
+            "p":"2500.5",
+            "q":"1.25",
+            "T":1700000000000,
+            "m":0
+        }"#;
+        let trade =
+            BinanceMarketData::parse_trade_static(payload, &cache, 7).expect("trade parses");
+
+        assert_eq!(trade.trade_id, 1234);
+        assert!(!trade.is_buyer_maker);
     }
 }

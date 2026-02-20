@@ -70,9 +70,10 @@ pub enum ExchangeId {
 }
 
 /// Runtime strategy selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyKind {
+    #[default]
     LeadLagClassic,
     DislocationReversion,
 }
@@ -83,12 +84,6 @@ impl StrategyKind {
             Self::LeadLagClassic => "lead_lag_classic",
             Self::DislocationReversion => "dislocation_reversion",
         }
-    }
-}
-
-impl Default for StrategyKind {
-    fn default() -> Self {
-        Self::LeadLagClassic
     }
 }
 

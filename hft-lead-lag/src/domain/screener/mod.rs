@@ -19,14 +19,14 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serde::Serialize;
 
-use self::shadow_fleet::{ShadowFleet, generate_grid};
-use self::state::{Quote, SymbolState};
+use self::shadow_fleet::{generate_grid, ShadowFleet};
 use self::shadow_trader::{ChartData, ShadowDebug};
-use self::utils::{now_ms, calculate_ws_drift_ms, normalize_exchange_ts_ms};
+use self::state::{Quote, SymbolState};
+use self::utils::{calculate_ws_drift_ms, normalize_exchange_ts_ms, now_ms};
 
 use crate::infrastructure::db::DbWriter;
 
-pub use self::shadow_trader::{ShadowStats, ChartTrade};
+pub use self::shadow_trader::{ChartTrade, ShadowStats};
 pub use self::trader_config::TraderConfig;
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
@@ -121,17 +121,19 @@ impl ScreenerStore {
 
         let local_ts_ms = now_ms();
         let exchange_ts_ms = normalize_exchange_ts_ms(timestamp_ns).unwrap_or(local_ts_ms);
-        let ingress_local_ts_ms = normalize_exchange_ts_ms(local_receive_ts_ns).unwrap_or(local_ts_ms);
+        let ingress_local_ts_ms =
+            normalize_exchange_ts_ms(local_receive_ts_ns).unwrap_or(local_ts_ms);
 
-        let mut state = self
-            .symbols
-            .entry(symbol.to_string())
-            .or_insert_with(SymbolState::default);
+        let mut state = self.symbols.entry(symbol.to_string()).or_default();
 
         let state = state.value_mut();
         let ws_drift = calculate_ws_drift_ms(local_ts_ms, timestamp_ns);
         let ingress_ws_drift = calculate_ws_drift_ms(ingress_local_ts_ms, timestamp_ns);
-        let quote = Quote { bid, ask, ts_ms: exchange_ts_ms };
+        let quote = Quote {
+            bid,
+            ask,
+            ts_ms: exchange_ts_ms,
+        };
 
         if !state.ingest_quote(exchange, quote, ws_drift, ingress_ws_drift) {
             return;
@@ -154,8 +156,17 @@ impl ScreenerStore {
             (Some(b), Some(g)) => (b, g),
             _ => return,
         };
-        let fleet = state.fleet.get_or_insert_with(|| ShadowFleet::new(&self.fleet_configs));
-        fleet.tick_all(exchange_ts_ms, binance_ref, gate_ref, &state.price_samples, self.window_ms, symbol);
+        let fleet = state
+            .fleet
+            .get_or_insert_with(|| ShadowFleet::new(&self.fleet_configs));
+        fleet.tick_all(
+            exchange_ts_ms,
+            binance_ref,
+            gate_ref,
+            &state.price_samples,
+            self.window_ms,
+            symbol,
+        );
         if let Some(ref writer) = self.db_writer {
             let trades = fleet.drain_trades();
             if !trades.is_empty() {
@@ -202,11 +213,15 @@ impl ScreenerStore {
     }
 
     pub fn shadow_debug(&self, symbol: &str) -> Option<ShadowDebug> {
-        self.symbols.get(symbol).map(|s| s.shadow.debug(&s.price_samples))
+        self.symbols
+            .get(symbol)
+            .map(|s| s.shadow.debug(&s.price_samples))
     }
 
     pub fn chart_data(&self, symbol: &str) -> Option<ChartData> {
-        self.symbols.get(symbol).map(|s| s.shadow.chart_data(symbol, &s.price_samples))
+        self.symbols
+            .get(symbol)
+            .map(|s| s.shadow.chart_data(symbol, &s.price_samples))
     }
 }
 

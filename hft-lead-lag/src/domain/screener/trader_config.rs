@@ -74,6 +74,7 @@ impl TraderConfig {
         self.warmup_ms.hash(&mut h);
         self.quote_freshness_ms.hash(&mut h);
         self.taker_fee.to_bits().hash(&mut h);
+        self.min_baseline_samples.hash(&mut h);
         h.finish()
     }
 }

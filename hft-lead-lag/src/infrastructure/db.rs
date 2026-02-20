@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS configs (
     cooldown_ms           INTEGER NOT NULL,
     warmup_ms             INTEGER NOT NULL DEFAULT 30000,
     quote_freshness_ms    INTEGER NOT NULL DEFAULT 1000,
-    taker_fee             REAL NOT NULL
+    taker_fee             REAL NOT NULL,
+    min_baseline_samples  INTEGER NOT NULL DEFAULT 20
 );
 
 CREATE TABLE IF NOT EXISTS trades (
@@ -92,16 +93,18 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     conn.execute_batch(SCHEMA)?;
     // Migration: add columns if missing (older DBs without these columns).
     let _ = conn.execute_batch(
-        "ALTER TABLE configs ADD COLUMN trailing_decay_ratio REAL NOT NULL DEFAULT 0.5;"
+        "ALTER TABLE configs ADD COLUMN trailing_decay_ratio REAL NOT NULL DEFAULT 0.5;",
+    );
+    let _ = conn
+        .execute_batch("ALTER TABLE configs ADD COLUMN warmup_ms INTEGER NOT NULL DEFAULT 30000;");
+    let _ = conn.execute_batch(
+        "ALTER TABLE configs ADD COLUMN quote_freshness_ms INTEGER NOT NULL DEFAULT 1000;",
     );
     let _ = conn.execute_batch(
-        "ALTER TABLE configs ADD COLUMN warmup_ms INTEGER NOT NULL DEFAULT 30000;"
+        "ALTER TABLE configs ADD COLUMN baseline_window_ms INTEGER NOT NULL DEFAULT 2000;",
     );
     let _ = conn.execute_batch(
-        "ALTER TABLE configs ADD COLUMN quote_freshness_ms INTEGER NOT NULL DEFAULT 1000;"
-    );
-    let _ = conn.execute_batch(
-        "ALTER TABLE configs ADD COLUMN baseline_window_ms INTEGER NOT NULL DEFAULT 2000;"
+        "ALTER TABLE configs ADD COLUMN min_baseline_samples INTEGER NOT NULL DEFAULT 20;",
     );
     Ok(conn)
 }
@@ -112,8 +115,8 @@ pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::
         "INSERT OR IGNORE INTO configs (id, spike_threshold_bps, target_ratio,
          stop_loss_bps, max_hold_ms, max_spread_bps, trailing_decay_ratio,
          baseline_window_ms, fill_delay_ms, cooldown_ms, warmup_ms,
-         quote_freshness_ms, taker_fee)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+         quote_freshness_ms, taker_fee, min_baseline_samples)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
     )?;
     for c in configs {
         stmt.execute(params![
@@ -130,6 +133,7 @@ pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::
             c.warmup_ms,
             c.quote_freshness_ms,
             c.taker_fee,
+            c.min_baseline_samples as i64,
         ])?;
     }
     Ok(())
@@ -148,7 +152,9 @@ pub struct DbWriter {
 impl DbWriter {
     /// Enqueue a batch of trades for async persistence.
     pub fn send(&self, trades: Vec<FleetTrade>) {
-        if trades.is_empty() { return; }
+        if trades.is_empty() {
+            return;
+        }
         if let Err(e) = self.tx.try_send(trades) {
             let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
             warn!("db writer channel full, dropping batch (total dropped: {n}): {e}");
@@ -177,9 +183,8 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
         info!("db writer started: {}", path.display());
 
         let mut buf: Vec<FleetTrade> = Vec::with_capacity(1024);
-        let mut interval = tokio::time::interval(
-            tokio::time::Duration::from_secs(FLUSH_INTERVAL_SECS),
-        );
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(FLUSH_INTERVAL_SECS));
 
         loop {
             tokio::select! {
@@ -216,7 +221,7 @@ fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()
             "INSERT OR IGNORE INTO trades (config_id, symbol, direction, entry_ts_ms, exit_ts_ms,
              entry_price, exit_price, spike_bps, pnl_pct, exit_reason,
              gate_spread_at_entry_bps)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
         for ft in trades {
             let t = &ft.trade;

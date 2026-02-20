@@ -40,6 +40,11 @@ impl PriceSamples {
         self.samples.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
     pub fn back(&self) -> Option<&PriceSample> {
         self.samples.back()
     }

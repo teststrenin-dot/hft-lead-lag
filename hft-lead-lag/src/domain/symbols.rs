@@ -1,10 +1,10 @@
 //! Symbol handling with interning for zero-copy hot path
-//! 
+//!
 //! Uses Arc<str> for symbol interning to avoid repeated allocations
 //! when processing messages for the same symbol.
 
-use std::sync::Arc;
 use bytes::Bytes;
+use std::sync::Arc;
 
 /// Symbol cache for interning
 /// Prevents repeated allocations for the same symbol string
@@ -28,7 +28,7 @@ impl SymbolCache {
         if let Some(existing) = self.cache.get(symbol) {
             return existing.clone();
         }
-        
+
         // Slow path: insert new
         let arc_str: Arc<str> = symbol.into();
         self.cache.insert(symbol.to_string(), arc_str.clone());
@@ -43,14 +43,17 @@ impl SymbolCache {
     }
 }
 
-/// Predefined symbol constants for common pairs
-pub mod symbols {
+/// Predefined symbol constants for common pairs.
+pub mod pairs {
     pub const BTC_USDT: &str = "BTCUSDT";
     pub const ETH_USDT: &str = "ETHUSDT";
     pub const SOL_USDT: &str = "SOLUSDT";
     pub const BNB_USDT: &str = "BNBUSDT";
     pub const XRP_USDT: &str = "XRPUSDT";
 }
+
+/// Backward-compatible alias for callers using `domain::symbols::symbols::*`.
+pub use pairs as symbols;
 
 #[cfg(test)]
 mod tests {
@@ -59,13 +62,13 @@ mod tests {
     #[test]
     fn test_symbol_interning() {
         let cache = SymbolCache::new();
-        
+
         let s1 = cache.intern("BTCUSDT");
         let s2 = cache.intern("BTCUSDT");
-        
+
         // Should be same Arc
         assert!(Arc::ptr_eq(&s1, &s2));
-        
+
         let s3 = cache.intern("ETHUSDT");
         assert!(!Arc::ptr_eq(&s1, &s3));
     }
