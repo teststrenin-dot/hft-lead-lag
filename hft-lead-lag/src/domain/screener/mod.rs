@@ -22,7 +22,7 @@ use serde::Serialize;
 use self::shadow_fleet::{generate_grid, ShadowFleet};
 use self::shadow_trader::{ChartData, ShadowDebug};
 use self::state::{Quote, SymbolState};
-use self::utils::{calculate_ws_drift_ms, normalize_exchange_ts_ms, now_ms};
+use self::utils::{now_ms, TimeDomainSample};
 
 use crate::infrastructure::db::DbWriter;
 
@@ -119,20 +119,17 @@ impl ScreenerStore {
             return;
         }
 
-        let local_ts_ms = now_ms();
-        let exchange_ts_ms = normalize_exchange_ts_ms(timestamp_ns).unwrap_or(local_ts_ms);
-        let ingress_local_ts_ms =
-            normalize_exchange_ts_ms(local_receive_ts_ns).unwrap_or(local_ts_ms);
+        let clocks = TimeDomainSample::from_raw(timestamp_ns, local_receive_ts_ns, now_ms());
 
         let mut state = self.symbols.entry(symbol.to_string()).or_default();
 
         let state = state.value_mut();
-        let ws_drift = calculate_ws_drift_ms(local_ts_ms, timestamp_ns);
-        let ingress_ws_drift = calculate_ws_drift_ms(ingress_local_ts_ms, timestamp_ns);
+        let ws_drift = clocks.decision_ws_drift_ms();
+        let ingress_ws_drift = clocks.ingress_ws_drift_ms();
         let quote = Quote {
             bid,
             ask,
-            ts_ms: exchange_ts_ms,
+            ts_ms: clocks.exchange_event_ts_ms,
         };
 
         if !state.ingest_quote(exchange, quote, ws_drift, ingress_ws_drift) {
@@ -140,16 +137,16 @@ impl ScreenerStore {
         }
 
         if state.binance.is_none() || state.gate.is_none() {
-            state.updated_at_ms = exchange_ts_ms;
+            state.updated_at_ms = clocks.exchange_event_ts_ms;
             state.leader_exchange = exchange;
             state.lag_ms = 0.0;
             return;
         }
 
-        state.updated_at_ms = exchange_ts_ms;
-        state.update_lag(exchange_ts_ms, LAG_WINDOW_MS);
-        state.update_cycles(exchange_ts_ms, self.window_ms);
-        state.tick_shadow(exchange_ts_ms, self.window_ms);
+        state.updated_at_ms = clocks.exchange_event_ts_ms;
+        state.update_lag(clocks.exchange_event_ts_ms, LAG_WINDOW_MS);
+        state.update_cycles(clocks.exchange_event_ts_ms, self.window_ms);
+        state.tick_shadow(clocks.exchange_event_ts_ms, self.window_ms);
 
         // Fleet: lazy-init on first tick, then tick all + drain trades to db.
         let (binance_ref, gate_ref) = match (state.binance.as_ref(), state.gate.as_ref()) {
@@ -160,7 +157,7 @@ impl ScreenerStore {
             .fleet
             .get_or_insert_with(|| ShadowFleet::new(&self.fleet_configs));
         fleet.tick_all(
-            exchange_ts_ms,
+            clocks.exchange_event_ts_ms,
             binance_ref,
             gate_ref,
             &state.price_samples,
