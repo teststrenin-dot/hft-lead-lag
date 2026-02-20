@@ -46,6 +46,11 @@ impl LeadLagSignal {
     }
 }
 
+#[inline]
+fn directional_spread_bps(top: i64, bottom: i64) -> f64 {
+    LeadLagSignal::calculate_spread_bps(ticks_to_decimal(top), ticks_to_decimal(bottom))
+}
+
 /// Position state
 #[derive(Debug, Clone)]
 pub struct PositionState {
@@ -83,7 +88,7 @@ impl Default for LeadLagStrategyConfig {
         Self {
             primary_exchange: ExchangeId::BinanceFutures,
             hedge_exchange: ExchangeId::GateFutures,
-            min_entry_spread_bps: 5.0, // 0.05%
+            min_entry_spread_bps: 30.0, // 0.30%
             target_exit_spread_bps: 1.0, // 0.01%
             max_position_age_ms: 5000, // 5 seconds
             order_qty_usd: 10.0,
@@ -135,46 +140,28 @@ impl LeadLagStrategy {
         let primary = primary_books.get(symbol)?;
         let hedge = hedge_books.get(symbol)?;
 
-        // Calculate mid prices
-        let primary_mid = primary.mid_price();
-        let hedge_mid = hedge.mid_price();
+        // Binance(primary) is the oracle. If hedge quote is newer, skip this cycle:
+        // we do not trade when lead source is unclear.
+        if primary.exchange_ts_ns < hedge.exchange_ts_ns {
+            return None;
+        }
 
-        // Determine leader and calculate spread
-        let (leader, lagger, leader_bid, leader_ask, lagger_bid, lagger_ask) = 
-            if primary_mid >= hedge_mid {
-                (
-                    self.config.primary_exchange,
-                    self.config.hedge_exchange,
-                    primary.bid_price_ticks,
-                    primary.ask_price_ticks,
-                    hedge.bid_price_ticks,
-                    hedge.ask_price_ticks,
-                )
-            } else {
-                (
-                    self.config.hedge_exchange,
-                    self.config.primary_exchange,
-                    hedge.bid_price_ticks,
-                    hedge.ask_price_ticks,
-                    primary.bid_price_ticks,
-                    primary.ask_price_ticks,
-                )
-            };
-
-        let spread_bps = LeadLagSignal::calculate_spread_bps(
-            ticks_to_decimal(leader_bid),
-            ticks_to_decimal(lagger_ask),
-        );
+        // Two directional legs, no mid-price mixing:
+        // 1) bid/ask leg:  primary.bid  vs hedge.ask  (up-dislocation)
+        // 2) ask/bid leg:  hedge.bid    vs primary.ask (down-dislocation)
+        let bid_ask_bps = directional_spread_bps(primary.bid_price_ticks, hedge.ask_price_ticks);
+        let ask_bid_bps = directional_spread_bps(hedge.bid_price_ticks, primary.ask_price_ticks);
+        let spread_bps = bid_ask_bps.max(ask_bid_bps);
 
         if spread_bps >= self.config.min_entry_spread_bps {
             Some(LeadLagSignal {
                 symbol: symbol.to_string(),
-                leader,
-                lagger,
-                leader_bid_ticks: leader_bid,
-                leader_ask_ticks: leader_ask,
-                lagger_bid_ticks: lagger_bid,
-                lagger_ask_ticks: lagger_ask,
+                leader: self.config.primary_exchange,
+                lagger: self.config.hedge_exchange,
+                leader_bid_ticks: primary.bid_price_ticks,
+                leader_ask_ticks: primary.ask_price_ticks,
+                lagger_bid_ticks: hedge.bid_price_ticks,
+                lagger_ask_ticks: hedge.ask_price_ticks,
                 spread_bps,
                 timestamp_ns: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64,
             })
@@ -198,10 +185,93 @@ impl LeadLagStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use crate::domain::messages::decimal_to_ticks;
+
+    #[test]
+    fn default_config_uses_30bps_entry_threshold() {
+        let cfg = LeadLagStrategyConfig::default();
+        assert_eq!(cfg.min_entry_spread_bps, 30.0);
+    }
 
     #[test]
     fn test_spread_calculation() {
         let spread = LeadLagSignal::calculate_spread_bps(100.05, 100.00);
         assert!((spread - 5.0).abs() < 0.01);
+    }
+
+    fn ticker(symbol: &str, bid: f64, ask: f64, exchange_ts_ns: i64) -> BookTicker {
+        BookTicker::new(
+            Bytes::copy_from_slice(symbol.as_bytes()),
+            decimal_to_ticks(bid),
+            decimal_to_ticks(ask),
+            1,
+            1,
+            exchange_ts_ns,
+            exchange_ts_ns,
+        )
+    }
+
+    #[tokio::test]
+    async fn check_signal_ignores_when_primary_not_leading() {
+        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+            min_entry_spread_bps: 1.0,
+            symbols: vec!["BTCUSDT".to_string()],
+            ..Default::default()
+        });
+        strategy
+            .update_primary_book(ticker("BTCUSDT", 110.0, 111.0, 100))
+            .await;
+        strategy
+            .update_hedge_book(ticker("BTCUSDT", 100.0, 101.0, 200))
+            .await;
+
+        assert!(strategy.check_signal("BTCUSDT").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn check_signal_triggers_on_bid_ask_leg_when_primary_leads() {
+        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+            min_entry_spread_bps: 50.0,
+            symbols: vec!["BTCUSDT".to_string()],
+            ..Default::default()
+        });
+        strategy
+            .update_primary_book(ticker("BTCUSDT", 110.0, 111.0, 200))
+            .await;
+        strategy
+            .update_hedge_book(ticker("BTCUSDT", 100.0, 101.0, 100))
+            .await;
+
+        let signal = strategy
+            .check_signal("BTCUSDT")
+            .await
+            .expect("bid/ask leg should trigger");
+        assert!(signal.spread_bps > 50.0);
+        assert_eq!(signal.leader, ExchangeId::BinanceFutures);
+        assert_eq!(signal.lagger, ExchangeId::GateFutures);
+    }
+
+    #[tokio::test]
+    async fn check_signal_triggers_on_ask_bid_leg_when_primary_leads() {
+        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+            min_entry_spread_bps: 20.0,
+            symbols: vec!["BTCUSDT".to_string()],
+            ..Default::default()
+        });
+        strategy
+            .update_primary_book(ticker("BTCUSDT", 100.0, 100.5, 200))
+            .await;
+        strategy
+            .update_hedge_book(ticker("BTCUSDT", 101.0, 101.5, 100))
+            .await;
+
+        let signal = strategy
+            .check_signal("BTCUSDT")
+            .await
+            .expect("ask/bid leg should trigger");
+        assert!(signal.spread_bps > 20.0);
+        assert_eq!(signal.leader, ExchangeId::BinanceFutures);
+        assert_eq!(signal.lagger, ExchangeId::GateFutures);
     }
 }

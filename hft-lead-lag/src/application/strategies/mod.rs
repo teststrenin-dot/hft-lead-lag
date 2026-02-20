@@ -9,6 +9,9 @@ use crate::application::services::{LeadLagSignal, LeadLagStrategy, LeadLagStrate
 use crate::config::{ConfigManager, ExchangeId as ConfigExchangeId, StrategyKind};
 use crate::domain::{BookTicker, ExchangeId};
 
+const MIN_TRIGGER_SPREAD_BPS: f64 = 25.0;
+const MAX_TRIGGER_SPREAD_BPS: f64 = 100.0;
+
 /// Normalized signal type consumed by the runtime event loop.
 #[derive(Debug, Clone)]
 pub struct StrategySignal {
@@ -59,7 +62,9 @@ fn resolve_lead_lag_config(
     if let Some(file_config) = config_manager.lead_lag_config() {
         config.primary_exchange = map_exchange_id(file_config.primary_exchange);
         config.hedge_exchange = map_exchange_id(file_config.hedge_exchange);
-        config.min_entry_spread_bps = file_config.trigger_spread_bps;
+        config.min_entry_spread_bps = file_config
+            .trigger_spread_bps
+            .clamp(MIN_TRIGGER_SPREAD_BPS, MAX_TRIGGER_SPREAD_BPS);
         config.max_position_age_ms = file_config.max_position_age_ms;
     }
     config
@@ -117,6 +122,17 @@ impl From<LeadLagSignal> for StrategySignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn write_temp_config(name: &str, content: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "hft-lead-lag-strategy-config-{name}-{}.toml",
+            std::process::id()
+        ));
+        fs::write(&path, content).expect("write temp config");
+        path
+    }
 
     fn ticker(symbol: &str, bid: i64, ask: i64) -> BookTicker {
         BookTicker::new(
@@ -148,5 +164,63 @@ mod tests {
         assert_eq!(signal.symbol, "BTCUSDT");
         assert!(signal.spread_bps > 1.0);
         assert!(signal.context.contains("leader="));
+    }
+
+    #[test]
+    fn resolve_lead_lag_config_clamps_trigger_spread_low_to_25bps() {
+        let path = write_temp_config(
+            "clamp-low",
+            r#"
+[binance]
+enabled = true
+blacklist = []
+
+[gate]
+enabled = true
+blacklist = []
+
+[lead_lag]
+primary_exchange = "binance"
+hedge_exchange = "gate"
+trigger_spread_bps = 10.0
+max_position_age_ms = 5000
+symbols = ["BTCUSDT"]
+"#,
+        );
+        let manager =
+            crate::config::ConfigManager::from_file(path.to_str().expect("utf-8 temp path"))
+                .expect("load config");
+        let runtime = resolve_lead_lag_config(&manager, vec!["BTCUSDT".to_string()]);
+        assert_eq!(runtime.min_entry_spread_bps, 25.0);
+        fs::remove_file(path).expect("cleanup temp config");
+    }
+
+    #[test]
+    fn resolve_lead_lag_config_clamps_trigger_spread_high_to_100bps() {
+        let path = write_temp_config(
+            "clamp-high",
+            r#"
+[binance]
+enabled = true
+blacklist = []
+
+[gate]
+enabled = true
+blacklist = []
+
+[lead_lag]
+primary_exchange = "binance"
+hedge_exchange = "gate"
+trigger_spread_bps = 120.0
+max_position_age_ms = 5000
+symbols = ["BTCUSDT"]
+"#,
+        );
+        let manager =
+            crate::config::ConfigManager::from_file(path.to_str().expect("utf-8 temp path"))
+                .expect("load config");
+        let runtime = resolve_lead_lag_config(&manager, vec!["BTCUSDT".to_string()]);
+        assert_eq!(runtime.min_entry_spread_bps, 100.0);
+        fs::remove_file(path).expect("cleanup temp config");
     }
 }

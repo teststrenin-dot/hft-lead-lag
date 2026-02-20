@@ -28,7 +28,7 @@ max_position_size_usd = 10.0
 [lead_lag]
 primary_exchange = "binance"
 hedge_exchange = "gate"
-trigger_spread_bps = 5.0
+trigger_spread_bps = 30.0
 max_position_age_ms = 5000
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
