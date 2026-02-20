@@ -25,10 +25,23 @@ use crate::infrastructure::exchanges::common::{
 /// Gate.io Futures WebSocket endpoint
 const GATE_WS_ENDPOINT: &str = "wss://fx-ws.gateio.ws/v4/ws/usdt";
 /// Bounded fan-in channel capacity (protects against OOM on 3.8 GiB server)
-const MSG_CHANNEL_CAPACITY: usize = 10_000;
+const MSG_CHANNEL_CAPACITY: usize = 25_000;
+const MIN_MSG_CHANNEL_CAPACITY: usize = 1_024;
+const MSG_CHANNEL_CAPACITY_ENV: &str = "GATE_MSG_CHANNEL_CAPACITY";
 
 /// Cumulative count of market-data messages dropped due to channel backpressure.
 static DROPPED_MESSAGES: AtomicU64 = AtomicU64::new(0);
+
+fn resolve_msg_channel_capacity(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(MSG_CHANNEL_CAPACITY)
+        .max(MIN_MSG_CHANNEL_CAPACITY)
+}
+
+fn configured_msg_channel_capacity() -> usize {
+    let raw = std::env::var(MSG_CHANNEL_CAPACITY_ENV).ok();
+    resolve_msg_channel_capacity(raw.as_deref())
+}
 
 /// Gate.io Futures market data connector
 pub struct GateMarketData {
@@ -234,7 +247,8 @@ impl MarketDataStream for GateMarketData {
             mpsc::UnboundedSender<Message>,
             mpsc::UnboundedReceiver<Message>,
         ) = mpsc::unbounded_channel();
-        let (msg_tx, msg_rx) = mpsc::channel::<StampedBytes>(MSG_CHANNEL_CAPACITY);
+        let msg_channel_capacity = configured_msg_channel_capacity();
+        let (msg_tx, msg_rx) = mpsc::channel::<StampedBytes>(msg_channel_capacity);
 
         let auth_payload = if let (Some(key), Some(secret)) = (&self.api_key, &self.api_secret) {
             Some(Self::build_auth_payload(key, secret))
@@ -377,7 +391,10 @@ impl MarketDataStream for GateMarketData {
         self.msg_rx = Some(msg_rx);
         self.is_authenticated = is_auth;
 
-        info!("Connected to Gate.io Futures WebSocket");
+        info!(
+            "Connected to Gate.io Futures WebSocket (msg_channel_capacity={})",
+            msg_channel_capacity
+        );
         Ok(())
     }
 
@@ -666,5 +683,19 @@ mod tests {
         }"#;
         let trade = GateMarketData::parse_trade_static(payload, &cache, 123).expect("trade parses");
         assert!(!trade.is_buyer_maker);
+    }
+
+    #[test]
+    fn resolve_msg_channel_capacity_applies_default_parse_and_min_bound() {
+        assert_eq!(resolve_msg_channel_capacity(None), MSG_CHANNEL_CAPACITY);
+        assert_eq!(
+            resolve_msg_channel_capacity(Some("not-a-number")),
+            MSG_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            resolve_msg_channel_capacity(Some("64")),
+            MIN_MSG_CHANNEL_CAPACITY
+        );
+        assert_eq!(resolve_msg_channel_capacity(Some("25000")), 25_000);
     }
 }

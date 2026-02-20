@@ -32,6 +32,13 @@ enum SymbolReconcileOutcome {
     BothMissing,
 }
 
+struct RuntimeUniverse {
+    common_symbols: Vec<String>,
+    strategy_symbols: Vec<String>,
+    screener_symbols: Vec<String>,
+    gate_vol_map: std::collections::HashMap<String, f64>,
+}
+
 fn fallback_symbols() -> Vec<String> {
     vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
 }
@@ -65,14 +72,19 @@ fn rebuild_latest_map(
     latest: &mut std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
     first: hft_lead_lag::domain::BookTicker,
     drained: Vec<hft_lead_lag::domain::BookTicker>,
-) {
-    latest.clear();
+) -> std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> {
+    let mut batch_latest: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> =
+        std::collections::HashMap::new();
     let first_symbol = String::from_utf8_lossy(&first.symbol).to_string();
-    latest.insert(first_symbol, first);
+    batch_latest.insert(first_symbol, first);
     for ticker in drained {
         let symbol = String::from_utf8_lossy(&ticker.symbol).to_string();
-        latest.insert(symbol, ticker);
+        batch_latest.insert(symbol, ticker);
     }
+    for (symbol, ticker) in &batch_latest {
+        latest.insert(symbol.clone(), ticker.clone());
+    }
+    batch_latest
 }
 
 fn select_runtime_symbols(common_symbols: &[String]) -> (Vec<String>, Vec<String>, bool) {
@@ -102,12 +114,26 @@ fn compute_common_symbols(
 }
 
 fn strategy_ticks_in_order<'a>(
-    strategy_symbols: &'a [String],
+    strategy_symbols: &'a [&'a str],
     latest: &'a std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
 ) -> impl Iterator<Item = &'a hft_lead_lag::domain::BookTicker> + 'a {
     strategy_symbols
         .iter()
-        .filter_map(|symbol| latest.get(symbol))
+        .filter_map(|symbol| latest.get(*symbol))
+}
+
+fn updated_symbols_from_batch(
+    first: &hft_lead_lag::domain::BookTicker,
+    drained: &[hft_lead_lag::domain::BookTicker],
+) -> Vec<String> {
+    let mut symbols = Vec::with_capacity(drained.len() + 1);
+    symbols.push(String::from_utf8_lossy(&first.symbol).to_string());
+    for ticker in drained {
+        symbols.push(String::from_utf8_lossy(&ticker.symbol).to_string());
+    }
+    symbols.sort_unstable();
+    symbols.dedup();
+    symbols
 }
 
 fn ingest_latest_batch<F: Fn() -> i64>(
@@ -153,8 +179,8 @@ fn process_exchange_batch<F: Fn() -> i64>(
     drained: Vec<hft_lead_lag::domain::BookTicker>,
     ctx: &mut BatchIngestContext<'_, F>,
 ) {
-    rebuild_latest_map(latest, first, drained);
-    ingest_latest_batch(latest, ctx);
+    let updated_batch = rebuild_latest_map(latest, first, drained);
+    ingest_latest_batch(&updated_batch, ctx);
 }
 
 #[derive(Debug)]
@@ -234,6 +260,39 @@ impl ExchangeSide {
             Self::Gate => warn!("Gate data error: {}", error),
         }
     }
+
+    fn mark_alive(self, health: &HealthState, now_ms: i64) {
+        match self {
+            Self::Binance => {
+                health.binance_connected.store(true, Ordering::Relaxed);
+                health.binance_last_tick_ms.store(now_ms, Ordering::Relaxed);
+            }
+            Self::Gate => {
+                health.gate_connected.store(true, Ordering::Relaxed);
+                health.gate_last_tick_ms.store(now_ms, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn maybe_mark_disconnected(self, health: &HealthState, error: &hft_lead_lag::domain::ExchangeError) {
+        let is_connectivity_error = matches!(
+            error,
+            hft_lead_lag::domain::ExchangeError::WebSocketError(_)
+                | hft_lead_lag::domain::ExchangeError::ConnectionClosed(_)
+                | hft_lead_lag::domain::ExchangeError::Timeout(_)
+        );
+        if !is_connectivity_error {
+            return;
+        }
+        match self {
+            Self::Binance => {
+                health.binance_connected.store(false, Ordering::Relaxed);
+            }
+            Self::Gate => {
+                health.gate_connected.store(false, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 impl EventLoopState {
@@ -265,8 +324,9 @@ impl EventLoopState {
         drained: Vec<hft_lead_lag::domain::BookTicker>,
         screener: &ScreenerStore,
         ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
-    ) -> Result<(), hft_lead_lag::domain::ExchangeError> {
+    ) -> Result<Vec<String>, hft_lead_lag::domain::ExchangeError> {
         let ticker = result?;
+        let updated_symbols = updated_symbols_from_batch(&ticker, &drained);
         let mut ctx = BatchIngestContext {
             exchange: side.exchange_name(),
             ticker_count: &mut self.ticker_count,
@@ -283,23 +343,30 @@ impl EventLoopState {
                 process_exchange_batch(&mut self.latest_gt, ticker, drained, &mut ctx)
             }
         }
-        Ok(())
+        Ok(updated_symbols)
     }
 
     async fn update_strategy_books(
         &self,
         side: ExchangeSide,
         strategy: &dyn RuntimeStrategy,
-        strategy_symbols: &[String],
+        updated_symbols: &[String],
+        strategy_symbol_set: &std::collections::HashSet<&str>,
     ) {
+        let symbols_for_side: Vec<&str> = updated_symbols
+            .iter()
+            .map(String::as_str)
+            .filter(|symbol| strategy_symbol_set.contains(*symbol))
+            .collect();
+
         match side {
             ExchangeSide::Binance => {
-                for ticker in strategy_ticks_in_order(strategy_symbols, &self.latest_bn) {
+                for ticker in strategy_ticks_in_order(&symbols_for_side, &self.latest_bn) {
                     strategy.on_primary_book(ticker.clone()).await;
                 }
             }
             ExchangeSide::Gate => {
-                for ticker in strategy_ticks_in_order(strategy_symbols, &self.latest_gt) {
+                for ticker in strategy_ticks_in_order(&symbols_for_side, &self.latest_gt) {
                     strategy.on_hedge_book(ticker.clone()).await;
                 }
             }
@@ -407,47 +474,263 @@ async fn drain_stale_ticks(binance: &mut BinanceMarketData, gate: &mut GateMarke
     }
 }
 
+async fn fetch_volume_tickers(min_volume_usd: f64) -> (Vec<Ticker24h>, Vec<Ticker24h>) {
+    info!("Fetching 24h volume data for symbol filtering");
+    let binance_rest = BinanceRestClient::new();
+    let gate_rest = GateRestClient::new();
+    let (binance_tickers_result, gate_tickers_result) = tokio::join!(
+        binance_rest.get_tickers_with_volume(min_volume_usd),
+        gate_rest.get_tickers_with_volume(min_volume_usd)
+    );
+
+    let binance_tickers = match binance_tickers_result {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("Failed to get Binance tickers: {}", e);
+            Vec::new()
+        }
+    };
+    let gate_tickers = match gate_tickers_result {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("Failed to get Gate tickers: {}", e);
+            Vec::new()
+        }
+    };
+    (binance_tickers, gate_tickers)
+}
+
+fn build_runtime_universe(
+    config_manager: &ConfigManager,
+    min_volume_usd: f64,
+    binance_tickers: Vec<Ticker24h>,
+    gate_tickers: Vec<Ticker24h>,
+) -> RuntimeUniverse {
+    let binance_symbols: Vec<String> = binance_tickers.iter().map(|t| t.symbol.clone()).collect();
+    let gate_symbols: Vec<String> = gate_tickers.iter().map(|t| t.symbol.clone()).collect();
+    let gate_vol_map: std::collections::HashMap<String, f64> = gate_tickers
+        .iter()
+        .map(|t| (t.symbol.clone(), t.quote_volume))
+        .collect();
+    let (binance_symbols, gate_symbols, reconcile_outcome) =
+        reconcile_volume_symbols(binance_symbols, gate_symbols);
+
+    match reconcile_outcome {
+        SymbolReconcileOutcome::BinanceMissing => {
+            warn!("Binance volume fetch failed — cannot safely copy Gate symbols (different listing). Using BTC/ETH fallback for both.");
+        }
+        SymbolReconcileOutcome::GateMissing => {
+            warn!("Gate volume fetch failed — cannot safely copy Binance symbols (different listing). Using BTC/ETH fallback for both.");
+        }
+        SymbolReconcileOutcome::BothMissing => {
+            warn!("No symbols from REST; using BTC/ETH fallback");
+        }
+        SymbolReconcileOutcome::Ok => {}
+    }
+
+    info!(
+        "Binance symbols with 24h vol >= ${:.0}M: {}",
+        min_volume_usd / 1_000_000.0,
+        binance_symbols.len()
+    );
+    info!(
+        "Gate symbols with 24h vol >= ${:.0}M: {}",
+        min_volume_usd / 1_000_000.0,
+        gate_symbols.len()
+    );
+
+    let blacklist: std::collections::HashSet<&str> = config_manager
+        .binance_blacklist()
+        .iter()
+        .chain(config_manager.gate_blacklist().iter())
+        .map(|s| s.as_str())
+        .chain(STRATEGY_BLACKLIST.iter().copied())
+        .collect();
+    let common_symbols = compute_common_symbols(&binance_symbols, &gate_symbols, &blacklist);
+
+    if !blacklist.is_empty() {
+        info!("Blacklisted symbols: {:?}", blacklist);
+    }
+    info!("Common symbols: {}", common_symbols.len());
+
+    let (strategy_symbols, screener_symbols, used_fallback) =
+        select_runtime_symbols(&common_symbols);
+    if used_fallback {
+        warn!("No common symbols found! Using fallback...");
+    }
+
+    info!(
+        "Strategy symbols: {} | Screener symbols: {} | WS coverage Binance={} Gate={}",
+        strategy_symbols.len(),
+        screener_symbols.len(),
+        binance_symbols.len(),
+        gate_symbols.len()
+    );
+
+    RuntimeUniverse {
+        common_symbols,
+        strategy_symbols,
+        screener_symbols,
+        gate_vol_map,
+    }
+}
+
+async fn configure_and_connect_exchanges(
+    config_manager: &ConfigManager,
+    binance: &mut BinanceMarketData,
+    gate: &mut GateMarketData,
+    health_state: &HealthState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(creds) = config_manager.binance_credentials() {
+        binance.set_credentials(creds.api_key.clone(), creds.api_secret.clone());
+        info!("Binance credentials configured");
+    }
+    if let Some(creds) = config_manager.gate_credentials() {
+        gate.set_credentials(creds.api_key.clone(), creds.api_secret.clone());
+        info!("Gate credentials configured");
+    }
+
+    info!("Connecting to Binance Futures...");
+    if let Err(e) = binance.connect().await {
+        error!("Failed to connect to Binance: {}", e);
+        return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+    }
+    health_state
+        .binance_connected
+        .store(true, Ordering::Relaxed);
+    health_state
+        .binance_last_tick_ms
+        .store(EventLoopState::now_ms(), Ordering::Relaxed);
+
+    info!("Connecting to Gate.io Futures...");
+    if let Err(e) = gate.connect().await {
+        error!("Failed to connect to Gate: {}", e);
+        return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+    }
+    health_state.gate_connected.store(true, Ordering::Relaxed);
+    health_state
+        .gate_last_tick_ms
+        .store(EventLoopState::now_ms(), Ordering::Relaxed);
+    Ok(())
+}
+
+fn init_screener_persistence(
+    screener: &mut ScreenerStore,
+    db_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = hft_lead_lag::infrastructure::db::open_db(db_path)?;
+    hft_lead_lag::infrastructure::db::upsert_configs(&conn, screener.fleet_configs())?;
+    info!(
+        "Seeded {} fleet configs into {}",
+        screener.fleet_configs().len(),
+        db_path.display()
+    );
+    let db_writer = hft_lead_lag::infrastructure::db::spawn_writer(db_path);
+    screener.set_db_writer(db_writer);
+    Ok(())
+}
+
+async fn start_api_servers(
+    min_volume_usd: f64,
+    screener: ScreenerStore,
+    health_state: Arc<HealthState>,
+) -> Result<tokio::sync::broadcast::Sender<MarketDataEvent>, Box<dyn std::error::Error + Send + Sync>>
+{
+    let http_server = HttpServer::with_runtime(
+        HttpServerConfig::default(),
+        min_volume_usd,
+        screener,
+        health_state,
+    );
+    let http_listener = tokio::net::TcpListener::bind(http_server.bind_address()).await?;
+    info!("HTTP server bound on {}", http_server.bind_address());
+
+    let ws_server = MarketDataServer::new(WsServerConfig::default());
+    let ws_tx = ws_server.transmitter();
+    let ws_listener = tokio::net::TcpListener::bind(ws_server.bind_address()).await?;
+    info!("WS server bound on {}", ws_server.bind_address());
+
+    tokio::spawn(async move {
+        if let Err(e) = http_server.serve(http_listener).await {
+            error!("HTTP server failed: {}", e);
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = ws_server.serve(ws_listener).await {
+            error!("WS server failed: {}", e);
+        }
+    });
+
+    Ok(ws_tx)
+}
+
 async fn run_event_loop(
     binance: &mut BinanceMarketData,
     gate: &mut GateMarketData,
     strategy: &dyn RuntimeStrategy,
     strategy_symbols: &[String],
     screener: &ScreenerStore,
+    health_state: &HealthState,
     ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
 ) -> ! {
     let mut state = EventLoopState::new();
+    let strategy_symbol_set: std::collections::HashSet<&str> =
+        strategy_symbols.iter().map(String::as_str).collect();
 
     loop {
         tokio::select! {
             result = binance.recv_book_ticker() => {
-                if let Err(e) = state.process_exchange_result(
+                match state.process_exchange_result(
                     ExchangeSide::Binance,
                     result,
                     binance.drain_book_tickers(),
                     screener,
                     ws_tx,
                 ) {
-                    ExchangeSide::Binance.log_data_error(&e);
-                } else {
-                    state
-                        .update_strategy_books(ExchangeSide::Binance, strategy, strategy_symbols)
-                        .await;
+                    Ok(updated_symbols) => {
+                        ExchangeSide::Binance.mark_alive(health_state, EventLoopState::now_ms());
+                        state
+                            .update_strategy_books(
+                                ExchangeSide::Binance,
+                                strategy,
+                                &updated_symbols,
+                                &strategy_symbol_set,
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        ExchangeSide::Binance.maybe_mark_disconnected(health_state, &e);
+                        ExchangeSide::Binance.log_data_error(&e);
+                    }
                 }
             }
 
             result = gate.recv_book_ticker() => {
-                if let Err(e) = state.process_exchange_result(
+                match state.process_exchange_result(
                     ExchangeSide::Gate,
                     result,
                     gate.drain_book_tickers(),
                     screener,
                     ws_tx,
                 ) {
-                    ExchangeSide::Gate.log_data_error(&e);
-                } else {
-                    state
-                        .update_strategy_books(ExchangeSide::Gate, strategy, strategy_symbols)
+                    Ok(updated_symbols) => {
+                        ExchangeSide::Gate.mark_alive(health_state, EventLoopState::now_ms());
+                        state
+                            .update_strategy_books(
+                                ExchangeSide::Gate,
+                                strategy,
+                                &updated_symbols,
+                                &strategy_symbol_set,
+                            )
                         .await;
+                    }
+                    Err(e) => {
+                        ExchangeSide::Gate.maybe_mark_disconnected(health_state, &e);
+                        ExchangeSide::Gate.log_data_error(&e);
+                    }
                 }
             }
 
@@ -470,149 +753,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load configuration from environment
     let config_manager = ConfigManager::from_env();
 
-    // Initialize REST clients for volume filtering
-    info!("Fetching 24h volume data for symbol filtering");
-
-    let binance_rest = BinanceRestClient::new();
-    let gate_rest = GateRestClient::new();
-
-    // Get symbols with sufficient volume from both exchanges
-    let (binance_tickers_result, gate_tickers_result) = tokio::join!(
-        binance_rest.get_tickers_with_volume(MIN_VOLUME_USD),
-        gate_rest.get_tickers_with_volume(MIN_VOLUME_USD)
+    let (binance_tickers, gate_tickers) = fetch_volume_tickers(MIN_VOLUME_USD).await;
+    let universe = build_runtime_universe(
+        &config_manager,
+        MIN_VOLUME_USD,
+        binance_tickers,
+        gate_tickers,
     );
-
-    let binance_tickers: Vec<Ticker24h> = match binance_tickers_result {
-        Ok(t) => t,
-        Err(e) => {
-            warn!("Failed to get Binance tickers: {}", e);
-            Vec::new()
-        }
-    };
-    let gate_tickers: Vec<Ticker24h> = match gate_tickers_result {
-        Ok(t) => t,
-        Err(e) => {
-            warn!("Failed to get Gate tickers: {}", e);
-            Vec::new()
-        }
-    };
-    let binance_symbols: Vec<String> = binance_tickers.iter().map(|t| t.symbol.clone()).collect();
-    let gate_symbols: Vec<String> = gate_tickers.iter().map(|t| t.symbol.clone()).collect();
-    // Build volume lookup (Gate volume for execution venue)
-    let gate_vol_map: std::collections::HashMap<String, f64> = gate_tickers
-        .iter()
-        .map(|t| (t.symbol.clone(), t.quote_volume))
-        .collect();
-    let (binance_symbols, gate_symbols, reconcile_outcome) =
-        reconcile_volume_symbols(binance_symbols, gate_symbols);
-    match reconcile_outcome {
-        SymbolReconcileOutcome::BinanceMissing => {
-            warn!("Binance volume fetch failed — cannot safely copy Gate symbols (different listing). Using BTC/ETH fallback for both.");
-        }
-        SymbolReconcileOutcome::GateMissing => {
-            warn!("Gate volume fetch failed — cannot safely copy Binance symbols (different listing). Using BTC/ETH fallback for both.");
-        }
-        SymbolReconcileOutcome::BothMissing => {
-            warn!("No symbols from REST; using BTC/ETH fallback");
-        }
-        SymbolReconcileOutcome::Ok => {}
-    }
-
-    info!(
-        "Binance symbols with 24h vol >= ${:.0}M: {}",
-        MIN_VOLUME_USD / 1_000_000.0,
-        binance_symbols.len()
-    );
-    info!(
-        "Gate symbols with 24h vol >= ${:.0}M: {}",
-        MIN_VOLUME_USD / 1_000_000.0,
-        gate_symbols.len()
-    );
-
-    // Find common symbols (available on both exchanges with sufficient volume)
-    let blacklist: std::collections::HashSet<&str> = config_manager
-        .binance_blacklist()
-        .iter()
-        .chain(config_manager.gate_blacklist().iter())
-        .map(|s| s.as_str())
-        .chain(STRATEGY_BLACKLIST.iter().copied())
-        .collect();
-    let common_symbols = compute_common_symbols(&binance_symbols, &gate_symbols, &blacklist);
-
-    if !blacklist.is_empty() {
-        info!("Blacklisted symbols: {:?}", blacklist);
-    }
-    info!("Common symbols: {}", common_symbols.len());
-
-    // Strategy fleet runs on all common symbols.
-    let (strategy_symbols, screener_symbols, used_fallback) =
-        select_runtime_symbols(&common_symbols);
-    if used_fallback {
-        warn!("No common symbols found! Using fallback...");
-    }
-
-    info!(
-        "Strategy symbols: {} | Screener symbols: {} | WS coverage Binance={} Gate={}",
-        strategy_symbols.len(),
-        screener_symbols.len(),
-        binance_symbols.len(),
-        gate_symbols.len()
-    );
+    let RuntimeUniverse {
+        common_symbols,
+        strategy_symbols,
+        screener_symbols,
+        gate_vol_map,
+    } = universe;
 
     // Initialize exchange connectors
     let mut binance = BinanceMarketData::new();
     let mut gate = GateMarketData::new();
     let health_state = Arc::new(HealthState::new());
-
-    // Set credentials if available
-    if let Some(creds) = config_manager.binance_credentials() {
-        binance.set_credentials(creds.api_key.clone(), creds.api_secret.clone());
-        info!("Binance credentials configured");
-    }
-
-    if let Some(creds) = config_manager.gate_credentials() {
-        gate.set_credentials(creds.api_key.clone(), creds.api_secret.clone());
-        info!("Gate credentials configured");
-    }
-
-    // Connect to exchanges
-    info!("Connecting to Binance Futures...");
-    if let Err(e) = binance.connect().await {
-        error!("Failed to connect to Binance: {}", e);
-        return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
-    }
-    health_state
-        .binance_connected
-        .store(true, Ordering::Relaxed);
-
-    info!("Connecting to Gate.io Futures...");
-    if let Err(e) = gate.connect().await {
-        error!("Failed to connect to Gate: {}", e);
-        return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
-    }
-    health_state.gate_connected.store(true, Ordering::Relaxed);
+    configure_and_connect_exchanges(&config_manager, &mut binance, &mut gate, health_state.as_ref())
+        .await?;
 
     // Start external APIs early so checkpoint endpoints are always available.
     let mut screener = ScreenerStore::default();
 
     // Initialize fleet persistence (SQLite WAL mode, async batch writes).
     let db_path = std::path::Path::new("data/optimizer.db");
-    if let Some(parent) = db_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    {
-        let conn = hft_lead_lag::infrastructure::db::open_db(db_path)
-            .expect("failed to open optimizer db");
-        hft_lead_lag::infrastructure::db::upsert_configs(&conn, screener.fleet_configs())
-            .expect("failed to seed configs");
-        info!(
-            "Seeded {} fleet configs into {}",
-            screener.fleet_configs().len(),
-            db_path.display()
-        );
-    }
-    let db_writer = hft_lead_lag::infrastructure::db::spawn_writer(db_path);
-    screener.set_db_writer(db_writer);
+    init_screener_persistence(&mut screener, db_path)?;
 
     // Seed 24h volume from Gate REST data
     let vol_pairs: Vec<(String, f64)> = common_symbols
@@ -620,32 +787,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(|s| (s.clone(), gate_vol_map.get(s).copied().unwrap_or(0.0)))
         .collect();
     screener.set_volumes(&vol_pairs);
-    let http_server = HttpServer::with_runtime(
-        HttpServerConfig::default(),
-        MIN_VOLUME_USD,
-        screener.clone(),
-        health_state.clone(),
-    );
-
-    // Bind listeners before spawning to fail fast on "Address already in use"
-    let http_listener = tokio::net::TcpListener::bind(http_server.bind_address()).await?;
-    info!("HTTP server bound on {}", http_server.bind_address());
-
-    let ws_server = MarketDataServer::new(WsServerConfig::default());
-    let ws_tx = ws_server.transmitter();
-    let ws_listener = tokio::net::TcpListener::bind(ws_server.bind_address()).await?;
-    info!("WS server bound on {}", ws_server.bind_address());
-
-    tokio::spawn(async move {
-        if let Err(e) = http_server.serve(http_listener).await {
-            error!("HTTP server failed: {}", e);
-        }
-    });
-    tokio::spawn(async move {
-        if let Err(e) = ws_server.serve(ws_listener).await {
-            error!("WS server failed: {}", e);
-        }
-    });
+    let ws_tx = start_api_servers(MIN_VOLUME_USD, screener.clone(), health_state.clone()).await?;
 
     // Subscribe to screener symbols for live WS ticks.
     let (binance_subscribed, binance_subscribe_errors) = match binance
@@ -692,490 +834,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         strategy.as_ref(),
         &strategy_symbols,
         &screener,
+        health_state.as_ref(),
         &ws_tx,
     )
     .await
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::path::PathBuf;
-
-    fn write_temp_config(name: &str, content: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "hft-lead-lag-main-{name}-{}.toml",
-            std::process::id()
-        ));
-        fs::write(&path, content).expect("write temp config");
-        path
-    }
-
-    #[test]
-    fn reconcile_volume_symbols_uses_fallback_when_binance_missing() {
-        let (binance, gate, outcome) =
-            reconcile_volume_symbols(Vec::new(), vec!["XRPUSDT".to_string()]);
-        assert_eq!(outcome, SymbolReconcileOutcome::BinanceMissing);
-        assert_eq!(binance, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
-        assert_eq!(gate, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
-    }
-
-    #[test]
-    fn reconcile_volume_symbols_uses_fallback_when_gate_missing() {
-        let (binance, gate, outcome) =
-            reconcile_volume_symbols(vec!["XRPUSDT".to_string()], Vec::new());
-        assert_eq!(outcome, SymbolReconcileOutcome::GateMissing);
-        assert_eq!(binance, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
-        assert_eq!(gate, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
-    }
-
-    #[test]
-    fn reconcile_volume_symbols_keeps_lists_when_both_present() {
-        let (binance, gate, outcome) =
-            reconcile_volume_symbols(vec!["XRPUSDT".to_string()], vec!["XRPUSDT".to_string()]);
-        assert_eq!(outcome, SymbolReconcileOutcome::Ok);
-        assert_eq!(binance, vec!["XRPUSDT".to_string()]);
-        assert_eq!(gate, vec!["XRPUSDT".to_string()]);
-    }
-
-    #[test]
-    fn reconcile_volume_symbols_uses_fallback_when_both_missing() {
-        let (binance, gate, outcome) = reconcile_volume_symbols(Vec::new(), Vec::new());
-        assert_eq!(outcome, SymbolReconcileOutcome::BothMissing);
-        assert_eq!(binance, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
-        assert_eq!(gate, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
-    }
-
-    #[test]
-    fn event_loop_metrics_returns_no_data_when_empty() {
-        let mut metrics = EventLoopMetrics::new();
-        assert_eq!(metrics.drift_stats_string_and_reset(), "no_data");
-    }
-
-    #[test]
-    fn event_loop_metrics_formats_stats_and_clears_samples() {
-        let mut metrics = EventLoopMetrics::new();
-        metrics.record_tick_drift(130, 100_000_000);
-        metrics.record_tick_drift(120, 110_000_000);
-        metrics.record_tick_drift(130, 110_000_000);
-
-        assert_eq!(
-            metrics.drift_stats_string_and_reset(),
-            "n=3 avg=20ms p50=20ms p95=30ms p99=30ms max=30ms"
-        );
-        assert_eq!(metrics.drift_stats_string_and_reset(), "no_data");
-    }
-
-    #[test]
-    fn event_loop_metrics_snapshot_rolls_interval_count() {
-        let mut metrics = EventLoopMetrics::new();
-        assert_eq!(metrics.snapshot_and_roll_status(10), 10);
-        assert_eq!(metrics.snapshot_and_roll_status(16), 6);
-        assert_eq!(metrics.snapshot_and_roll_status(8), 0);
-    }
-
-    #[tokio::test]
-    async fn event_loop_state_starts_clean() {
-        let mut state = EventLoopState::new();
-        assert_eq!(state.ticker_count, 0);
-        assert_eq!(state.signal_count, 0);
-        assert!(state.latest_bn.is_empty());
-        assert!(state.latest_gt.is_empty());
-        assert_eq!(state.metrics.drift_stats_string_and_reset(), "no_data");
-    }
-
-    #[test]
-    fn event_loop_state_now_ms_is_positive() {
-        assert!(EventLoopState::now_ms() > 0);
-    }
-
-    #[tokio::test]
-    async fn event_loop_state_process_exchange_result_updates_binance_map() {
-        let mut state = EventLoopState::new();
-        let screener = ScreenerStore::default();
-        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(8);
-
-        let result = state.process_exchange_result(
-            ExchangeSide::Binance,
-            Ok(test_ticker("BTCUSDT", 100_000_000)),
-            vec![test_ticker("ETHUSDT", 110_000_000)],
-            &screener,
-            &ws_tx,
-        );
-
-        assert!(result.is_ok());
-        assert_eq!(state.latest_bn.len(), 2);
-        assert!(state.latest_gt.is_empty());
-        assert_eq!(state.ticker_count, 2);
-    }
-
-    #[tokio::test]
-    async fn event_loop_state_process_exchange_result_propagates_error() {
-        let mut state = EventLoopState::new();
-        let screener = ScreenerStore::default();
-        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(8);
-
-        let result = state.process_exchange_result(
-            ExchangeSide::Gate,
-            Err(hft_lead_lag::domain::ExchangeError::Timeout(
-                "test".to_string(),
-            )),
-            Vec::new(),
-            &screener,
-            &ws_tx,
-        );
-
-        assert!(matches!(
-            result,
-            Err(hft_lead_lag::domain::ExchangeError::Timeout(msg)) if msg == "test"
-        ));
-        assert_eq!(state.ticker_count, 0);
-        assert!(state.latest_bn.is_empty());
-        assert!(state.latest_gt.is_empty());
-    }
-
-    fn test_ticker(symbol: &str, exchange_ts_ns: i64) -> hft_lead_lag::domain::BookTicker {
-        hft_lead_lag::domain::BookTicker::new(
-            bytes::Bytes::copy_from_slice(symbol.as_bytes()),
-            100,
-            101,
-            1,
-            1,
-            exchange_ts_ns,
-            exchange_ts_ns + 1,
-        )
-    }
-
-    #[test]
-    fn rebuild_latest_map_clears_old_entries() {
-        let mut latest = std::collections::HashMap::new();
-        latest.insert("OLD".to_string(), test_ticker("OLD", 1));
-
-        rebuild_latest_map(&mut latest, test_ticker("BTCUSDT", 10), Vec::new());
-
-        assert!(!latest.contains_key("OLD"));
-        assert!(latest.contains_key("BTCUSDT"));
-    }
-
-    #[test]
-    fn rebuild_latest_map_keeps_latest_ticker_per_symbol() {
-        let mut latest = std::collections::HashMap::new();
-        rebuild_latest_map(
-            &mut latest,
-            test_ticker("BTCUSDT", 10),
-            vec![test_ticker("BTCUSDT", 20), test_ticker("ETHUSDT", 30)],
-        );
-
-        assert_eq!(latest.len(), 2);
-        assert_eq!(latest["BTCUSDT"].exchange_ts_ns, 20);
-        assert_eq!(latest["ETHUSDT"].exchange_ts_ns, 30);
-    }
-
-    #[test]
-    fn select_runtime_symbols_uses_common_when_present() {
-        let common = vec!["XRPUSDT".to_string(), "ADAUSDT".to_string()];
-        let (strategy, screener, used_fallback) = select_runtime_symbols(&common);
-
-        assert!(!used_fallback);
-        assert_eq!(strategy, common);
-        assert_eq!(screener, common);
-    }
-
-    #[test]
-    fn select_runtime_symbols_uses_fallback_when_common_empty() {
-        let common: Vec<String> = Vec::new();
-        let (strategy, screener, used_fallback) = select_runtime_symbols(&common);
-
-        assert!(used_fallback);
-        assert_eq!(strategy, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
-        assert_eq!(screener, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
-    }
-
-    #[test]
-    fn compute_common_symbols_filters_blacklist_and_sorts() {
-        let binance_symbols = vec![
-            "XRPUSDT".to_string(),
-            "BTCUSDT".to_string(),
-            "ETHUSDT".to_string(),
-        ];
-        let gate_symbols = vec![
-            "ETHUSDT".to_string(),
-            "XRPUSDT".to_string(),
-            "ADAUSDT".to_string(),
-        ];
-        let blacklist: std::collections::HashSet<&str> = ["ETHUSDT"].into_iter().collect();
-
-        let common = compute_common_symbols(&binance_symbols, &gate_symbols, &blacklist);
-        assert_eq!(common, vec!["XRPUSDT".to_string()]);
-    }
-
-    #[test]
-    fn compute_common_symbols_returns_empty_when_no_overlap() {
-        let binance_symbols = vec!["BTCUSDT".to_string()];
-        let gate_symbols = vec!["ETHUSDT".to_string()];
-        let blacklist: std::collections::HashSet<&str> = std::collections::HashSet::new();
-
-        let common = compute_common_symbols(&binance_symbols, &gate_symbols, &blacklist);
-        assert!(common.is_empty());
-    }
-
-    #[test]
-    fn strategy_ticks_in_order_skips_missing_symbols() {
-        let strategy_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
-        let mut latest = std::collections::HashMap::new();
-        latest.insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 10));
-
-        let ticks: Vec<i64> = strategy_ticks_in_order(&strategy_symbols, &latest)
-            .map(|t| t.exchange_ts_ns)
-            .collect();
-        assert_eq!(ticks, vec![10]);
-    }
-
-    #[test]
-    fn strategy_ticks_in_order_preserves_strategy_order() {
-        let strategy_symbols = vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()];
-        let mut latest = std::collections::HashMap::new();
-        latest.insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 10));
-        latest.insert("ETHUSDT".to_string(), test_ticker("ETHUSDT", 20));
-
-        let symbols: Vec<String> = strategy_ticks_in_order(&strategy_symbols, &latest)
-            .map(|t| String::from_utf8_lossy(&t.symbol).to_string())
-            .collect();
-        assert_eq!(symbols, vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()]);
-    }
-
-    #[test]
-    fn ingest_latest_batch_is_noop_for_empty_map() {
-        let latest = std::collections::HashMap::new();
-        let mut ticker_count = 3usize;
-        let mut metrics = EventLoopMetrics::new();
-        let screener = ScreenerStore::default();
-        let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
-        let now_ms = || 130i64;
-        let mut ctx = BatchIngestContext {
-            exchange: "binance",
-            ticker_count: &mut ticker_count,
-            metrics: &mut metrics,
-            now_ms: &now_ms,
-            screener: &screener,
-            ws_tx: &ws_tx,
-        };
-
-        ingest_latest_batch(&latest, &mut ctx);
-
-        assert_eq!(ticker_count, 3);
-        assert_eq!(metrics.drift_stats_string_and_reset(), "no_data");
-        assert!(screener.rows_sorted().is_empty());
-        assert!(matches!(
-            ws_rx.try_recv(),
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-        ));
-    }
-
-    #[test]
-    fn ingest_latest_batch_updates_counter_metrics_screener_and_ws() {
-        let mut latest = std::collections::HashMap::new();
-        latest.insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 100_000_000));
-        let mut ticker_count = 0usize;
-        let mut metrics = EventLoopMetrics::new();
-        let screener = ScreenerStore::default();
-        let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
-        let now_ms = || 130i64;
-        let mut ctx = BatchIngestContext {
-            exchange: "gate",
-            ticker_count: &mut ticker_count,
-            metrics: &mut metrics,
-            now_ms: &now_ms,
-            screener: &screener,
-            ws_tx: &ws_tx,
-        };
-
-        ingest_latest_batch(&latest, &mut ctx);
-
-        assert_eq!(ticker_count, 1);
-        assert_eq!(
-            metrics.drift_stats_string_and_reset(),
-            "n=1 avg=30ms p50=30ms p95=30ms p99=30ms max=30ms"
-        );
-
-        let event = ws_rx.try_recv().expect("market data event");
-        assert_eq!(event.symbol, "BTCUSDT");
-        assert_eq!(event.exchange, "gate");
-        assert_eq!(event.timestamp_ns, 100_000_000);
-
-        let rows = screener.rows_sorted();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].symbol, "BTCUSDT");
-        assert_eq!(rows[0].leader_exchange, "gate");
-    }
-
-    #[test]
-    fn process_exchange_batch_rebuilds_and_ingests_latest_state() {
-        let mut latest = std::collections::HashMap::new();
-        latest.insert("OLD".to_string(), test_ticker("OLD", 1));
-        let mut ticker_count = 5usize;
-        let mut metrics = EventLoopMetrics::new();
-        let screener = ScreenerStore::default();
-        let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
-        let now_ms = || 150i64;
-        let mut ctx = BatchIngestContext {
-            exchange: "binance",
-            ticker_count: &mut ticker_count,
-            metrics: &mut metrics,
-            now_ms: &now_ms,
-            screener: &screener,
-            ws_tx: &ws_tx,
-        };
-
-        process_exchange_batch(
-            &mut latest,
-            test_ticker("BTCUSDT", 100_000_000),
-            vec![
-                test_ticker("ETHUSDT", 110_000_000),
-                test_ticker("BTCUSDT", 120_000_000),
-            ],
-            &mut ctx,
-        );
-
-        assert!(!latest.contains_key("OLD"));
-        assert_eq!(latest.len(), 2);
-        assert_eq!(latest["BTCUSDT"].exchange_ts_ns, 120_000_000);
-        assert_eq!(ticker_count, 7);
-        assert_eq!(
-            metrics.drift_stats_string_and_reset(),
-            "n=2 avg=35ms p50=40ms p95=40ms p99=40ms max=40ms"
-        );
-
-        let mut events = [
-            ws_rx.try_recv().expect("first ws event"),
-            ws_rx.try_recv().expect("second ws event"),
-        ];
-        events.sort_by(|a, b| a.symbol.cmp(&b.symbol));
-        assert_eq!(events[0].symbol, "BTCUSDT");
-        assert_eq!(events[0].exchange, "binance");
-        assert_eq!(events[0].timestamp_ns, 120_000_000);
-        assert_eq!(events[1].symbol, "ETHUSDT");
-        assert_eq!(events[1].exchange, "binance");
-        assert_eq!(events[1].timestamp_ns, 110_000_000);
-        assert!(matches!(
-            ws_rx.try_recv(),
-            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-        ));
-
-        let rows = screener.rows_sorted();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].leader_exchange, "binance");
-        assert_eq!(rows[1].leader_exchange, "binance");
-    }
-
-    #[test]
-    fn process_exchange_batch_with_single_tick_updates_once() {
-        let mut latest = std::collections::HashMap::new();
-        let mut ticker_count = 0usize;
-        let mut metrics = EventLoopMetrics::new();
-        let screener = ScreenerStore::default();
-        let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
-        let now_ms = || 130i64;
-        let mut ctx = BatchIngestContext {
-            exchange: "gate",
-            ticker_count: &mut ticker_count,
-            metrics: &mut metrics,
-            now_ms: &now_ms,
-            screener: &screener,
-            ws_tx: &ws_tx,
-        };
-
-        process_exchange_batch(
-            &mut latest,
-            test_ticker("BTCUSDT", 100_000_000),
-            Vec::new(),
-            &mut ctx,
-        );
-
-        assert_eq!(latest.len(), 1);
-        assert_eq!(ticker_count, 1);
-        assert_eq!(
-            metrics.drift_stats_string_and_reset(),
-            "n=1 avg=30ms p50=30ms p95=30ms p99=30ms max=30ms"
-        );
-        let event = ws_rx.try_recv().expect("ws event");
-        assert_eq!(event.symbol, "BTCUSDT");
-        assert_eq!(event.exchange, "gate");
-    }
-
-    #[test]
-    fn gate_subscribe_delay_applies_after_timeout() {
-        assert!(should_delay_after_gate_subscribe_attempt(
-            GateSubscribeAttempt::Timeout
-        ));
-    }
-
-    #[test]
-    fn gate_subscribe_delay_applies_after_success_and_error() {
-        assert!(should_delay_after_gate_subscribe_attempt(
-            GateSubscribeAttempt::Success
-        ));
-        assert!(should_delay_after_gate_subscribe_attempt(
-            GateSubscribeAttempt::Error
-        ));
-    }
-
-    #[test]
-    fn runtime_strategy_builder_loads_lead_lag_classic() {
-        let path = write_temp_config(
-            "strategy-default",
-            r#"
-[binance]
-enabled = true
-blacklist = []
-
-[gate]
-enabled = true
-blacklist = []
-"#,
-        );
-        let manager =
-            ConfigManager::from_file(path.to_str().expect("utf-8 path")).expect("load config");
-
-        let strategy = hft_lead_lag::build_runtime_strategy(&manager, vec!["BTCUSDT".to_string()])
-            .expect("lead-lag strategy should build");
-        assert_eq!(strategy.strategy_name(), "lead_lag_classic");
-
-        fs::remove_file(path).expect("cleanup temp config");
-    }
-
-    #[test]
-    fn runtime_strategy_builder_rejects_unimplemented_strategy() {
-        let path = write_temp_config(
-            "strategy-unimplemented",
-            r#"
-[binance]
-enabled = true
-blacklist = []
-
-[gate]
-enabled = true
-blacklist = []
-
-[strategy]
-active = "dislocation_reversion"
-"#,
-        );
-        let manager =
-            ConfigManager::from_file(path.to_str().expect("utf-8 path")).expect("load config");
-
-        let result = hft_lead_lag::build_runtime_strategy(&manager, vec!["BTCUSDT".to_string()]);
-        match result {
-            Ok(_) => panic!("unimplemented strategy should fail"),
-            Err(err) => {
-                assert!(
-                    err.to_string().contains("not implemented"),
-                    "unexpected error: {err}"
-                );
-            }
-        }
-
-        fs::remove_file(path).expect("cleanup temp config");
-    }
-}
+mod main_tests;

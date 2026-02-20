@@ -7,9 +7,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::domain::screener::{ScreenerStore, ScreenerRow};
 use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
+use crate::domain::screener::{ScreenerRow, ScreenerStore};
+use crate::infrastructure::db::DbWriter;
 use crate::infrastructure::enrichment::{self, CachedNatr};
+use crate::infrastructure::exchanges::{BinanceMarketData, GateMarketData};
 use crate::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 
 use super::http_server::HealthState;
@@ -31,6 +33,12 @@ pub(crate) struct HealthResponse {
     status: &'static str,
     binance: bool,
     gate: bool,
+    binance_last_tick_age_ms: i64,
+    gate_last_tick_age_ms: i64,
+    binance_dropped_messages: u64,
+    gate_dropped_messages: u64,
+    db_dropped_batches: u64,
+    issues: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,17 +68,76 @@ pub(crate) struct ScreenerResponse {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
-pub(crate) async fn health(State(state): State<Arc<HttpState>>) -> (axum::http::StatusCode, Json<HealthResponse>) {
-    let binance = state.health.binance_connected.load(Ordering::Relaxed);
-    let gate = state.health.gate_connected.load(Ordering::Relaxed);
-    let healthy = binance && gate;
+pub(crate) async fn health(
+    State(state): State<Arc<HttpState>>,
+) -> (axum::http::StatusCode, Json<HealthResponse>) {
+    const STALE_TICK_THRESHOLD_MS: i64 = 5_000;
+
+    let now_ms = crate::domain::screener::utils::now_ms();
+    let binance_last_tick_ms = state.health.binance_last_tick_ms.load(Ordering::Relaxed);
+    let gate_last_tick_ms = state.health.gate_last_tick_ms.load(Ordering::Relaxed);
+    let binance_last_tick_age_ms = if binance_last_tick_ms > 0 {
+        now_ms.saturating_sub(binance_last_tick_ms)
+    } else {
+        i64::MAX
+    };
+    let gate_last_tick_age_ms = if gate_last_tick_ms > 0 {
+        now_ms.saturating_sub(gate_last_tick_ms)
+    } else {
+        i64::MAX
+    };
+
+    let binance_connected = state.health.binance_connected.load(Ordering::Relaxed);
+    let gate_connected = state.health.gate_connected.load(Ordering::Relaxed);
+    let binance = binance_connected && binance_last_tick_age_ms <= STALE_TICK_THRESHOLD_MS;
+    let gate = gate_connected && gate_last_tick_age_ms <= STALE_TICK_THRESHOLD_MS;
+
+    let binance_dropped_messages = BinanceMarketData::dropped_messages();
+    let gate_dropped_messages = GateMarketData::dropped_messages();
+    let db_dropped_batches = DbWriter::dropped_batches();
+
+    let mut issues = Vec::new();
+    if !binance_connected {
+        issues.push("binance_disconnected");
+    } else if binance_last_tick_age_ms > STALE_TICK_THRESHOLD_MS {
+        issues.push("binance_stale");
+    }
+    if !gate_connected {
+        issues.push("gate_disconnected");
+    } else if gate_last_tick_age_ms > STALE_TICK_THRESHOLD_MS {
+        issues.push("gate_stale");
+    }
+    if binance_dropped_messages > 0 {
+        issues.push("binance_dropped_messages");
+    }
+    if gate_dropped_messages > 0 {
+        issues.push("gate_dropped_messages");
+    }
+    if db_dropped_batches > 0 {
+        issues.push("db_dropped_batches");
+    }
+
+    let healthy = issues.is_empty();
     let status = if healthy { "ok" } else { "degraded" };
     let code = if healthy {
         axum::http::StatusCode::OK
     } else {
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     };
-    (code, Json(HealthResponse { status, binance, gate }))
+    (
+        code,
+        Json(HealthResponse {
+            status,
+            binance,
+            gate,
+            binance_last_tick_age_ms,
+            gate_last_tick_age_ms,
+            binance_dropped_messages,
+            gate_dropped_messages,
+            db_dropped_batches,
+            issues,
+        }),
+    )
 }
 
 pub(crate) async fn get_symbols(
@@ -421,6 +488,10 @@ fn internal_error(error: crate::domain::ExchangeError) -> (axum::http::StatusCod
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State;
+    use dashmap::DashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn compute_fleet_stats_handles_zero_trades() {
@@ -434,5 +505,52 @@ mod tests {
         let stats = compute_fleet_stats(20, 5, 10.0);
         assert_eq!(stats.win_rate_pct, 25.0);
         assert_eq!(stats.avg_pnl_pct, 0.5);
+    }
+
+    #[tokio::test]
+    async fn health_returns_degraded_when_feed_is_stale() {
+        let health_state = Arc::new(HealthState::new());
+        health_state.binance_connected.store(true, Ordering::Relaxed);
+        health_state.gate_connected.store(true, Ordering::Relaxed);
+        health_state.binance_last_tick_ms.store(1, Ordering::Relaxed);
+        health_state.gate_last_tick_ms.store(1, Ordering::Relaxed);
+
+        let state = Arc::new(HttpState {
+            min_volume_usd: 1_000_000.0,
+            screener: ScreenerStore::default(),
+            natr_cache: Arc::new(DashMap::new()),
+            health: health_state,
+        });
+
+        let (code, Json(resp)) = health(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status, "degraded");
+        assert!(resp.issues.contains(&"binance_stale"));
+        assert!(resp.issues.contains(&"gate_stale"));
+    }
+
+    #[tokio::test]
+    async fn health_reports_drop_counters() {
+        let health_state = Arc::new(HealthState::new());
+        let state = Arc::new(HttpState {
+            min_volume_usd: 1_000_000.0,
+            screener: ScreenerStore::default(),
+            natr_cache: Arc::new(DashMap::new()),
+            health: health_state,
+        });
+
+        let (_code, Json(resp)) = health(State(state)).await;
+        assert_eq!(
+            resp.binance_dropped_messages,
+            crate::infrastructure::exchanges::BinanceMarketData::dropped_messages()
+        );
+        assert_eq!(
+            resp.gate_dropped_messages,
+            crate::infrastructure::exchanges::GateMarketData::dropped_messages()
+        );
+        assert_eq!(
+            resp.db_dropped_batches,
+            crate::infrastructure::db::DbWriter::dropped_batches()
+        );
     }
 }

@@ -23,10 +23,23 @@ use crate::infrastructure::exchanges::common::{
 
 const BINANCE_WS_ENDPOINT: &str = "wss://fstream.binance.com/ws";
 /// Bounded fan-in channel capacity (protects against OOM on 3.8 GiB server)
-const MSG_CHANNEL_CAPACITY: usize = 10_000;
+const MSG_CHANNEL_CAPACITY: usize = 25_000;
+const MIN_MSG_CHANNEL_CAPACITY: usize = 1_024;
+const MSG_CHANNEL_CAPACITY_ENV: &str = "BINANCE_MSG_CHANNEL_CAPACITY";
 
 /// Cumulative count of market-data messages dropped due to channel backpressure.
 static DROPPED_MESSAGES: AtomicU64 = AtomicU64::new(0);
+
+fn resolve_msg_channel_capacity(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(MSG_CHANNEL_CAPACITY)
+        .max(MIN_MSG_CHANNEL_CAPACITY)
+}
+
+fn configured_msg_channel_capacity() -> usize {
+    let raw = std::env::var(MSG_CHANNEL_CAPACITY_ENV).ok();
+    resolve_msg_channel_capacity(raw.as_deref())
+}
 
 pub struct BinanceMarketData {
     /// WebSocket sender channels (2 symbols per socket in batch mode)
@@ -362,13 +375,17 @@ impl MarketDataStream for BinanceMarketData {
     }
 
     async fn connect(&mut self) -> ExchangeResult<()> {
-        let (msg_tx, msg_rx) = mpsc::channel::<StampedBytes>(MSG_CHANNEL_CAPACITY);
+        let msg_channel_capacity = configured_msg_channel_capacity();
+        let (msg_tx, msg_rx) = mpsc::channel::<StampedBytes>(msg_channel_capacity);
         let primary_ws = Self::spawn_ws_worker(msg_tx.clone()).await?;
         self.ws_txs.clear();
         self.ws_txs.push(primary_ws);
         self.msg_tx = Some(msg_tx);
         self.msg_rx = Some(msg_rx);
-        info!("Connected to Binance Futures WebSocket");
+        info!(
+            "Connected to Binance Futures WebSocket (msg_channel_capacity={})",
+            msg_channel_capacity
+        );
         Ok(())
     }
 
@@ -513,5 +530,19 @@ mod tests {
 
         assert_eq!(trade.trade_id, 1234);
         assert!(!trade.is_buyer_maker);
+    }
+
+    #[test]
+    fn resolve_msg_channel_capacity_applies_default_parse_and_min_bound() {
+        assert_eq!(resolve_msg_channel_capacity(None), MSG_CHANNEL_CAPACITY);
+        assert_eq!(
+            resolve_msg_channel_capacity(Some("not-a-number")),
+            MSG_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            resolve_msg_channel_capacity(Some("64")),
+            MIN_MSG_CHANNEL_CAPACITY
+        );
+        assert_eq!(resolve_msg_channel_capacity(Some("25000")), 25_000);
     }
 }

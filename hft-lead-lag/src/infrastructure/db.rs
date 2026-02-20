@@ -18,6 +18,7 @@ use crate::domain::screener::trader_config::TraderConfig;
 
 const FLUSH_INTERVAL_SECS: u64 = 5;
 const CHANNEL_CAPACITY: usize = 100_000;
+const DEFAULT_STRATEGY_KIND: &str = "baseline_gap";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -26,6 +27,7 @@ const CHANNEL_CAPACITY: usize = 100_000;
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS configs (
     id                    INTEGER PRIMARY KEY,
+    strategy_kind         TEXT NOT NULL DEFAULT 'baseline_gap',
     spike_threshold_bps   REAL NOT NULL,
     target_ratio          REAL NOT NULL,
     stop_loss_bps         REAL NOT NULL,
@@ -93,6 +95,9 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     conn.execute_batch(SCHEMA)?;
     // Migration: add columns if missing (older DBs without these columns).
     let _ = conn.execute_batch(
+        "ALTER TABLE configs ADD COLUMN strategy_kind TEXT NOT NULL DEFAULT 'baseline_gap';",
+    );
+    let _ = conn.execute_batch(
         "ALTER TABLE configs ADD COLUMN trailing_decay_ratio REAL NOT NULL DEFAULT 0.5;",
     );
     let _ = conn
@@ -112,15 +117,16 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
 /// Insert configs into the database (idempotent — uses OR IGNORE).
 pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT OR IGNORE INTO configs (id, spike_threshold_bps, target_ratio,
+        "INSERT OR IGNORE INTO configs (id, strategy_kind, spike_threshold_bps, target_ratio,
          stop_loss_bps, max_hold_ms, max_spread_bps, trailing_decay_ratio,
          baseline_window_ms, fill_delay_ms, cooldown_ms, warmup_ms,
          quote_freshness_ms, taker_fee, min_baseline_samples)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
     )?;
     for c in configs {
         stmt.execute(params![
             c.config_id() as i64,
+            DEFAULT_STRATEGY_KIND,
             c.spike_threshold_bps,
             c.target_ratio,
             c.stop_loss_bps,
@@ -155,9 +161,28 @@ impl DbWriter {
         if trades.is_empty() {
             return;
         }
-        if let Err(e) = self.tx.try_send(trades) {
-            let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-            warn!("db writer channel full, dropping batch (total dropped: {n}): {e}");
+        match self.tx.try_send(trades) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(trades)) => {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let tx = self.tx.clone();
+                    handle.spawn(async move {
+                        if tx.send(trades).await.is_err() {
+                            let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                            warn!("db writer closed during retry send (total dropped: {n})");
+                        }
+                    });
+                } else {
+                    let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                    warn!(
+                        "db writer channel full and no runtime for async retry, dropping batch (total dropped: {n})"
+                    );
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!("db writer channel closed, dropping batch (total dropped: {n})");
+            }
         }
     }
 
@@ -243,4 +268,59 @@ fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()
     tx.commit()?;
     info!("flushed {} trades to db", trades.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "hft-lead-lag-db-{name}-{}-{}.sqlite",
+            std::process::id(),
+            crate::domain::screener::utils::now_ms()
+        ))
+    }
+
+    fn cleanup_temp_db(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn open_db_adds_strategy_kind_column() {
+        let path = temp_db_path("strategy-kind-column");
+        let conn = open_db(&path).expect("open db");
+
+        let has_strategy_kind: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='strategy_kind'")
+            .and_then(|mut stmt| stmt.exists([]))
+            .expect("pragma query");
+        assert!(has_strategy_kind, "configs.strategy_kind column must exist");
+
+        drop(conn);
+        cleanup_temp_db(&path);
+    }
+
+    #[test]
+    fn upsert_configs_persists_default_strategy_kind() {
+        let path = temp_db_path("strategy-kind-upsert");
+        let conn = open_db(&path).expect("open db");
+        let cfg = TraderConfig::default();
+
+        upsert_configs(&conn, &[cfg]).expect("upsert config");
+
+        let strategy_kind: String = conn
+            .query_row(
+                "SELECT strategy_kind FROM configs WHERE id=?1",
+                [cfg.config_id() as i64],
+                |row| row.get(0),
+            )
+            .expect("fetch strategy kind");
+        assert_eq!(strategy_kind, "baseline_gap");
+
+        drop(conn);
+        cleanup_temp_db(&path);
+    }
 }

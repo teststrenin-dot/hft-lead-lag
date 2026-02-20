@@ -118,8 +118,26 @@ impl DecayedWindow {
         self.pnl_sum_pct += pnl_pct;
     }
 
-    fn metrics(&self) -> PolicyWindowMetrics {
-        if self.trades <= 1e-9 {
+    fn metrics_at(&self, ts_ms: i64) -> PolicyWindowMetrics {
+        let (trades, wins, stop_loss_trades, pnl_sum_pct) = if let Some(last_ts_ms) = self.last_ts_ms
+        {
+            if ts_ms > last_ts_ms {
+                let dt_ms = (ts_ms - last_ts_ms) as f64;
+                let decay = (-(dt_ms / self.horizon_ms as f64)).exp();
+                (
+                    self.trades * decay,
+                    self.wins * decay,
+                    self.stop_loss_trades * decay,
+                    self.pnl_sum_pct * decay,
+                )
+            } else {
+                (self.trades, self.wins, self.stop_loss_trades, self.pnl_sum_pct)
+            }
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+
+        if trades <= 1e-9 {
             return PolicyWindowMetrics {
                 trades: 0.0,
                 wins: 0.0,
@@ -129,13 +147,13 @@ impl DecayedWindow {
                 stop_loss_share_pct: 0.0,
             };
         }
-        let win_rate_pct = (self.wins / self.trades) * 100.0;
-        let stop_loss_share_pct = (self.stop_loss_trades / self.trades) * 100.0;
+        let win_rate_pct = (wins / trades) * 100.0;
+        let stop_loss_share_pct = (stop_loss_trades / trades) * 100.0;
         PolicyWindowMetrics {
-            trades: self.trades,
-            wins: self.wins,
-            stop_loss_trades: self.stop_loss_trades,
-            avg_pnl_pct: self.pnl_sum_pct / self.trades,
+            trades,
+            wins,
+            stop_loss_trades,
+            avg_pnl_pct: pnl_sum_pct / trades,
             win_rate_pct,
             stop_loss_share_pct,
         }
@@ -170,6 +188,7 @@ impl ConfigPolicyState {
 
     fn score_and_gate(
         &self,
+        now_ms: i64,
     ) -> (
         f64,
         bool,
@@ -178,9 +197,9 @@ impl ConfigPolicyState {
         PolicyWindowMetrics,
         PolicyWindowMetrics,
     ) {
-        let metrics_1h = self.window_1h.metrics();
-        let metrics_6h = self.window_6h.metrics();
-        let metrics_24h = self.window_24h.metrics();
+        let metrics_1h = self.window_1h.metrics_at(now_ms);
+        let metrics_6h = self.window_6h.metrics_at(now_ms);
+        let metrics_24h = self.window_24h.metrics_at(now_ms);
 
         let score = SCORE_W_AVG_PNL_6H * metrics_6h.avg_pnl_pct
             + SCORE_W_WIN_RATE_6H * (metrics_6h.win_rate_pct / 100.0)
@@ -220,8 +239,9 @@ impl ConfigPolicyState {
     }
 
     fn snapshot(&self, config_id: u64) -> PolicyConfigSnapshot {
+        let now_ms = crate::domain::screener::utils::now_ms();
         let (score, gate_enabled, gate_reason, metrics_1h, metrics_6h, metrics_24h) =
-            self.score_and_gate();
+            self.score_and_gate(now_ms);
         PolicyConfigSnapshot {
             config_id,
             score,
@@ -473,12 +493,13 @@ mod tests {
     #[test]
     fn policy_state_gate_needs_minimum_trades() {
         let mut state = ConfigPolicyState::new();
+        let ts_ms = crate::domain::screener::utils::now_ms();
         for _ in 0..4 {
             state.observe_trade(&ClosedTrade {
                 pnl_pct: 0.3,
-                ts_ms: 1_000_000,
+                ts_ms,
                 direction: Direction::Long,
-                entry_ts_ms: 999_500,
+                entry_ts_ms: ts_ms - 500,
                 entry_price: 100.0,
                 exit_price: 100.3,
                 exit_reason: "trailing_take",
@@ -497,6 +518,7 @@ mod tests {
     #[test]
     fn policy_state_scores_and_enables_on_positive_profile() {
         let mut state = ConfigPolicyState::new();
+        let ts_ms = crate::domain::screener::utils::now_ms();
         for idx in 0..10 {
             let pnl = if idx < 7 { 0.20 } else { -0.05 };
             let reason = if idx < 2 {
@@ -506,9 +528,9 @@ mod tests {
             };
             state.observe_trade(&ClosedTrade {
                 pnl_pct: pnl,
-                ts_ms: 2_000_000,
+                ts_ms,
                 direction: Direction::Long,
-                entry_ts_ms: 1_999_700,
+                entry_ts_ms: ts_ms - 300,
                 entry_price: 100.0,
                 exit_price: 100.1,
                 exit_reason: reason,
@@ -521,7 +543,7 @@ mod tests {
         let snapshot = state.snapshot(7);
         assert!(snapshot.gate_enabled);
         assert_eq!(snapshot.gate_reason, "ok");
-        approx_eq(snapshot.metrics_6h.trades, 10.0, 1e-9);
+        approx_eq(snapshot.metrics_6h.trades, 10.0, 1e-5);
         approx_eq(snapshot.metrics_6h.win_rate_pct, 70.0, 1e-9);
         approx_eq(snapshot.metrics_6h.stop_loss_share_pct, 20.0, 1e-9);
         assert!(snapshot.score > 0.0);
@@ -537,6 +559,31 @@ mod tests {
     }
 
     #[test]
+    fn policy_snapshot_decays_old_observations_without_new_trades() {
+        let mut state = ConfigPolicyState::new();
+        state.observe_trade(&ClosedTrade {
+            pnl_pct: 0.2,
+            ts_ms: 1_000_000,
+            direction: Direction::Long,
+            entry_ts_ms: 999_500,
+            entry_price: 100.0,
+            exit_price: 100.2,
+            exit_reason: "trailing_take",
+            spike_bps: 50.0,
+            catchup_pct: 0.2,
+            catchup_ms: 500,
+            gate_spread_at_entry_bps: 1.0,
+        });
+
+        let snapshot = state.snapshot(101);
+        assert!(
+            snapshot.metrics_6h.trades < 0.01,
+            "expected stale observation to decay to near zero, got {}",
+            snapshot.metrics_6h.trades
+        );
+    }
+
+    #[test]
     fn top_policy_configs_returns_gate_enabled_sorted() {
         let cfg_a = TraderConfig {
             spike_threshold_bps: 40.0,
@@ -547,14 +594,15 @@ mod tests {
             ..TraderConfig::default()
         };
         let mut fleet = ShadowFleet::new(&[cfg_a, cfg_b]);
+        let ts_ms = crate::domain::screener::utils::now_ms();
 
         // Seed policy directly (unit-level, deterministic).
         for _ in 0..10 {
             fleet.policy[0].observe_trade(&ClosedTrade {
                 pnl_pct: 0.20,
-                ts_ms: 5_000_000,
+                ts_ms,
                 direction: Direction::Long,
-                entry_ts_ms: 4_999_700,
+                entry_ts_ms: ts_ms - 300,
                 entry_price: 100.0,
                 exit_price: 100.2,
                 exit_reason: "trailing_take",
@@ -565,9 +613,9 @@ mod tests {
             });
             fleet.policy[1].observe_trade(&ClosedTrade {
                 pnl_pct: -0.20,
-                ts_ms: 5_000_000,
+                ts_ms,
                 direction: Direction::Long,
-                entry_ts_ms: 4_999_700,
+                entry_ts_ms: ts_ms - 300,
                 entry_price: 100.0,
                 exit_price: 99.8,
                 exit_reason: "stop_loss",

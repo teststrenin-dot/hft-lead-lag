@@ -3,7 +3,7 @@
 use axum::{Router, routing::get};
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use tracing::info;
 
 use crate::domain::screener::ScreenerStore;
@@ -32,6 +32,8 @@ impl Default for HttpServerConfig {
 pub struct HealthState {
     pub binance_connected: AtomicBool,
     pub gate_connected: AtomicBool,
+    pub binance_last_tick_ms: AtomicI64,
+    pub gate_last_tick_ms: AtomicI64,
 }
 
 impl HealthState {
@@ -39,6 +41,8 @@ impl HealthState {
         Self {
             binance_connected: AtomicBool::new(false),
             gate_connected: AtomicBool::new(false),
+            binance_last_tick_ms: AtomicI64::new(0),
+            gate_last_tick_ms: AtomicI64::new(0),
         }
     }
 }

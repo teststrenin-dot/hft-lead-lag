@@ -44,6 +44,38 @@ pub struct BinanceRestClient {
     base_url: String,
 }
 
+fn parse_json_f64_field(value: &serde_json::Value, key: &str) -> Option<f64> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .or_else(|| value.get(key).and_then(|v| v.as_f64()))
+}
+
+fn parse_binance_ticker(value: serde_json::Value) -> Option<Ticker24h> {
+    let symbol = value.get("symbol")?.as_str()?.to_string();
+
+    // Skip non-USDT pairs and invalid symbols
+    if !symbol.ends_with("USDT") {
+        return None;
+    }
+    if !symbol.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+
+    let quote_volume = parse_json_f64_field(&value, "quoteVolume")?;
+    let last_price =
+        parse_json_f64_field(&value, "lastPrice").or_else(|| parse_json_f64_field(&value, "last"));
+    let price_change_24h_pct = parse_json_f64_field(&value, "priceChangePercent");
+
+    Some(Ticker24h {
+        symbol,
+        quote_volume,
+        last_price,
+        price_change_24h_pct,
+    })
+}
+
 impl BinanceRestClient {
     pub fn new() -> Self {
         let client = Client::builder()
@@ -78,45 +110,7 @@ impl BinanceRestClient {
 
         let tickers: Vec<Ticker24h> = tickers_raw
             .into_iter()
-            .filter_map(|t| {
-                let symbol = t.get("symbol")?.as_str()?.to_string();
-
-                // Skip non-USDT pairs and invalid symbols
-                if !symbol.ends_with("USDT") {
-                    return None;
-                }
-
-                // Skip symbols with non-ASCII characters
-                if !symbol.chars().all(|c| c.is_ascii_alphanumeric()) {
-                    return None;
-                }
-
-                // Parse quoteVolume - can be string or number
-                let quote_volume = t
-                    .get("quoteVolume")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .or_else(|| t.get("quoteVolume").and_then(|v| v.as_f64()))?;
-
-                // Parse last price - optional, can be string or number
-                let last_price = t
-                    .get("last")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .or_else(|| t.get("last").and_then(|v| v.as_f64()));
-                let price_change_24h_pct = t
-                    .get("priceChangePercent")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .or_else(|| t.get("priceChangePercent").and_then(|v| v.as_f64()));
-
-                Some(Ticker24h {
-                    symbol,
-                    quote_volume,
-                    last_price,
-                    price_change_24h_pct,
-                })
-            })
+            .filter_map(parse_binance_ticker)
             .collect();
 
         debug!("Filtered to {} valid tickers", tickers.len());
@@ -405,6 +399,21 @@ fn value_to_f64(value: &serde_json::Value) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_binance_ticker_reads_last_price_field() {
+        let raw = serde_json::json!({
+            "symbol": "BTCUSDT",
+            "quoteVolume": "123.45",
+            "lastPrice": "98765.43",
+            "priceChangePercent": "1.5"
+        });
+        let ticker = parse_binance_ticker(raw).expect("ticker should parse");
+        assert_eq!(ticker.symbol, "BTCUSDT");
+        assert_eq!(ticker.quote_volume, 123.45);
+        assert_eq!(ticker.last_price, Some(98765.43));
+        assert_eq!(ticker.price_change_24h_pct, Some(1.5));
+    }
 
     #[tokio::test]
     #[ignore = "requires live Binance REST access"]
