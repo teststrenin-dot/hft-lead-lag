@@ -256,55 +256,56 @@ impl ShadowTrader {
 
     // -- Exit logic ----------------------------------------------------------
 
-    fn try_exit(&mut self, ts_ms: i64, gate: &Quote) {
-        let Some(pos) = self.position.as_mut() else { return };
-        let cfg = &self.config;
-        let hold_ms = ts_ms - pos.entry_ts_ms;
-
-        let unrealized_bps = match pos.direction {
+    fn unrealized_bps(pos: &OpenPosition, gate: &Quote) -> f64 {
+        match pos.direction {
             Direction::Long =>
                 ((gate.bid - pos.gate_entry_price) / pos.gate_entry_price) * 10_000.0,
             Direction::Short =>
                 ((pos.gate_entry_price - gate.ask) / pos.gate_entry_price) * 10_000.0,
-        };
+        }
+    }
+
+    fn determine_exit_reason(
+        cfg: &TraderConfig,
+        pos: &OpenPosition,
+        unrealized_bps: f64,
+        hold_ms: i64,
+    ) -> Option<&'static str> {
+        let timed_out = hold_ms >= cfg.max_hold_ms;
+        if pos.breakeven_activated {
+            if unrealized_bps <= 0.0 {
+                Some("breakeven")
+            } else if unrealized_bps <= pos.peak_unrealized_bps * cfg.trailing_decay_ratio {
+                Some("trailing_take")
+            } else if timed_out {
+                Some("timeout")
+            } else {
+                None
+            }
+        } else if unrealized_bps <= -cfg.stop_loss_bps {
+            Some("stop_loss")
+        } else if timed_out {
+            Some("timeout")
+        } else {
+            None
+        }
+    }
+
+    fn try_exit(&mut self, ts_ms: i64, gate: &Quote) {
+        let Some(pos) = self.position.as_mut() else { return };
+        let hold_ms = ts_ms - pos.entry_ts_ms;
+
+        let unrealized_bps = Self::unrealized_bps(pos, gate);
         if unrealized_bps > pos.peak_unrealized_bps {
             pos.peak_unrealized_bps = unrealized_bps;
         }
 
-        let timed_out = hold_ms >= cfg.max_hold_ms;
-
-        // Activate breakeven when unrealized reaches spike × target_ratio.
-        let breakeven_threshold = pos.spike_bps * cfg.target_ratio;
+        let breakeven_threshold = pos.spike_bps * self.config.target_ratio;
         if !pos.breakeven_activated && unrealized_bps >= breakeven_threshold {
             pos.breakeven_activated = true;
         }
 
-        let (should_exit, reason) = if pos.breakeven_activated {
-            // Phase 2: stop at breakeven (entry price), trailing take-profit.
-            let hit_breakeven_stop = unrealized_bps <= 0.0;
-            let trailing_take = unrealized_bps <= pos.peak_unrealized_bps * cfg.trailing_decay_ratio;
-            if hit_breakeven_stop {
-                (true, "breakeven")
-            } else if trailing_take {
-                (true, "trailing_take")
-            } else if timed_out {
-                (true, "timeout")
-            } else {
-                (false, "")
-            }
-        } else {
-            // Phase 1: stop-loss only (no target exit — let trade develop).
-            let stopped_out = unrealized_bps <= -cfg.stop_loss_bps;
-            if stopped_out {
-                (true, "stop_loss")
-            } else if timed_out {
-                (true, "timeout")
-            } else {
-                (false, "")
-            }
-        };
-
-        if should_exit {
+        if let Some(reason) = Self::determine_exit_reason(&self.config, pos, unrealized_bps, hold_ms) {
             let pos = self.position.take().unwrap();
             self.pending = Some(PendingOrder::Exit {
                 fire_ts_ms: ts_ms,
@@ -860,5 +861,84 @@ mod tests {
         assert!(stats.session_pnl_pct != 0.0 || stats.session_trades > 0);
         // Win rate may be 0 if fees exceed raw profit; just check it's computed.
         assert!(stats.win_rate_pct >= 0.0);
+    }
+
+    // -- determine_exit_reason unit tests --------------------------------------
+
+    fn make_config(f: impl FnOnce(&mut TraderConfig)) -> TraderConfig {
+        let mut cfg = TraderConfig::default();
+        f(&mut cfg);
+        cfg
+    }
+
+    fn make_pos(breakeven: bool, peak_bps: f64, spike_bps: f64) -> OpenPosition {
+        OpenPosition {
+            direction: Direction::Long,
+            spike_bps,
+            gate_entry_price: 100.0,
+            entry_ts_ms: 0,
+            breakeven_activated: breakeven,
+            peak_unrealized_bps: peak_bps,
+            gate_spread_at_entry_bps: 0.0,
+        }
+    }
+
+    #[test]
+    fn exit_reason_stop_loss() {
+        let cfg = make_config(|c| { c.stop_loss_bps = 5.0; c.max_hold_ms = 999_999; });
+        let pos = make_pos(false, 0.0, 20.0);
+        assert_eq!(
+            ShadowTrader::determine_exit_reason(&cfg, &pos, -6.0, 100),
+            Some("stop_loss")
+        );
+    }
+
+    #[test]
+    fn exit_reason_breakeven_stop() {
+        let cfg = make_config(|c| { c.stop_loss_bps = 999.0; c.max_hold_ms = 999_999; c.trailing_decay_ratio = 0.5; });
+        let pos = make_pos(true, 10.0, 20.0);
+        assert_eq!(
+            ShadowTrader::determine_exit_reason(&cfg, &pos, -0.5, 100),
+            Some("breakeven")
+        );
+    }
+
+    #[test]
+    fn exit_reason_trailing_take() {
+        let cfg = make_config(|c| { c.stop_loss_bps = 999.0; c.max_hold_ms = 999_999; c.trailing_decay_ratio = 0.5; });
+        let pos = make_pos(true, 20.0, 30.0);
+        // unrealized 8 bps < peak 20 * 0.5 = 10 → trailing_take
+        assert_eq!(
+            ShadowTrader::determine_exit_reason(&cfg, &pos, 8.0, 100),
+            Some("trailing_take")
+        );
+    }
+
+    #[test]
+    fn exit_reason_timeout_pre_breakeven() {
+        let cfg = make_config(|c| { c.stop_loss_bps = 999.0; c.max_hold_ms = 100; });
+        let pos = make_pos(false, 5.0, 20.0);
+        assert_eq!(
+            ShadowTrader::determine_exit_reason(&cfg, &pos, 3.0, 100),
+            Some("timeout")
+        );
+    }
+
+    #[test]
+    fn exit_reason_none_when_healthy() {
+        let cfg = make_config(|c| { c.stop_loss_bps = 50.0; c.max_hold_ms = 999_999; c.trailing_decay_ratio = 0.5; });
+        let pos = make_pos(false, 10.0, 20.0);
+        assert_eq!(
+            ShadowTrader::determine_exit_reason(&cfg, &pos, 5.0, 100),
+            None
+        );
+    }
+
+    #[test]
+    fn unrealized_bps_long() {
+        let pos = make_pos(false, 0.0, 20.0);
+        let gt = quote(100.10, 100.20, 0);
+        let bps = ShadowTrader::unrealized_bps(&pos, &gt);
+        assert!((bps - 10.0).abs() < 0.01);
     }
 }

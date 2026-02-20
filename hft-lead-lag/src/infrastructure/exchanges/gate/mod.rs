@@ -222,7 +222,7 @@ impl MarketDataStream for GateMarketData {
                                     Message::Text(text) => {
                                         reconnect_delay = Duration::from_secs(1);
                                         let recv_ts = now_ns();
-                                        if let Err(_) = msg_tx.try_send((text.into_bytes(), recv_ts)) {
+                                        if msg_tx.try_send((text.into_bytes(), recv_ts)).is_err() {
                                             let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
                                             if n.is_power_of_two() || n % 1000 == 0 {
                                                 warn!("Gate msg channel full, dropped total: {n}");
@@ -232,7 +232,7 @@ impl MarketDataStream for GateMarketData {
                                     Message::Binary(bin) => {
                                         reconnect_delay = Duration::from_secs(1);
                                         let recv_ts = now_ns();
-                                        if let Err(_) = msg_tx.try_send((bin, recv_ts)) {
+                                        if msg_tx.try_send((bin, recv_ts)).is_err() {
                                             let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
                                             if n.is_power_of_two() || n % 1000 == 0 {
                                                 warn!("Gate msg channel full, dropped total: {n}");

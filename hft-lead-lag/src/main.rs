@@ -340,6 +340,47 @@ impl EventLoopState {
     }
 }
 
+async fn subscribe_gate_symbols(gate: &mut GateMarketData, symbols: &[String]) {
+    let mut ok = 0usize;
+    let mut errs = 0usize;
+    let mut timeouts = 0usize;
+    for symbol in symbols {
+        match tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            gate.subscribe_book_ticker(symbol),
+        )
+        .await
+        {
+            Ok(Ok(_)) => ok += 1,
+            Ok(Err(e)) => {
+                errs += 1;
+                error!("Gate subscribe error {}: {}", symbol, e);
+            }
+            Err(_) => {
+                timeouts += 1;
+                warn!("Gate subscription timeout on {}; proceeding with available streams", symbol);
+                continue;
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
+    }
+    info!(
+        "Gate subscription summary: ok={} err={} timeout={}",
+        ok, errs, timeouts
+    );
+}
+
+async fn drain_stale_ticks(binance: &mut BinanceMarketData, gate: &mut GateMarketData) {
+    let stale_binance = binance.drain_book_tickers().len();
+    let stale_gate = gate.drain_book_tickers().len();
+    if stale_binance + stale_gate > 0 {
+        info!(
+            "Drained {} stale startup ticks (binance={} gate={})",
+            stale_binance + stale_gate, stale_binance, stale_gate
+        );
+    }
+}
+
 async fn run_event_loop(
     binance: &mut BinanceMarketData,
     gate: &mut GateMarketData,
@@ -582,33 +623,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     // Subscribe Gate to screener symbols as well.
-    let mut gate_subscribed = 0usize;
-    let mut gate_subscribe_errors = 0usize;
-    let mut gate_subscribe_timeouts = 0usize;
-    for symbol in &screener_symbols {
-        match tokio::time::timeout(
-            tokio::time::Duration::from_millis(500),
-            gate.subscribe_book_ticker(symbol),
-        )
-        .await
-        {
-            Ok(Ok(_)) => gate_subscribed += 1,
-            Ok(Err(e)) => {
-                gate_subscribe_errors += 1;
-                error!("Gate subscribe error {}: {}", symbol, e);
-            }
-            Err(_) => {
-                gate_subscribe_timeouts += 1;
-                warn!("Gate subscription timeout on {}; proceeding with available streams", symbol);
-                continue;
-            }
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
-    }
-    info!(
-        "Gate subscription summary: ok={} err={} timeout={}",
-        gate_subscribed, gate_subscribe_errors, gate_subscribe_timeouts
-    );
+    subscribe_gate_symbols(&mut gate, &screener_symbols).await;
 
     // Initialize lead-lag strategy
     let config = LeadLagStrategyConfig {
@@ -624,14 +639,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Drain messages that accumulated during subscription phase to avoid
     // stale ticks with misleading local_ts_ns at the start of the main loop.
-    let stale_binance = binance.drain_book_tickers().len();
-    let stale_gate = gate.drain_book_tickers().len();
-    if stale_binance + stale_gate > 0 {
-        info!(
-            "Drained {} stale startup ticks (binance={} gate={})",
-            stale_binance + stale_gate, stale_binance, stale_gate
-        );
-    }
+    drain_stale_ticks(&mut binance, &mut gate).await;
 
     run_event_loop(
         &mut binance,
