@@ -90,6 +90,38 @@ fn strategy_ticks_in_order<'a>(
     strategy_symbols.iter().filter_map(|symbol| latest.get(symbol))
 }
 
+fn ingest_latest_batch<F: Fn() -> i64>(
+    latest: &std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    exchange: &'static str,
+    ticker_count: &mut usize,
+    metrics: &mut EventLoopMetrics,
+    now_ms: &F,
+    screener: &ScreenerStore,
+    ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+) {
+    for (symbol, ticker) in latest {
+        *ticker_count += 1;
+        metrics.record_tick_drift(now_ms(), ticker.exchange_ts_ns);
+        let bid = ticker.bid_price();
+        let ask = ticker.ask_price();
+        screener.update(
+            symbol,
+            exchange,
+            bid,
+            ask,
+            ticker.exchange_ts_ns,
+            ticker.local_ts_ns,
+        );
+        let _ = ws_tx.send(MarketDataEvent {
+            symbol: symbol.clone(),
+            exchange,
+            bid,
+            ask,
+            timestamp_ns: ticker.exchange_ts_ns,
+        });
+    }
+}
+
 #[derive(Debug)]
 struct EventLoopMetrics {
     drift_samples: Vec<i64>,
@@ -412,25 +444,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     Ok(ticker) => {
                         // Process this tick + drain all buffered ticks, keep latest per symbol
                         rebuild_latest_map(&mut latest_bn, ticker, binance.drain_book_tickers());
-                        for (symbol, ticker) in &latest_bn {
-                            ticker_count += 1;
-                            metrics.record_tick_drift(now_ms(), ticker.exchange_ts_ns);
-                            screener.update(
-                                symbol,
-                                "binance",
-                                ticker.bid_price(),
-                                ticker.ask_price(),
-                                ticker.exchange_ts_ns,
-                                ticker.local_ts_ns,
-                            );
-                            let _ = ws_tx.send(MarketDataEvent {
-                                symbol: symbol.clone(),
-                                exchange: "binance",
-                                bid: ticker.bid_price(),
-                                ask: ticker.ask_price(),
-                                timestamp_ns: ticker.exchange_ts_ns,
-                            });
-                        }
+                        ingest_latest_batch(
+                            &latest_bn,
+                            "binance",
+                            &mut ticker_count,
+                            &mut metrics,
+                            &now_ms,
+                            &screener,
+                            &ws_tx,
+                        );
                         // Forward strategy ticks for bounded symbol set
                         for ticker in strategy_ticks_in_order(&strategy_symbols, &latest_bn) {
                             strategy.update_primary_book(ticker.clone()).await;
@@ -447,25 +469,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 match result {
                     Ok(ticker) => {
                         rebuild_latest_map(&mut latest_gt, ticker, gate.drain_book_tickers());
-                        for (symbol, ticker) in &latest_gt {
-                            ticker_count += 1;
-                            metrics.record_tick_drift(now_ms(), ticker.exchange_ts_ns);
-                            screener.update(
-                                symbol,
-                                "gate",
-                                ticker.bid_price(),
-                                ticker.ask_price(),
-                                ticker.exchange_ts_ns,
-                                ticker.local_ts_ns,
-                            );
-                            let _ = ws_tx.send(MarketDataEvent {
-                                symbol: symbol.clone(),
-                                exchange: "gate",
-                                bid: ticker.bid_price(),
-                                ask: ticker.ask_price(),
-                                timestamp_ns: ticker.exchange_ts_ns,
-                            });
-                        }
+                        ingest_latest_batch(
+                            &latest_gt,
+                            "gate",
+                            &mut ticker_count,
+                            &mut metrics,
+                            &now_ms,
+                            &screener,
+                            &ws_tx,
+                        );
                         for ticker in strategy_ticks_in_order(&strategy_symbols, &latest_gt) {
                             strategy.update_hedge_book(ticker.clone()).await;
                         }
@@ -659,5 +671,70 @@ mod tests {
             .map(|t| String::from_utf8_lossy(&t.symbol).to_string())
             .collect();
         assert_eq!(symbols, vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()]);
+    }
+
+    #[test]
+    fn ingest_latest_batch_is_noop_for_empty_map() {
+        let latest = std::collections::HashMap::new();
+        let mut ticker_count = 3usize;
+        let mut metrics = EventLoopMetrics::new();
+        let screener = ScreenerStore::default();
+        let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
+        let now_ms = || 130i64;
+
+        ingest_latest_batch(
+            &latest,
+            "binance",
+            &mut ticker_count,
+            &mut metrics,
+            &now_ms,
+            &screener,
+            &ws_tx,
+        );
+
+        assert_eq!(ticker_count, 3);
+        assert_eq!(metrics.drift_stats_string_and_reset(), "no_data");
+        assert!(screener.rows_sorted().is_empty());
+        assert!(matches!(
+            ws_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn ingest_latest_batch_updates_counter_metrics_screener_and_ws() {
+        let mut latest = std::collections::HashMap::new();
+        latest.insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 100_000_000));
+        let mut ticker_count = 0usize;
+        let mut metrics = EventLoopMetrics::new();
+        let screener = ScreenerStore::default();
+        let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
+        let now_ms = || 130i64;
+
+        ingest_latest_batch(
+            &latest,
+            "gate",
+            &mut ticker_count,
+            &mut metrics,
+            &now_ms,
+            &screener,
+            &ws_tx,
+        );
+
+        assert_eq!(ticker_count, 1);
+        assert_eq!(
+            metrics.drift_stats_string_and_reset(),
+            "n=1 avg=30ms p50=30ms p95=30ms p99=30ms max=30ms"
+        );
+
+        let event = ws_rx.try_recv().expect("market data event");
+        assert_eq!(event.symbol, "BTCUSDT");
+        assert_eq!(event.exchange, "gate");
+        assert_eq!(event.timestamp_ns, 100_000_000);
+
+        let rows = screener.rows_sorted();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "BTCUSDT");
+        assert_eq!(rows[0].leader_exchange, "gate");
     }
 }
