@@ -83,6 +83,13 @@ fn select_runtime_symbols(common_symbols: &[String]) -> (Vec<String>, Vec<String
     }
 }
 
+fn strategy_ticks_in_order<'a>(
+    strategy_symbols: &'a [String],
+    latest: &'a std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+) -> impl Iterator<Item = &'a hft_lead_lag::domain::BookTicker> + 'a {
+    strategy_symbols.iter().filter_map(|symbol| latest.get(symbol))
+}
+
 #[derive(Debug)]
 struct EventLoopMetrics {
     drift_samples: Vec<i64>,
@@ -425,10 +432,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             });
                         }
                         // Forward strategy ticks for bounded symbol set
-                        for sym in &strategy_symbols {
-                            if let Some(t) = latest_bn.get(sym) {
-                                strategy.update_primary_book(t.clone()).await;
-                            }
+                        for ticker in strategy_ticks_in_order(&strategy_symbols, &latest_bn) {
+                            strategy.update_primary_book(ticker.clone()).await;
                         }
                     }
                     Err(e) => {
@@ -461,10 +466,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 timestamp_ns: ticker.exchange_ts_ns,
                             });
                         }
-                        for sym in &strategy_symbols {
-                            if let Some(t) = latest_gt.get(sym) {
-                                strategy.update_hedge_book(t.clone()).await;
-                            }
+                        for ticker in strategy_ticks_in_order(&strategy_symbols, &latest_gt) {
+                            strategy.update_hedge_book(ticker.clone()).await;
                         }
                     }
                     Err(e) => {
@@ -631,5 +634,30 @@ mod tests {
         assert!(used_fallback);
         assert_eq!(strategy, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
         assert_eq!(screener, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    }
+
+    #[test]
+    fn strategy_ticks_in_order_skips_missing_symbols() {
+        let strategy_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let mut latest = std::collections::HashMap::new();
+        latest.insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 10));
+
+        let ticks: Vec<i64> = strategy_ticks_in_order(&strategy_symbols, &latest)
+            .map(|t| t.exchange_ts_ns)
+            .collect();
+        assert_eq!(ticks, vec![10]);
+    }
+
+    #[test]
+    fn strategy_ticks_in_order_preserves_strategy_order() {
+        let strategy_symbols = vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()];
+        let mut latest = std::collections::HashMap::new();
+        latest.insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 10));
+        latest.insert("ETHUSDT".to_string(), test_ticker("ETHUSDT", 20));
+
+        let symbols: Vec<String> = strategy_ticks_in_order(&strategy_symbols, &latest)
+            .map(|t| String::from_utf8_lossy(&t.symbol).to_string())
+            .collect();
+        assert_eq!(symbols, vec!["ETHUSDT".to_string(), "BTCUSDT".to_string()]);
     }
 }
