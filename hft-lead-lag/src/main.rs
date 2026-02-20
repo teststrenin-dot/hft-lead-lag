@@ -59,6 +59,53 @@ fn reconcile_volume_symbols(
     (binance_symbols, gate_symbols, outcome)
 }
 
+#[derive(Debug)]
+struct EventLoopMetrics {
+    drift_samples: Vec<i64>,
+    last_status_ticker_count: usize,
+}
+
+impl EventLoopMetrics {
+    fn new() -> Self {
+        Self {
+            drift_samples: Vec::with_capacity(8192),
+            last_status_ticker_count: 0,
+        }
+    }
+
+    fn record_tick_drift(&mut self, local_ms: i64, exchange_ts_ns: i64) {
+        let exch_ms = exchange_ts_ns / 1_000_000;
+        if exch_ms > 0 {
+            self.drift_samples.push(local_ms - exch_ms);
+        }
+    }
+
+    fn drift_stats_string_and_reset(&mut self) -> String {
+        if self.drift_samples.is_empty() {
+            return "no_data".to_string();
+        }
+
+        self.drift_samples.sort_unstable();
+        let n = self.drift_samples.len();
+        let p50 = self.drift_samples[n / 2];
+        let p95 = self.drift_samples[n * 95 / 100];
+        let p99 = self.drift_samples[n * 99 / 100];
+        let max = self.drift_samples[n - 1];
+        let avg = self.drift_samples.iter().sum::<i64>() / n as i64;
+        self.drift_samples.clear();
+        format!(
+            "n={} avg={}ms p50={}ms p95={}ms p99={}ms max={}ms",
+            n, avg, p50, p95, p99, max
+        )
+    }
+
+    fn snapshot_and_roll_status(&mut self, ticker_count: usize) -> usize {
+        let interval_tickers = ticker_count.saturating_sub(self.last_status_ticker_count);
+        self.last_status_ticker_count = ticker_count;
+        interval_tickers
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_centralized_logging("logs", "runtime.log")?;
@@ -320,14 +367,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut ticker_count = 0usize;
     let mut signal_count = 0usize;
     let mut last_status_at = Instant::now();
-    let mut last_status_ticker_count = 0usize;
     let mut signal_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
     signal_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut latest_bn: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> = std::collections::HashMap::new();
     let mut latest_gt: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> = std::collections::HashMap::new();
 
-    // Drift tracking for benchmarking
-    let mut drift_samples: Vec<i64> = Vec::with_capacity(8192);
+    // Drift + status interval tracking for benchmarking.
+    let mut metrics = EventLoopMetrics::new();
     let now_ms = || -> i64 {
         SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -351,9 +397,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                         for (symbol, ticker) in &latest_bn {
                             ticker_count += 1;
-                            let local_ms = now_ms();
-                            let exch_ms = ticker.exchange_ts_ns / 1_000_000;
-                            if exch_ms > 0 { drift_samples.push(local_ms - exch_ms); }
+                            metrics.record_tick_drift(now_ms(), ticker.exchange_ts_ns);
                             screener.update(
                                 symbol,
                                 "binance",
@@ -396,9 +440,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                         for (symbol, ticker) in &latest_gt {
                             ticker_count += 1;
-                            let local_ms = now_ms();
-                            let exch_ms = ticker.exchange_ts_ns / 1_000_000;
-                            if exch_ms > 0 { drift_samples.push(local_ms - exch_ms); }
+                            metrics.record_tick_drift(now_ms(), ticker.exchange_ts_ns);
                             screener.update(
                                 symbol,
                                 "gate",
@@ -444,26 +486,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 
                 // Status report every 5 seconds
                 if last_status_at.elapsed() >= Duration::from_secs(5) {
-                    let interval_tickers = ticker_count.saturating_sub(last_status_ticker_count);
-                    // Compute drift percentiles
-                    let drift_stats = if drift_samples.is_empty() {
-                        "no_data".to_string()
-                    } else {
-                        drift_samples.sort_unstable();
-                        let n = drift_samples.len();
-                        let p50 = drift_samples[n / 2];
-                        let p95 = drift_samples[n * 95 / 100];
-                        let p99 = drift_samples[n * 99 / 100];
-                        let max = drift_samples[n - 1];
-                        let avg = drift_samples.iter().sum::<i64>() / n as i64;
-                        format!("n={} avg={}ms p50={}ms p95={}ms p99={}ms max={}ms", n, avg, p50, p95, p99, max)
-                    };
-                    drift_samples.clear();
+                    let interval_tickers = metrics.snapshot_and_roll_status(ticker_count);
+                    let drift_stats = metrics.drift_stats_string_and_reset();
                     info!(
                         "Status: tickers={} (+{}/5s) signals={} drift=[{}]",
                         ticker_count, interval_tickers, signal_count, drift_stats
                     );
-                    last_status_ticker_count = ticker_count;
                     last_status_at = Instant::now();
                 }
             }
@@ -514,5 +542,33 @@ mod tests {
         assert_eq!(outcome, SymbolReconcileOutcome::BothMissing);
         assert_eq!(binance, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
         assert_eq!(gate, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    }
+
+    #[test]
+    fn event_loop_metrics_returns_no_data_when_empty() {
+        let mut metrics = EventLoopMetrics::new();
+        assert_eq!(metrics.drift_stats_string_and_reset(), "no_data");
+    }
+
+    #[test]
+    fn event_loop_metrics_formats_stats_and_clears_samples() {
+        let mut metrics = EventLoopMetrics::new();
+        metrics.record_tick_drift(130, 100_000_000);
+        metrics.record_tick_drift(120, 110_000_000);
+        metrics.record_tick_drift(130, 110_000_000);
+
+        assert_eq!(
+            metrics.drift_stats_string_and_reset(),
+            "n=3 avg=20ms p50=20ms p95=30ms p99=30ms max=30ms"
+        );
+        assert_eq!(metrics.drift_stats_string_and_reset(), "no_data");
+    }
+
+    #[test]
+    fn event_loop_metrics_snapshot_rolls_interval_count() {
+        let mut metrics = EventLoopMetrics::new();
+        assert_eq!(metrics.snapshot_and_roll_status(10), 10);
+        assert_eq!(metrics.snapshot_and_roll_status(16), 6);
+        assert_eq!(metrics.snapshot_and_roll_status(8), 0);
     }
 }
