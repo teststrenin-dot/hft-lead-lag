@@ -28,6 +28,7 @@
 - `docs/review-2026-02-19-deep-dive.md`: инженерный статус проекта, риски, next actions.
 - `docs/review-2026-02-19-multi-agent.md`: мультиагентное ревью (коммиты/архитектура/математика/дубли/god objects).
 - `docs/review-2026-02-20-comprehensive-audit.md`: полный аудит (коммиты, баги, архитектура, математика, dead code, Screener/Shadow Fleet отдельно).
+- `docs/review-2026-02-20-profit-deep-dive.md`: deep dive по извлечению прибыли на основе live `optimizer.db` + roadmap на 72h.
 - `docs/manifest/MANIFESTO.md`: принципы и текущий фокус.
 - `docs/review-shadow-trader.md`: архив (legacy, read-only).
 - `docs/studies/*.md`: исследовательские идеи, не source of truth.
