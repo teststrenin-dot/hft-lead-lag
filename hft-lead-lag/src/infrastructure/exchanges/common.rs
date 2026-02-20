@@ -127,41 +127,38 @@ pub fn qty_to_ticks(qty_str: &[u8]) -> Option<i64> {
 
 /// Extract string value from JSON field using simd-json style parsing
 /// Returns the value as Bytes for zero-copy processing
+fn find_json_field_value_start(json: &[u8], field_bytes: &[u8], search_from: usize) -> Option<usize> {
+    let idx = json[search_from..]
+        .windows(field_bytes.len())
+        .position(|w| w == field_bytes)?;
+    let mut pos = search_from + idx + field_bytes.len();
+    while pos < json.len()
+        && (json[pos] == b' ' || json[pos] == b':' || json[pos] == b'\n' || json[pos] == b'\r')
+    {
+        pos += 1;
+    }
+    (pos < json.len()).then_some(pos)
+}
+
 pub fn extract_json_string_field(json: &[u8], field: &str) -> Option<Bytes> {
     let field_pattern = format!("\"{}\"", field);
     let field_bytes = field_pattern.as_bytes();
-    
-    // Find the field
+
     let mut pos = 0;
-    while pos < json.len() {
-        if let Some(idx) = json[pos..].windows(field_bytes.len()).position(|w| w == field_bytes) {
-            pos += idx + field_bytes.len();
-            
-            // Skip whitespace and colon
-            while pos < json.len() && (json[pos] == b' ' || json[pos] == b':' || json[pos] == b'\n' || json[pos] == b'\r') {
-                pos += 1;
-            }
-            
-            if pos >= json.len() {
-                return None;
-            }
-            
-            // Check if string value
-            if json[pos] == b'"' {
-                pos += 1;
-                let start = pos;
-                while pos < json.len() && json[pos] != b'"' {
-                    if json[pos] == b'\\' {
-                        pos += 2; // Skip escaped char
-                    } else {
-                        pos += 1;
-                    }
+    while let Some(mut value_pos) = find_json_field_value_start(json, field_bytes, pos) {
+        if json[value_pos] == b'"' {
+            value_pos += 1;
+            let start = value_pos;
+            while value_pos < json.len() && json[value_pos] != b'"' {
+                if json[value_pos] == b'\\' {
+                    value_pos += 2;
+                } else {
+                    value_pos += 1;
                 }
-                return Some(Bytes::copy_from_slice(&json[start..pos]));
             }
-        } else {
-            break;
+            return Some(Bytes::copy_from_slice(&json[start..value_pos]));
         }
+        pos = value_pos.saturating_add(1);
     }
     None
 }
@@ -170,31 +167,20 @@ pub fn extract_json_string_field(json: &[u8], field: &str) -> Option<Bytes> {
 pub fn extract_json_i64_field(json: &[u8], field: &str) -> Option<i64> {
     let field_pattern = format!("\"{}\"", field);
     let field_bytes = field_pattern.as_bytes();
-    
+
     let mut pos = 0;
-    while pos < json.len() {
-        if let Some(idx) = json[pos..].windows(field_bytes.len()).position(|w| w == field_bytes) {
-            pos += idx + field_bytes.len();
-            
-            while pos < json.len() && (json[pos] == b' ' || json[pos] == b':' || json[pos] == b'\n' || json[pos] == b'\r') {
-                pos += 1;
+    while let Some(value_pos) = find_json_field_value_start(json, field_bytes, pos) {
+        if json[value_pos] == b'-' || json[value_pos].is_ascii_digit() {
+            let start = value_pos;
+            let mut end = value_pos;
+            while end < json.len()
+                && (json[end].is_ascii_digit() || json[end] == b'-' || json[end] == b'.')
+            {
+                end += 1;
             }
-            
-            if pos >= json.len() {
-                return None;
-            }
-            
-            // Check if numeric value
-            if json[pos] == b'-' || json[pos].is_ascii_digit() {
-                let start = pos;
-                while pos < json.len() && (json[pos].is_ascii_digit() || json[pos] == b'-' || json[pos] == b'.') {
-                    pos += 1;
-                }
-                return parse_i64(&json[start..pos]);
-            }
-        } else {
-            break;
+            return parse_i64(&json[start..end]);
         }
+        pos = value_pos.saturating_add(1);
     }
     None
 }
@@ -224,5 +210,20 @@ mod tests {
         let json = br#"{"T":1234567890,"p":50000}"#;
         let ts = extract_json_i64_field(json, "T").unwrap();
         assert_eq!(ts, 1234567890);
+    }
+
+    #[test]
+    fn test_find_json_field_value_start_skips_delimiters() {
+        let json = br#"{"s" : "BTCUSDT"}"#;
+        let pos = find_json_field_value_start(json, br#""s""#, 0).unwrap();
+        assert_eq!(json[pos], b'"');
+    }
+
+    #[test]
+    fn test_find_json_field_value_start_can_resume_search() {
+        let json = br#"{"s":"BTCUSDT","s":"ETHUSDT"}"#;
+        let first = find_json_field_value_start(json, br#""s""#, 0).unwrap();
+        let second = find_json_field_value_start(json, br#""s""#, first + 1).unwrap();
+        assert!(second > first);
     }
 }

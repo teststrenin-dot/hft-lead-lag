@@ -22,6 +22,43 @@ const SUBSCRIBE_DELAY_MS: u64 = 15;
 /// Symbols excluded from strategy — consistently unprofitable or structurally unsuitable.
 const STRATEGY_BLACKLIST: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "DYDXUSDT"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SymbolReconcileOutcome {
+    Ok,
+    BinanceMissing,
+    GateMissing,
+    BothMissing,
+}
+
+fn fallback_symbols() -> Vec<String> {
+    vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
+}
+
+fn reconcile_volume_symbols(
+    mut binance_symbols: Vec<String>,
+    mut gate_symbols: Vec<String>,
+) -> (Vec<String>, Vec<String>, SymbolReconcileOutcome) {
+    let outcome = if binance_symbols.is_empty() && !gate_symbols.is_empty() {
+        let fallback = fallback_symbols();
+        binance_symbols = fallback.clone();
+        gate_symbols = fallback;
+        SymbolReconcileOutcome::BinanceMissing
+    } else if gate_symbols.is_empty() && !binance_symbols.is_empty() {
+        let fallback = fallback_symbols();
+        binance_symbols = fallback.clone();
+        gate_symbols = fallback;
+        SymbolReconcileOutcome::GateMissing
+    } else if binance_symbols.is_empty() && gate_symbols.is_empty() {
+        let fallback = fallback_symbols();
+        binance_symbols = fallback.clone();
+        gate_symbols = fallback;
+        SymbolReconcileOutcome::BothMissing
+    } else {
+        SymbolReconcileOutcome::Ok
+    };
+    (binance_symbols, gate_symbols, outcome)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_centralized_logging("logs", "runtime.log")?;
@@ -60,25 +97,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Vec::new()
         }
     };
-    let mut binance_symbols: Vec<String> = binance_tickers.iter().map(|t| t.symbol.clone()).collect();
-    let mut gate_symbols: Vec<String> = gate_tickers.iter().map(|t| t.symbol.clone()).collect();
+    let binance_symbols: Vec<String> = binance_tickers.iter().map(|t| t.symbol.clone()).collect();
+    let gate_symbols: Vec<String> = gate_tickers.iter().map(|t| t.symbol.clone()).collect();
     // Build volume lookup (Gate volume for execution venue)
     let gate_vol_map: std::collections::HashMap<String, f64> = gate_tickers
         .iter()
         .map(|t| (t.symbol.clone(), t.quote_volume))
         .collect();
-    if binance_symbols.is_empty() && !gate_symbols.is_empty() {
-        warn!("Binance volume fetch failed — cannot safely copy Gate symbols (different listing). Using BTC/ETH fallback for both.");
-        binance_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
-        gate_symbols = binance_symbols.clone();
-    } else if gate_symbols.is_empty() && !binance_symbols.is_empty() {
-        warn!("Gate volume fetch failed — cannot safely copy Binance symbols (different listing). Using BTC/ETH fallback for both.");
-        binance_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
-        gate_symbols = binance_symbols.clone();
-    } else if binance_symbols.is_empty() && gate_symbols.is_empty() {
-        warn!("No symbols from REST; using BTC/ETH fallback");
-        binance_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
-        gate_symbols = binance_symbols.clone();
+    let (binance_symbols, gate_symbols, reconcile_outcome) =
+        reconcile_volume_symbols(binance_symbols, gate_symbols);
+    match reconcile_outcome {
+        SymbolReconcileOutcome::BinanceMissing => {
+            warn!("Binance volume fetch failed — cannot safely copy Gate symbols (different listing). Using BTC/ETH fallback for both.");
+        }
+        SymbolReconcileOutcome::GateMissing => {
+            warn!("Gate volume fetch failed — cannot safely copy Binance symbols (different listing). Using BTC/ETH fallback for both.");
+        }
+        SymbolReconcileOutcome::BothMissing => {
+            warn!("No symbols from REST; using BTC/ETH fallback");
+        }
+        SymbolReconcileOutcome::Ok => {}
     }
 
     info!("Binance symbols with 24h vol >= ${:.0}M: {}", MIN_VOLUME_USD / 1_000_000.0, binance_symbols.len());
@@ -430,5 +468,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_volume_symbols_uses_fallback_when_binance_missing() {
+        let (binance, gate, outcome) = reconcile_volume_symbols(
+            Vec::new(),
+            vec!["XRPUSDT".to_string()],
+        );
+        assert_eq!(outcome, SymbolReconcileOutcome::BinanceMissing);
+        assert_eq!(binance, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+        assert_eq!(gate, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_volume_symbols_uses_fallback_when_gate_missing() {
+        let (binance, gate, outcome) = reconcile_volume_symbols(
+            vec!["XRPUSDT".to_string()],
+            Vec::new(),
+        );
+        assert_eq!(outcome, SymbolReconcileOutcome::GateMissing);
+        assert_eq!(binance, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+        assert_eq!(gate, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_volume_symbols_keeps_lists_when_both_present() {
+        let (binance, gate, outcome) = reconcile_volume_symbols(
+            vec!["XRPUSDT".to_string()],
+            vec!["XRPUSDT".to_string()],
+        );
+        assert_eq!(outcome, SymbolReconcileOutcome::Ok);
+        assert_eq!(binance, vec!["XRPUSDT".to_string()]);
+        assert_eq!(gate, vec!["XRPUSDT".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_volume_symbols_uses_fallback_when_both_missing() {
+        let (binance, gate, outcome) = reconcile_volume_symbols(Vec::new(), Vec::new());
+        assert_eq!(outcome, SymbolReconcileOutcome::BothMissing);
+        assert_eq!(binance, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+        assert_eq!(gate, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     }
 }

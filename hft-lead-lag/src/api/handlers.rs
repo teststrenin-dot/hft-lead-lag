@@ -183,6 +183,7 @@ pub(crate) async fn get_fleet_ranking(
         let total: i64 = row.get(8)?;
         let wins: i64 = row.get(9)?;
         let total_pnl: f64 = row.get(10)?;
+        let stats = compute_fleet_stats(total, wins, total_pnl);
         Ok(FleetConfigRank {
             config_id: row.get(0)?,
             spike_threshold_bps: row.get(1)?,
@@ -194,9 +195,9 @@ pub(crate) async fn get_fleet_ranking(
             baseline_window_ms: row.get(7)?,
             total_trades: total,
             wins,
-            win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
+            win_rate_pct: stats.win_rate_pct,
             total_pnl_pct: total_pnl,
-            avg_pnl_pct: if total > 0 { total_pnl / total as f64 } else { 0.0 },
+            avg_pnl_pct: stats.avg_pnl_pct,
             symbols_traded: row.get(11)?,
         })
     }).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
@@ -258,6 +259,7 @@ pub(crate) async fn get_fleet_by_symbol(
         let total: i64 = row.get(9)?;
         let wins: i64 = row.get(10)?;
         let total_pnl: f64 = row.get(11)?;
+        let stats = compute_fleet_stats(total, wins, total_pnl);
         Ok(SymbolBestConfig {
             symbol: row.get(0)?,
             config_id: row.get(1)?,
@@ -270,9 +272,9 @@ pub(crate) async fn get_fleet_by_symbol(
             baseline_window_ms: row.get(8)?,
             total_trades: total,
             wins,
-            win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
+            win_rate_pct: stats.win_rate_pct,
             total_pnl_pct: total_pnl,
-            avg_pnl_pct: if total > 0 { total_pnl / total as f64 } else { 0.0 },
+            avg_pnl_pct: stats.avg_pnl_pct,
         })
     }).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
 
@@ -376,6 +378,26 @@ pub(crate) async fn get_fleet_ranked(
 
 // ── Internal helpers ────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy)]
+struct FleetStats {
+    win_rate_pct: f64,
+    avg_pnl_pct: f64,
+}
+
+fn compute_fleet_stats(total: i64, wins: i64, total_pnl: f64) -> FleetStats {
+    if total > 0 {
+        FleetStats {
+            win_rate_pct: (wins as f64 / total as f64) * 100.0,
+            avg_pnl_pct: total_pnl / total as f64,
+        }
+    } else {
+        FleetStats {
+            win_rate_pct: 0.0,
+            avg_pnl_pct: 0.0,
+        }
+    }
+}
+
 fn to_snapshots(exchange: &'static str, tickers: Vec<Ticker24h>) -> Vec<SymbolSnapshot> {
     tickers
         .into_iter()
@@ -394,4 +416,23 @@ fn internal_error(error: crate::domain::ExchangeError) -> (axum::http::StatusCod
         axum::http::StatusCode::BAD_GATEWAY,
         format!("exchange error: {}", error),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_fleet_stats_handles_zero_trades() {
+        let stats = compute_fleet_stats(0, 0, 42.0);
+        assert_eq!(stats.win_rate_pct, 0.0);
+        assert_eq!(stats.avg_pnl_pct, 0.0);
+    }
+
+    #[test]
+    fn compute_fleet_stats_calculates_win_rate_and_avg() {
+        let stats = compute_fleet_stats(20, 5, 10.0);
+        assert_eq!(stats.win_rate_pct, 25.0);
+        assert_eq!(stats.avg_pnl_pct, 0.5);
+    }
 }
