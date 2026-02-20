@@ -13,6 +13,11 @@ use hft_lead_lag::{
     build_runtime_strategy, BinanceMarketData, ConfigManager, GateMarketData, MarketDataStream,
     RuntimeStrategy,
 };
+use hft_lead_lag::domain::screener::TraderConfig;
+use serde::Deserialize;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -21,6 +26,11 @@ use tracing::{error, info, warn};
 /// Minimum 24h USD volume for symbol filtering
 const MIN_VOLUME_USD: f64 = 2_500_000.0; // 2.5 million USD
 const SUBSCRIBE_DELAY_MS: u64 = 15;
+const GATE_NATR_PERIOD_30M: usize = 30;
+const GATE_NATR_REFRESH_INTERVAL_SECS: u64 = 60;
+const GATE_NATR_BATCH_SIZE: usize = 12;
+const GATE_NATR_REQUEST_TIMEOUT_MS: u64 = 500;
+const RUNTIME_GRID_CONFIG_PATH: &str = "config/runtime-grid.toml";
 /// Symbols excluded from strategy — consistently unprofitable or structurally unsuitable.
 const STRATEGY_BLACKLIST: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "DYDXUSDT"];
 
@@ -37,6 +47,430 @@ struct RuntimeUniverse {
     strategy_symbols: Vec<String>,
     screener_symbols: Vec<String>,
     gate_vol_map: std::collections::HashMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct GridAxisF64 {
+    min: f64,
+    max: f64,
+    step: f64,
+}
+
+impl Default for GridAxisF64 {
+    fn default() -> Self {
+        Self {
+            min: 0.0,
+            max: 0.0,
+            step: 1.0,
+        }
+    }
+}
+
+impl GridAxisF64 {
+    fn values(&self, name: &str) -> Result<Vec<f64>, String> {
+        if !self.min.is_finite() || !self.max.is_finite() || !self.step.is_finite() {
+            return Err(format!("{name}: min/max/step must be finite"));
+        }
+        if self.step <= 0.0 {
+            return Err(format!("{name}: step must be > 0"));
+        }
+        if self.max < self.min {
+            return Err(format!("{name}: max must be >= min"));
+        }
+
+        let mut values = Vec::new();
+        let mut current = self.min;
+        let mut guard = 0usize;
+        while current <= self.max + self.step * 1e-9 {
+            values.push((current * 1_000_000.0).round() / 1_000_000.0);
+            current += self.step;
+            guard += 1;
+            if guard > 10_000 {
+                return Err(format!("{name}: generated too many points (>10000)"));
+            }
+        }
+        if values.is_empty() {
+            values.push(self.min);
+        }
+        Ok(values)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct GridAxisI64 {
+    min: i64,
+    max: i64,
+    step: i64,
+}
+
+impl Default for GridAxisI64 {
+    fn default() -> Self {
+        Self {
+            min: 0,
+            max: 0,
+            step: 1,
+        }
+    }
+}
+
+impl GridAxisI64 {
+    fn values(&self, name: &str) -> Result<Vec<i64>, String> {
+        if self.step <= 0 {
+            return Err(format!("{name}: step must be > 0"));
+        }
+        if self.max < self.min {
+            return Err(format!("{name}: max must be >= min"));
+        }
+
+        let mut values = Vec::new();
+        let mut current = self.min;
+        let mut guard = 0usize;
+        while current <= self.max {
+            values.push(current);
+            current = current.saturating_add(self.step);
+            guard += 1;
+            if guard > 10_000 {
+                return Err(format!("{name}: generated too many points (>10000)"));
+            }
+        }
+        if values.is_empty() {
+            values.push(self.min);
+        }
+        Ok(values)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct RuntimeGridConfig {
+    enabled: bool,
+    watch_interval_ms: u64,
+    apply_interval_ms: u64,
+    max_configs: usize,
+    gap_threshold_bps: GridAxisF64,
+    target_ratio: GridAxisF64,
+    stop_loss_bps: GridAxisF64,
+    max_hold_ms: GridAxisI64,
+    max_spread_bps: GridAxisF64,
+    trailing_decay_ratio: GridAxisF64,
+    baseline_window_ms: GridAxisI64,
+}
+
+impl Default for RuntimeGridConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            watch_interval_ms: 5_000,
+            apply_interval_ms: 5 * 60 * 1_000,
+            max_configs: 1_500,
+            gap_threshold_bps: GridAxisF64 {
+                min: 30.0,
+                max: 80.0,
+                step: 10.0,
+            },
+            target_ratio: GridAxisF64 {
+                min: 0.3,
+                max: 0.7,
+                step: 0.1,
+            },
+            stop_loss_bps: GridAxisF64 {
+                min: 8.0,
+                max: 40.0,
+                step: 4.0,
+            },
+            max_hold_ms: GridAxisI64 {
+                min: 5_000,
+                max: 30_000,
+                step: 5_000,
+            },
+            max_spread_bps: GridAxisF64 {
+                min: 3.0,
+                max: 5.0,
+                step: 1.0,
+            },
+            trailing_decay_ratio: GridAxisF64 {
+                min: 0.3,
+                max: 0.7,
+                step: 0.1,
+            },
+            baseline_window_ms: GridAxisI64 {
+                min: 10_000,
+                max: 60_000,
+                step: 10_000,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeGridGeneration {
+    config: RuntimeGridConfig,
+    configs: Vec<TraderConfig>,
+    signature: u64,
+    modified: SystemTime,
+}
+
+const DEFAULT_RUNTIME_GRID_CONFIG_TOML: &str = r#"# Runtime grid hot-reload (deal-hunt phase A)
+enabled = true
+watch_interval_ms = 5000
+apply_interval_ms = 300000
+max_configs = 1500
+
+[gap_threshold_bps]
+min = 30.0
+max = 80.0
+step = 10.0
+
+[target_ratio]
+min = 0.3
+max = 0.7
+step = 0.1
+
+[stop_loss_bps]
+min = 8.0
+max = 40.0
+step = 4.0
+
+[max_hold_ms]
+min = 5000
+max = 30000
+step = 5000
+
+[max_spread_bps]
+min = 3.0
+max = 5.0
+step = 1.0
+
+[trailing_decay_ratio]
+min = 0.3
+max = 0.7
+step = 0.1
+
+[baseline_window_ms]
+min = 10000
+max = 60000
+step = 10000
+"#;
+
+fn ensure_runtime_grid_config_file(
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, DEFAULT_RUNTIME_GRID_CONFIG_TOML)?;
+    info!("Created default runtime grid config: {}", path.display());
+    Ok(())
+}
+
+fn runtime_grid_signature(configs: &[TraderConfig]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    configs.len().hash(&mut hasher);
+    for cfg in configs {
+        cfg.config_id().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn downsample_configs(configs: Vec<TraderConfig>, limit: usize) -> Vec<TraderConfig> {
+    if limit == 0 || configs.is_empty() || configs.len() <= limit {
+        return configs;
+    }
+    let stride = configs.len() as f64 / limit as f64;
+    let mut selected = Vec::with_capacity(limit);
+    let mut seen = HashSet::with_capacity(limit * 2);
+    for i in 0..limit {
+        let idx = ((i as f64) * stride).floor() as usize;
+        let cfg = configs[idx.min(configs.len() - 1)];
+        if seen.insert(cfg.config_id()) {
+            selected.push(cfg);
+        }
+    }
+    if selected.len() < limit {
+        for cfg in configs {
+            if seen.insert(cfg.config_id()) {
+                selected.push(cfg);
+                if selected.len() == limit {
+                    break;
+                }
+            }
+        }
+    }
+    selected
+}
+
+fn build_runtime_grid(cfg: &RuntimeGridConfig) -> Result<Vec<TraderConfig>, String> {
+    if cfg.max_configs == 0 {
+        return Err("max_configs must be > 0".to_string());
+    }
+    let gaps = cfg.gap_threshold_bps.values("gap_threshold_bps")?;
+    let targets = cfg.target_ratio.values("target_ratio")?;
+    let stops = cfg.stop_loss_bps.values("stop_loss_bps")?;
+    let holds = cfg.max_hold_ms.values("max_hold_ms")?;
+    let spreads = cfg.max_spread_bps.values("max_spread_bps")?;
+    let trails = cfg.trailing_decay_ratio.values("trailing_decay_ratio")?;
+    let baselines = cfg.baseline_window_ms.values("baseline_window_ms")?;
+
+    let total = gaps.len()
+        * targets.len()
+        * stops.len()
+        * holds.len()
+        * spreads.len()
+        * trails.len()
+        * baselines.len();
+    if total == 0 {
+        return Err("runtime grid produced zero combinations".to_string());
+    }
+
+    let mut configs = Vec::with_capacity(total.min(cfg.max_configs));
+    let base = TraderConfig::default();
+    for &gap in &gaps {
+        for &target in &targets {
+            for &stop in &stops {
+                for &hold in &holds {
+                    for &spread in &spreads {
+                        for &trail in &trails {
+                            for &baseline in &baselines {
+                                configs.push(TraderConfig {
+                                    spike_threshold_bps: gap,
+                                    target_ratio: target,
+                                    stop_loss_bps: stop,
+                                    max_hold_ms: hold,
+                                    max_spread_bps: spread,
+                                    trailing_decay_ratio: trail,
+                                    baseline_window_ms: baseline,
+                                    ..base
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut deduped = Vec::with_capacity(configs.len());
+    let mut ids = HashSet::with_capacity(configs.len());
+    for cfg in configs {
+        if ids.insert(cfg.config_id()) {
+            deduped.push(cfg);
+        }
+    }
+    Ok(downsample_configs(deduped, cfg.max_configs))
+}
+
+fn load_runtime_grid_generation(path: &Path) -> Result<RuntimeGridGeneration, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("read runtime grid {}: {e}", path.display()))?;
+    let config: RuntimeGridConfig = toml::from_str(&content)
+        .map_err(|e| format!("parse runtime grid {}: {e}", path.display()))?;
+    let modified = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let configs = if config.enabled {
+        build_runtime_grid(&config)?
+    } else {
+        Vec::new()
+    };
+    let signature = runtime_grid_signature(&configs);
+    Ok(RuntimeGridGeneration {
+        config,
+        configs,
+        signature,
+        modified,
+    })
+}
+
+fn upsert_runtime_configs(db_path: &Path, configs: &[TraderConfig]) -> Result<(), String> {
+    let conn = hft_lead_lag::infrastructure::db::open_db(db_path)
+        .map_err(|e| format!("open db {}: {e}", db_path.display()))?;
+    hft_lead_lag::infrastructure::db::upsert_configs(&conn, configs)
+        .map_err(|e| format!("upsert runtime configs: {e}"))?;
+    Ok(())
+}
+
+fn spawn_runtime_grid_hot_reload(
+    screener: ScreenerStore,
+    db_path: PathBuf,
+    config_path: PathBuf,
+    initial_modified: Option<SystemTime>,
+    initial_signature: Option<u64>,
+) {
+    tokio::spawn(async move {
+        let mut last_modified = initial_modified;
+        let mut last_applied_signature = initial_signature;
+        let mut pending: Option<RuntimeGridGeneration> = None;
+        let mut last_apply_ms = EventLoopState::now_ms();
+
+        loop {
+            let modified = std::fs::metadata(&config_path)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let changed = match last_modified {
+                Some(prev) => modified > prev,
+                None => true,
+            };
+            if changed {
+                last_modified = Some(modified);
+                match load_runtime_grid_generation(&config_path) {
+                    Ok(generation) => {
+                        if generation.config.enabled {
+                            info!(
+                                "runtime-grid: detected update, pending apply configs={} max_configs={} apply_interval_ms={}",
+                                generation.configs.len(),
+                                generation.config.max_configs,
+                                generation.config.apply_interval_ms
+                            );
+                            pending = Some(generation);
+                        } else {
+                            info!("runtime-grid: disabled in {}", config_path.display());
+                            pending = None;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("runtime-grid: invalid update ignored: {e}");
+                    }
+                }
+            }
+
+            if let Some(generation) = pending.as_ref() {
+                let now_ms = EventLoopState::now_ms();
+                let apply_interval_ms = generation.config.apply_interval_ms.max(1_000) as i64;
+                if now_ms.saturating_sub(last_apply_ms) >= apply_interval_ms {
+                    if Some(generation.signature) == last_applied_signature {
+                        pending = None;
+                    } else if let Err(e) = upsert_runtime_configs(&db_path, &generation.configs) {
+                        warn!("runtime-grid: apply postponed, db upsert failed: {e}");
+                    } else {
+                        let report = screener.replace_fleet_configs(generation.configs.clone());
+                        screener.flush_db_writer().await;
+                        last_apply_ms = now_ms;
+                        last_applied_signature = Some(generation.signature);
+                        info!(
+                            "runtime-grid: applied configs old={} new={} symbols_reset={} drained_trades={} (flushed)",
+                            report.old_config_count,
+                            report.new_config_count,
+                            report.symbols_reset,
+                            report.drained_trades
+                        );
+                        pending = None;
+                    }
+                }
+            }
+
+            let sleep_ms = pending
+                .as_ref()
+                .map(|g| g.config.watch_interval_ms)
+                .unwrap_or(5_000)
+                .max(500);
+            tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+        }
+    });
 }
 
 fn fallback_symbols() -> Vec<String> {
@@ -274,7 +708,11 @@ impl ExchangeSide {
         }
     }
 
-    fn maybe_mark_disconnected(self, health: &HealthState, error: &hft_lead_lag::domain::ExchangeError) {
+    fn maybe_mark_disconnected(
+        self,
+        health: &HealthState,
+        error: &hft_lead_lag::domain::ExchangeError,
+    ) {
         let is_connectivity_error = matches!(
             error,
             hft_lead_lag::domain::ExchangeError::WebSocketError(_)
@@ -500,6 +938,72 @@ async fn fetch_volume_tickers(min_volume_usd: f64) -> (Vec<Ticker24h>, Vec<Ticke
     (binance_tickers, gate_tickers)
 }
 
+async fn refresh_gate_natr_batch(
+    screener: &ScreenerStore,
+    symbols: &[String],
+    start_idx: usize,
+) -> usize {
+    if symbols.is_empty() {
+        return 0;
+    }
+
+    let batch_size = GATE_NATR_BATCH_SIZE.min(symbols.len());
+    let rest = GateRestClient::new();
+    let mut updates: Vec<(String, f64)> = Vec::with_capacity(batch_size);
+    let mut fetched = 0usize;
+    let mut missing = 0usize;
+
+    for offset in 0..batch_size {
+        let idx = (start_idx + offset) % symbols.len();
+        let symbol = &symbols[idx];
+        let natr = match tokio::time::timeout(
+            tokio::time::Duration::from_millis(GATE_NATR_REQUEST_TIMEOUT_MS),
+            rest.get_natr_30m(symbol, GATE_NATR_PERIOD_30M),
+        )
+        .await
+        {
+            Ok(Ok(Some(v))) if v.is_finite() && v >= 0.0 => Some(v),
+            _ => None,
+        };
+        if let Some(v) = natr {
+            updates.push((symbol.clone(), v));
+            fetched += 1;
+        } else {
+            updates.push((symbol.clone(), 0.0));
+            missing += 1;
+        }
+    }
+
+    screener.set_gate_natr_30m(&updates);
+    info!(
+        "Gate NATR refresh: fetched={} missing={} batch={} symbols={}",
+        fetched,
+        missing,
+        batch_size,
+        symbols.len()
+    );
+
+    (start_idx + batch_size) % symbols.len()
+}
+
+fn spawn_gate_natr_refresher(screener: ScreenerStore, symbols: Vec<String>) {
+    if symbols.is_empty() {
+        warn!("Gate NATR refresher skipped: no symbols");
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut idx = 0usize;
+        loop {
+            idx = refresh_gate_natr_batch(&screener, &symbols, idx).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                GATE_NATR_REFRESH_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    });
+}
+
 fn build_runtime_universe(
     config_manager: &ConfigManager,
     min_volume_usd: f64,
@@ -622,10 +1126,11 @@ fn init_screener_persistence(
         std::fs::create_dir_all(parent)?;
     }
     let conn = hft_lead_lag::infrastructure::db::open_db(db_path)?;
-    hft_lead_lag::infrastructure::db::upsert_configs(&conn, screener.fleet_configs())?;
+    let fleet_configs = screener.fleet_configs();
+    hft_lead_lag::infrastructure::db::upsert_configs(&conn, fleet_configs.as_ref())?;
     info!(
         "Seeded {} fleet configs into {}",
-        screener.fleet_configs().len(),
+        fleet_configs.len(),
         db_path.display()
     );
     let db_writer = hft_lead_lag::infrastructure::db::spawn_writer(db_path);
@@ -771,11 +1276,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut binance = BinanceMarketData::new();
     let mut gate = GateMarketData::new();
     let health_state = Arc::new(HealthState::new());
-    configure_and_connect_exchanges(&config_manager, &mut binance, &mut gate, health_state.as_ref())
-        .await?;
+    configure_and_connect_exchanges(
+        &config_manager,
+        &mut binance,
+        &mut gate,
+        health_state.as_ref(),
+    )
+    .await?;
 
     // Start external APIs early so checkpoint endpoints are always available.
     let mut screener = ScreenerStore::default();
+    let runtime_grid_path = Path::new(RUNTIME_GRID_CONFIG_PATH);
+    ensure_runtime_grid_config_file(runtime_grid_path)?;
+    let mut runtime_grid_last_modified: Option<SystemTime> = None;
+    let mut runtime_grid_last_signature: Option<u64> = None;
+    match load_runtime_grid_generation(runtime_grid_path) {
+        Ok(generation) => {
+            runtime_grid_last_modified = Some(generation.modified);
+            if generation.config.enabled {
+                let report = screener.replace_fleet_configs(generation.configs);
+                runtime_grid_last_signature = Some(generation.signature);
+                info!(
+                    "runtime-grid: startup apply old={} new={} symbols_reset={} drained_trades={}",
+                    report.old_config_count,
+                    report.new_config_count,
+                    report.symbols_reset,
+                    report.drained_trades
+                );
+            } else {
+                info!("runtime-grid: startup disabled");
+            }
+        }
+        Err(e) => warn!("runtime-grid: startup config ignored: {e}"),
+    }
 
     // Initialize fleet persistence (SQLite WAL mode, async batch writes).
     let db_path = std::path::Path::new("data/optimizer.db");
@@ -787,6 +1320,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(|s| (s.clone(), gate_vol_map.get(s).copied().unwrap_or(0.0)))
         .collect();
     screener.set_volumes(&vol_pairs);
+    spawn_runtime_grid_hot_reload(
+        screener.clone(),
+        db_path.to_path_buf(),
+        runtime_grid_path.to_path_buf(),
+        runtime_grid_last_modified,
+        runtime_grid_last_signature,
+    );
+    spawn_gate_natr_refresher(screener.clone(), common_symbols.clone());
     let ws_tx = start_api_servers(MIN_VOLUME_USD, screener.clone(), health_state.clone()).await?;
 
     // Subscribe to screener symbols for live WS ticks.

@@ -55,6 +55,7 @@ pub struct SymbolState {
     pub(crate) avg_gt_p90_ms: f64,
     pub(crate) updated_at_ms: i64,
     pub(crate) volume_24h_usd: f64,
+    pub(crate) gate_natr_30m_pct: f64,
     pub(crate) binance_leads: CycleTracker,
     pub(crate) gate_leads: CycleTracker,
     pub(crate) price_samples: PriceSamples,
@@ -182,12 +183,13 @@ impl SymbolState {
             binance_ask: binance.ask,
         });
         self.price_samples.cleanup(exchange_ts_ms);
-        self.shadow.tick(
+        self.shadow.tick_with_context(
             exchange_ts_ms,
             binance,
             gate,
             &self.price_samples,
             window_ms,
+            self.gate_natr_30m_pct,
         );
     }
 }

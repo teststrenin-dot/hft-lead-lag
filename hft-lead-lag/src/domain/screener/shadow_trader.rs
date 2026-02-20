@@ -5,19 +5,25 @@
 //! Gate in the same direction. Exit when Gate catches up (target), on timeout,
 //! or stop-loss.
 
-use std::collections::VecDeque;
 use serde::Serialize;
+use std::collections::VecDeque;
 
 use super::price_samples::PriceSamples;
 use super::state::Quote;
 use super::trader_config::TraderConfig;
+
+/// stop_loss exits closed within this time budget are treated as early-stop churn.
+pub const EARLY_STOP_CHURN_HOLD_MS: i64 = 500;
 
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Direction { Short, Long }
+pub enum Direction {
+    Short,
+    Long,
+}
 
 #[derive(Debug, Clone)]
 struct OpenPosition {
@@ -26,6 +32,7 @@ struct OpenPosition {
     entry_ts_ms: i64,
     spike_bps: f64,
     gate_spread_at_entry_bps: f64,
+    gate_natr_30m_pct_at_entry: f64,
     /// Highest unrealized profit seen (bps) — for trailing take-profit.
     peak_unrealized_bps: f64,
     /// True once unrealized reaches breakeven threshold (spike * target_ratio).
@@ -47,6 +54,9 @@ pub struct ClosedTrade {
     pub catchup_pct: f64,
     pub catchup_ms: i64,
     pub gate_spread_at_entry_bps: f64,
+    pub gate_natr_30m_pct_at_entry: f64,
+    pub hold_ms: i64,
+    pub early_stop_churn: bool,
 }
 
 impl ClosedTrade {
@@ -65,6 +75,7 @@ enum PendingOrder {
         fire_ts_ms: i64,
         spike_bps: f64,
         gate_spread_at_entry_bps: f64,
+        gate_natr_30m_pct_at_entry: f64,
     },
     Exit {
         fire_ts_ms: i64,
@@ -157,7 +168,9 @@ pub struct ShadowTrader {
 }
 
 impl Default for ShadowTrader {
-    fn default() -> Self { Self::new(TraderConfig::default()) }
+    fn default() -> Self {
+        Self::new(TraderConfig::default())
+    }
 }
 
 impl ShadowTrader {
@@ -177,13 +190,21 @@ impl ShadowTrader {
         }
     }
 
-    pub fn config(&self) -> &TraderConfig { &self.config }
+    pub fn config(&self) -> &TraderConfig {
+        &self.config
+    }
 
-    pub fn completed_trades(&self) -> &VecDeque<ClosedTrade> { &self.completed_trades }
+    pub fn completed_trades(&self) -> &VecDeque<ClosedTrade> {
+        &self.completed_trades
+    }
 
-    pub fn session_trades(&self) -> usize { self.session_trades }
+    pub fn session_trades(&self) -> usize {
+        self.session_trades
+    }
 
-    pub fn session_pnl_pct(&self) -> f64 { self.session_total_pnl_pct }
+    pub fn session_pnl_pct(&self) -> f64 {
+        self.session_total_pnl_pct
+    }
 
     // -- Core tick -----------------------------------------------------------
 
@@ -194,6 +215,18 @@ impl ShadowTrader {
         gate: &Quote,
         samples: &PriceSamples,
         window_ms: i64,
+    ) {
+        self.tick_with_context(ts_ms, binance, gate, samples, window_ms, 0.0);
+    }
+
+    pub fn tick_with_context(
+        &mut self,
+        ts_ms: i64,
+        binance: &Quote,
+        gate: &Quote,
+        samples: &PriceSamples,
+        window_ms: i64,
+        gate_natr_30m_pct_at_entry: f64,
     ) {
         if self.start_ts_ms.is_none() {
             self.start_ts_ms = Some(ts_ms);
@@ -215,15 +248,19 @@ impl ShadowTrader {
         }
 
         self.try_fill(ts_ms, gate, window_ms);
-        if self.pending.is_some() { return; }
+        if self.pending.is_some() {
+            return;
+        }
         self.try_exit(ts_ms, gate);
-        self.try_entry(ts_ms, binance, gate, samples);
+        self.try_entry(ts_ms, binance, gate, samples, gate_natr_30m_pct_at_entry);
     }
 
     // -- Fill pending orders -------------------------------------------------
 
     fn try_fill(&mut self, ts_ms: i64, gate: &Quote, window_ms: i64) {
-        let Some(pending) = self.pending.take() else { return };
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
         let fire_ts = match &pending {
             PendingOrder::Entry { fire_ts_ms, .. } => *fire_ts_ms,
             PendingOrder::Exit { fire_ts_ms, .. } => *fire_ts_ms,
@@ -236,7 +273,13 @@ impl ShadowTrader {
             PendingOrder::Exit { pos, reason, .. } => {
                 self.fill_exit(ts_ms, gate, window_ms, pos, reason);
             }
-            PendingOrder::Entry { direction, spike_bps, gate_spread_at_entry_bps, .. } => {
+            PendingOrder::Entry {
+                direction,
+                spike_bps,
+                gate_spread_at_entry_bps,
+                gate_natr_30m_pct_at_entry,
+                ..
+            } => {
                 let gate_price = match direction {
                     Direction::Long => gate.ask,
                     Direction::Short => gate.bid,
@@ -247,6 +290,7 @@ impl ShadowTrader {
                     entry_ts_ms: ts_ms,
                     spike_bps,
                     gate_spread_at_entry_bps,
+                    gate_natr_30m_pct_at_entry,
                     peak_unrealized_bps: 0.0,
                     breakeven_activated: false,
                 });
@@ -258,10 +302,12 @@ impl ShadowTrader {
 
     fn unrealized_bps(pos: &OpenPosition, gate: &Quote) -> f64 {
         match pos.direction {
-            Direction::Long =>
-                ((gate.bid - pos.gate_entry_price) / pos.gate_entry_price) * 10_000.0,
-            Direction::Short =>
-                ((pos.gate_entry_price - gate.ask) / pos.gate_entry_price) * 10_000.0,
+            Direction::Long => {
+                ((gate.bid - pos.gate_entry_price) / pos.gate_entry_price) * 10_000.0
+            }
+            Direction::Short => {
+                ((pos.gate_entry_price - gate.ask) / pos.gate_entry_price) * 10_000.0
+            }
         }
     }
 
@@ -292,7 +338,9 @@ impl ShadowTrader {
     }
 
     fn try_exit(&mut self, ts_ms: i64, gate: &Quote) {
-        let Some(pos) = self.position.as_mut() else { return };
+        let Some(pos) = self.position.as_mut() else {
+            return;
+        };
         let hold_ms = ts_ms - pos.entry_ts_ms;
 
         let unrealized_bps = Self::unrealized_bps(pos, gate);
@@ -305,7 +353,9 @@ impl ShadowTrader {
             pos.breakeven_activated = true;
         }
 
-        if let Some(reason) = Self::determine_exit_reason(&self.config, pos, unrealized_bps, hold_ms) {
+        if let Some(reason) =
+            Self::determine_exit_reason(&self.config, pos, unrealized_bps, hold_ms)
+        {
             let pos = self.position.take().unwrap();
             self.pending = Some(PendingOrder::Exit {
                 fire_ts_ms: ts_ms,
@@ -317,7 +367,14 @@ impl ShadowTrader {
 
     // -- Entry logic ---------------------------------------------------------
 
-    fn try_entry(&mut self, ts_ms: i64, binance: &Quote, gate: &Quote, samples: &PriceSamples) {
+    fn try_entry(
+        &mut self,
+        ts_ms: i64,
+        binance: &Quote,
+        gate: &Quote,
+        samples: &PriceSamples,
+        gate_natr_30m_pct_at_entry: f64,
+    ) {
         if self.position.is_some() || self.pending.is_some() || ts_ms < self.cooldown_until_ms {
             return;
         }
@@ -328,7 +385,9 @@ impl ShadowTrader {
             let gate_mid = (gate.bid + gate.ask) * 0.5;
             if gate_mid > 0.0 {
                 let spread_bps = ((gate.ask - gate.bid) / gate_mid) * 10_000.0;
-                if spread_bps > cfg.max_spread_bps { return; }
+                if spread_bps > cfg.max_spread_bps {
+                    return;
+                }
             }
         }
 
@@ -337,12 +396,15 @@ impl ShadowTrader {
             let gate_mid = (gate.bid + gate.ask) * 0.5;
             let spread_bps = if gate_mid > 0.0 {
                 ((gate.ask - gate.bid) / gate_mid) * 10_000.0
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             self.pending = Some(PendingOrder::Entry {
                 direction,
                 fire_ts_ms: ts_ms,
                 spike_bps: gap_bps,
                 gate_spread_at_entry_bps: spread_bps,
+                gate_natr_30m_pct_at_entry,
             });
         }
     }
@@ -353,16 +415,24 @@ impl ShadowTrader {
     /// Baseline = mean(binance - gate) over last `baseline_window_ms`.
     /// Signal = current_gap - baseline_gap. Enter when signal > threshold.
     fn detect_gap(
-        &self, ts_ms: i64, binance: &Quote, gate: &Quote, samples: &PriceSamples,
+        &self,
+        ts_ms: i64,
+        binance: &Quote,
+        gate: &Quote,
+        samples: &PriceSamples,
     ) -> Option<(Direction, f64)> {
-        if samples.len() < self.config.min_baseline_samples { return None; }
+        if samples.len() < self.config.min_baseline_samples {
+            return None;
+        }
 
         let cutoff = ts_ms - self.config.baseline_window_ms;
 
         // Compute baseline gap over window (not all samples)
         let (mut ask_gap_sum, mut bid_gap_sum, mut count) = (0.0_f64, 0.0_f64, 0_u32);
         for s in samples.iter() {
-            if s.ts_ms < cutoff { continue; }
+            if s.ts_ms < cutoff {
+                continue;
+            }
             if s.gate_ask > 0.0 && s.binance_ask > 0.0 {
                 ask_gap_sum += ((s.binance_ask - s.gate_ask) / s.gate_ask) * 10_000.0;
             }
@@ -371,7 +441,9 @@ impl ShadowTrader {
             }
             count += 1;
         }
-        if count == 0 { return None; }
+        if count == 0 {
+            return None;
+        }
         let baseline_ask_gap = ask_gap_sum / count as f64;
         let baseline_bid_gap = bid_gap_sum / count as f64;
 
@@ -399,8 +471,12 @@ impl ShadowTrader {
     // -- Fill exit & bookkeeping ---------------------------------------------
 
     fn fill_exit(
-        &mut self, ts_ms: i64, gate: &Quote, window_ms: i64,
-        pos: OpenPosition, exit_reason: &'static str,
+        &mut self,
+        ts_ms: i64,
+        gate: &Quote,
+        window_ms: i64,
+        pos: OpenPosition,
+        exit_reason: &'static str,
     ) {
         let fees = self.config.taker_fee * 2.0;
         let (pnl_pct, catchup_pct, exit_price) = match pos.direction {
@@ -415,13 +491,24 @@ impl ShadowTrader {
                 ((raw - fees) * 100.0, raw * 100.0, ep)
             }
         };
+        let hold_ms = ts_ms.saturating_sub(pos.entry_ts_ms);
+        let early_stop_churn = exit_reason == "stop_loss" && hold_ms <= EARLY_STOP_CHURN_HOLD_MS;
 
         self.completed_trades.push_back(ClosedTrade {
-            pnl_pct, ts_ms, direction: pos.direction,
-            entry_ts_ms: pos.entry_ts_ms, entry_price: pos.gate_entry_price,
-            exit_price, exit_reason, spike_bps: pos.spike_bps,
-            catchup_pct, catchup_ms: ts_ms - pos.entry_ts_ms,
+            pnl_pct,
+            ts_ms,
+            direction: pos.direction,
+            entry_ts_ms: pos.entry_ts_ms,
+            entry_price: pos.gate_entry_price,
+            exit_price,
+            exit_reason,
+            spike_bps: pos.spike_bps,
+            catchup_pct,
+            catchup_ms: ts_ms - pos.entry_ts_ms,
             gate_spread_at_entry_bps: pos.gate_spread_at_entry_bps,
+            gate_natr_30m_pct_at_entry: pos.gate_natr_30m_pct_at_entry,
+            hold_ms,
+            early_stop_churn,
         });
         self.session_total_pnl_pct += pnl_pct;
         self.session_trades += 1;
@@ -432,7 +519,9 @@ impl ShadowTrader {
 
         let cutoff = ts_ms - window_ms;
         while let Some(t) = self.completed_trades.front() {
-            if t.ts_ms >= cutoff { break; }
+            if t.ts_ms >= cutoff {
+                break;
+            }
             self.completed_trades.pop_front();
         }
     }
@@ -443,20 +532,31 @@ impl ShadowTrader {
         let window_n = self.completed_trades.len();
         if self.session_trades == 0 {
             return ShadowStats {
-                session_pnl_pct: 0.0, session_trades: 0,
-                avg_trade_pct: 0.0, win_rate_pct: 0.0,
+                session_pnl_pct: 0.0,
+                session_trades: 0,
+                avg_trade_pct: 0.0,
+                win_rate_pct: 0.0,
                 position: self.position_label(),
                 spikes_detected: self.spike_timestamps.len(),
-                avg_catchup_pct: 0.0, avg_catchup_lag_ms: 0.0,
+                avg_catchup_pct: 0.0,
+                avg_catchup_lag_ms: 0.0,
             };
         }
         let avg_catchup = if window_n > 0 {
-            self.completed_trades.iter().map(|t| t.catchup_pct).sum::<f64>() / window_n as f64
+            self.completed_trades
+                .iter()
+                .map(|t| t.catchup_pct)
+                .sum::<f64>()
+                / window_n as f64
         } else {
             0.0
         };
         let avg_lag = if window_n > 0 {
-            self.completed_trades.iter().map(|t| t.catchup_ms as f64).sum::<f64>() / window_n as f64
+            self.completed_trades
+                .iter()
+                .map(|t| t.catchup_ms as f64)
+                .sum::<f64>()
+                / window_n as f64
         } else {
             0.0
         };
@@ -474,7 +574,9 @@ impl ShadowTrader {
     }
 
     pub fn position_label(&self) -> &'static str {
-        if self.pending.is_some() { return "PENDING"; }
+        if self.pending.is_some() {
+            return "PENDING";
+        }
         match &self.position {
             None => "FLAT",
             Some(p) => match p.direction {
@@ -487,16 +589,25 @@ impl ShadowTrader {
     fn cleanup_spikes(&mut self, ts_ms: i64) {
         let cutoff = ts_ms - 2 * 60 * 1000;
         while let Some(&spike_ts) = self.spike_timestamps.front() {
-            if spike_ts >= cutoff { break; }
+            if spike_ts >= cutoff {
+                break;
+            }
             self.spike_timestamps.pop_front();
         }
     }
 
     pub fn debug(&self, samples: &PriceSamples) -> ShadowDebug {
-        let elapsed = self.start_ts_ms
-            .map(|s| self.latest_ts_ms.saturating_sub(s)).unwrap_or(0);
-        let last_5: Vec<f64> = self.completed_trades.iter()
-            .rev().take(5).map(|t| t.pnl_pct).collect();
+        let elapsed = self
+            .start_ts_ms
+            .map(|s| self.latest_ts_ms.saturating_sub(s))
+            .unwrap_or(0);
+        let last_5: Vec<f64> = self
+            .completed_trades
+            .iter()
+            .rev()
+            .take(5)
+            .map(|t| t.pnl_pct)
+            .collect();
         let last = samples.back();
         ShadowDebug {
             samples: samples.len(),
@@ -535,18 +646,30 @@ impl ShadowTrader {
                 bn_ask.push(s.binance_ask);
             }
         }
-        let trades: Vec<ChartTrade> = self.completed_trades.iter().map(|t| ChartTrade {
-            entry_ts_ms: t.entry_ts_ms, exit_ts_ms: t.ts_ms,
-            direction: t.direction_str(),
-            pnl_pct: t.pnl_pct, exit_reason: t.exit_reason,
-            spike_bps: t.spike_bps, catchup_pct: t.catchup_pct,
-            entry_price: t.entry_price, exit_price: t.exit_price,
-        }).collect();
+        let trades: Vec<ChartTrade> = self
+            .completed_trades
+            .iter()
+            .map(|t| ChartTrade {
+                entry_ts_ms: t.entry_ts_ms,
+                exit_ts_ms: t.ts_ms,
+                direction: t.direction_str(),
+                pnl_pct: t.pnl_pct,
+                exit_reason: t.exit_reason,
+                spike_bps: t.spike_bps,
+                catchup_pct: t.catchup_pct,
+                entry_price: t.entry_price,
+                exit_price: t.exit_price,
+            })
+            .collect();
         ChartData {
-            symbol: symbol.to_string(), ts,
-            gate_bid: gt_bid, gate_ask: gt_ask,
-            binance_bid: bn_bid, binance_ask: bn_ask,
-            trades, position: self.position_label(),
+            symbol: symbol.to_string(),
+            ts,
+            gate_bid: gt_bid,
+            gate_ask: gt_ask,
+            binance_bid: bn_bid,
+            binance_ask: bn_ask,
+            trades,
+            position: self.position_label(),
             entry_price: self.position.as_ref().map(|p| p.gate_entry_price),
             entry_ts_ms: self.position.as_ref().map(|p| p.entry_ts_ms),
         }
@@ -559,8 +682,8 @@ impl ShadowTrader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::price_samples::{PriceSample, PriceSamples};
+    use super::*;
 
     const WINDOW_MS: i64 = 120_000;
 
@@ -581,8 +704,10 @@ mod tests {
         for i in 0..n {
             ps.push(PriceSample {
                 ts_ms: ts_ms - (n as i64 - i as i64) * 100,
-                gate_bid: gate, gate_ask: gate,
-                binance_bid: binance, binance_ask: binance,
+                gate_bid: gate,
+                gate_ask: gate,
+                binance_bid: binance,
+                binance_ask: binance,
             });
         }
         ps
@@ -592,7 +717,9 @@ mod tests {
 
     #[test]
     fn baseline_needs_min_samples() {
-        let trader = make_trader(|c| { c.min_baseline_samples = 20; });
+        let trader = make_trader(|c| {
+            c.min_baseline_samples = 20;
+        });
         let samples = stable_samples(19, 100.0, 100.0, 50_000);
         let bn = quote(100.0, 100.0, 50_000);
         let gt = quote(100.0, 100.0, 50_000);
@@ -615,7 +742,10 @@ mod tests {
         assert!(result.is_some());
         let (dir, gap_bps) = result.unwrap();
         assert_eq!(dir, Direction::Long);
-        assert!((gap_bps - 60.0).abs() < 1.0, "expected ~60 bps, got {gap_bps}");
+        assert!(
+            (gap_bps - 60.0).abs() < 1.0,
+            "expected ~60 bps, got {gap_bps}"
+        );
     }
 
     #[test]
@@ -668,7 +798,11 @@ mod tests {
         // raw = (100.10 - 100.0) / 100.0 = 0.001
         // fees = 0.0005 * 2 = 0.001
         // pnl = (0.001 - 0.001) * 100 = 0.0
-        assert!(t.pnl_pct.abs() < 0.01, "expected ~0% pnl, got {}", t.pnl_pct);
+        assert!(
+            t.pnl_pct.abs() < 0.01,
+            "expected ~0% pnl, got {}",
+            t.pnl_pct
+        );
     }
 
     // -- Exit conditions --------------------------------------------------------
@@ -721,7 +855,7 @@ mod tests {
         let gt = quote(100.0, 100.0, 50_100);
         trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
         trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS); // fill entry at 100.0
-        // gate.bid = 100.11 → unrealized = 11 bps >= 10 → breakeven activates
+                                                            // gate.bid = 100.11 → unrealized = 11 bps >= 10 → breakeven activates
         let gt_up = quote(100.11, 100.20, 50_300);
         trader.tick(50_300, &bn, &gt_up, &samples, WINDOW_MS);
         // Still open — no target exit in new model, trailing take not triggered yet
@@ -759,7 +893,7 @@ mod tests {
         let gt = quote(100.0, 100.0, 50_100);
         trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
         trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS); // fill at 100.0
-        // Hit breakeven threshold: 11 bps >= 10
+                                                            // Hit breakeven threshold: 11 bps >= 10
         let gt_up = quote(100.11, 100.20, 50_300);
         trader.tick(50_300, &bn, &gt_up, &samples, WINDOW_MS);
         // Price crashes back to entry: gate.bid = 99.99 → unrealized = -1 bps <= 0
@@ -788,7 +922,7 @@ mod tests {
         let gt = quote(100.0, 100.0, 50_100);
         trader.tick(50_100, &bn, &gt, &samples, WINDOW_MS);
         trader.tick(50_200, &bn, &gt, &samples, WINDOW_MS); // fill
-        // Advance past max_hold_ms=100
+                                                            // Advance past max_hold_ms=100
         let gt_flat = quote(100.0, 100.0, 50_400);
         trader.tick(50_400, &bn, &gt_flat, &samples, WINDOW_MS); // timeout fires
         trader.tick(50_500, &bn, &gt_flat, &samples, WINDOW_MS); // fill exit
@@ -880,12 +1014,16 @@ mod tests {
             breakeven_activated: breakeven,
             peak_unrealized_bps: peak_bps,
             gate_spread_at_entry_bps: 0.0,
+            gate_natr_30m_pct_at_entry: 0.0,
         }
     }
 
     #[test]
     fn exit_reason_stop_loss() {
-        let cfg = make_config(|c| { c.stop_loss_bps = 5.0; c.max_hold_ms = 999_999; });
+        let cfg = make_config(|c| {
+            c.stop_loss_bps = 5.0;
+            c.max_hold_ms = 999_999;
+        });
         let pos = make_pos(false, 0.0, 20.0);
         assert_eq!(
             ShadowTrader::determine_exit_reason(&cfg, &pos, -6.0, 100),
@@ -895,7 +1033,11 @@ mod tests {
 
     #[test]
     fn exit_reason_breakeven_stop() {
-        let cfg = make_config(|c| { c.stop_loss_bps = 999.0; c.max_hold_ms = 999_999; c.trailing_decay_ratio = 0.5; });
+        let cfg = make_config(|c| {
+            c.stop_loss_bps = 999.0;
+            c.max_hold_ms = 999_999;
+            c.trailing_decay_ratio = 0.5;
+        });
         let pos = make_pos(true, 10.0, 20.0);
         assert_eq!(
             ShadowTrader::determine_exit_reason(&cfg, &pos, -0.5, 100),
@@ -905,7 +1047,11 @@ mod tests {
 
     #[test]
     fn exit_reason_trailing_take() {
-        let cfg = make_config(|c| { c.stop_loss_bps = 999.0; c.max_hold_ms = 999_999; c.trailing_decay_ratio = 0.5; });
+        let cfg = make_config(|c| {
+            c.stop_loss_bps = 999.0;
+            c.max_hold_ms = 999_999;
+            c.trailing_decay_ratio = 0.5;
+        });
         let pos = make_pos(true, 20.0, 30.0);
         // unrealized 8 bps < peak 20 * 0.5 = 10 → trailing_take
         assert_eq!(
@@ -916,7 +1062,10 @@ mod tests {
 
     #[test]
     fn exit_reason_timeout_pre_breakeven() {
-        let cfg = make_config(|c| { c.stop_loss_bps = 999.0; c.max_hold_ms = 100; });
+        let cfg = make_config(|c| {
+            c.stop_loss_bps = 999.0;
+            c.max_hold_ms = 100;
+        });
         let pos = make_pos(false, 5.0, 20.0);
         assert_eq!(
             ShadowTrader::determine_exit_reason(&cfg, &pos, 3.0, 100),
@@ -926,7 +1075,11 @@ mod tests {
 
     #[test]
     fn exit_reason_none_when_healthy() {
-        let cfg = make_config(|c| { c.stop_loss_bps = 50.0; c.max_hold_ms = 999_999; c.trailing_decay_ratio = 0.5; });
+        let cfg = make_config(|c| {
+            c.stop_loss_bps = 50.0;
+            c.max_hold_ms = 999_999;
+            c.trailing_decay_ratio = 0.5;
+        });
         let pos = make_pos(false, 10.0, 20.0);
         assert_eq!(
             ShadowTrader::determine_exit_reason(&cfg, &pos, 5.0, 100),

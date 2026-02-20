@@ -51,9 +51,11 @@ pub struct PolicyWindowMetrics {
     pub trades: f64,
     pub wins: f64,
     pub stop_loss_trades: f64,
+    pub early_stop_churn_trades: f64,
     pub avg_pnl_pct: f64,
     pub win_rate_pct: f64,
     pub stop_loss_share_pct: f64,
+    pub early_stop_churn_share_pct: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,6 +76,7 @@ struct DecayedWindow {
     trades: f64,
     wins: f64,
     stop_loss_trades: f64,
+    early_stop_churn_trades: f64,
     pnl_sum_pct: f64,
 }
 
@@ -85,6 +88,7 @@ impl DecayedWindow {
             trades: 0.0,
             wins: 0.0,
             stop_loss_trades: 0.0,
+            early_stop_churn_trades: 0.0,
             pnl_sum_pct: 0.0,
         }
     }
@@ -102,11 +106,18 @@ impl DecayedWindow {
         self.trades *= decay;
         self.wins *= decay;
         self.stop_loss_trades *= decay;
+        self.early_stop_churn_trades *= decay;
         self.pnl_sum_pct *= decay;
         self.last_ts_ms = Some(ts_ms);
     }
 
-    fn observe_trade(&mut self, ts_ms: i64, pnl_pct: f64, is_stop_loss: bool) {
+    fn observe_trade(
+        &mut self,
+        ts_ms: i64,
+        pnl_pct: f64,
+        is_stop_loss: bool,
+        is_early_stop_churn: bool,
+    ) {
         self.decay_to(ts_ms);
         self.trades += 1.0;
         if pnl_pct > 0.0 {
@@ -115,47 +126,62 @@ impl DecayedWindow {
         if is_stop_loss {
             self.stop_loss_trades += 1.0;
         }
+        if is_early_stop_churn {
+            self.early_stop_churn_trades += 1.0;
+        }
         self.pnl_sum_pct += pnl_pct;
     }
 
     fn metrics_at(&self, ts_ms: i64) -> PolicyWindowMetrics {
-        let (trades, wins, stop_loss_trades, pnl_sum_pct) = if let Some(last_ts_ms) = self.last_ts_ms
-        {
-            if ts_ms > last_ts_ms {
-                let dt_ms = (ts_ms - last_ts_ms) as f64;
-                let decay = (-(dt_ms / self.horizon_ms as f64)).exp();
-                (
-                    self.trades * decay,
-                    self.wins * decay,
-                    self.stop_loss_trades * decay,
-                    self.pnl_sum_pct * decay,
-                )
+        let (trades, wins, stop_loss_trades, early_stop_churn_trades, pnl_sum_pct) =
+            if let Some(last_ts_ms) = self.last_ts_ms {
+                if ts_ms > last_ts_ms {
+                    let dt_ms = (ts_ms - last_ts_ms) as f64;
+                    let decay = (-(dt_ms / self.horizon_ms as f64)).exp();
+                    (
+                        self.trades * decay,
+                        self.wins * decay,
+                        self.stop_loss_trades * decay,
+                        self.early_stop_churn_trades * decay,
+                        self.pnl_sum_pct * decay,
+                    )
+                } else {
+                    (
+                        self.trades,
+                        self.wins,
+                        self.stop_loss_trades,
+                        self.early_stop_churn_trades,
+                        self.pnl_sum_pct,
+                    )
+                }
             } else {
-                (self.trades, self.wins, self.stop_loss_trades, self.pnl_sum_pct)
-            }
-        } else {
-            (0.0, 0.0, 0.0, 0.0)
-        };
+                (0.0, 0.0, 0.0, 0.0, 0.0)
+            };
 
         if trades <= 1e-9 {
             return PolicyWindowMetrics {
                 trades: 0.0,
                 wins: 0.0,
                 stop_loss_trades: 0.0,
+                early_stop_churn_trades: 0.0,
                 avg_pnl_pct: 0.0,
                 win_rate_pct: 0.0,
                 stop_loss_share_pct: 0.0,
+                early_stop_churn_share_pct: 0.0,
             };
         }
         let win_rate_pct = (wins / trades) * 100.0;
         let stop_loss_share_pct = (stop_loss_trades / trades) * 100.0;
+        let early_stop_churn_share_pct = (early_stop_churn_trades / trades) * 100.0;
         PolicyWindowMetrics {
             trades,
             wins,
             stop_loss_trades,
+            early_stop_churn_trades,
             avg_pnl_pct: pnl_sum_pct / trades,
             win_rate_pct,
             stop_loss_share_pct,
+            early_stop_churn_share_pct,
         }
     }
 }
@@ -178,12 +204,25 @@ impl ConfigPolicyState {
 
     fn observe_trade(&mut self, trade: &ClosedTrade) {
         let is_stop_loss = trade.exit_reason == "stop_loss";
-        self.window_1h
-            .observe_trade(trade.ts_ms, trade.pnl_pct, is_stop_loss);
-        self.window_6h
-            .observe_trade(trade.ts_ms, trade.pnl_pct, is_stop_loss);
-        self.window_24h
-            .observe_trade(trade.ts_ms, trade.pnl_pct, is_stop_loss);
+        let is_early_stop_churn = trade.early_stop_churn;
+        self.window_1h.observe_trade(
+            trade.ts_ms,
+            trade.pnl_pct,
+            is_stop_loss,
+            is_early_stop_churn,
+        );
+        self.window_6h.observe_trade(
+            trade.ts_ms,
+            trade.pnl_pct,
+            is_stop_loss,
+            is_early_stop_churn,
+        );
+        self.window_24h.observe_trade(
+            trade.ts_ms,
+            trade.pnl_pct,
+            is_stop_loss,
+            is_early_stop_churn,
+        );
     }
 
     fn score_and_gate(
@@ -301,6 +340,12 @@ pub struct FleetTrade {
     pub trade: ClosedTrade,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct FleetTickMeta<'a> {
+    pub symbol: &'a str,
+    pub gate_natr_30m_pct_at_entry: f64,
+}
+
 /// Fleet of shadow traders for one symbol.
 /// Holds N traders with different configs, ticks all on shared samples.
 /// Auto-prunes configs with negative expectancy or zero trades after warmup.
@@ -367,7 +412,7 @@ impl ShadowFleet {
         gate: &Quote,
         samples: &PriceSamples,
         window_ms: i64,
-        symbol: &str,
+        meta: FleetTickMeta<'_>,
     ) {
         let first = *self.first_tick_ms.get_or_insert(ts_ms);
         let elapsed = ts_ms - first;
@@ -377,7 +422,14 @@ impl ShadowFleet {
                 continue;
             }
 
-            trader.tick(ts_ms, binance, gate, samples, window_ms);
+            trader.tick_with_context(
+                ts_ms,
+                binance,
+                gate,
+                samples,
+                window_ms,
+                meta.gate_natr_30m_pct_at_entry,
+            );
 
             let session_n = trader.session_trades();
             let prev_n = self.last_session_trades[idx];
@@ -386,7 +438,7 @@ impl ShadowFleet {
                 let new_count = session_n - prev_n;
                 let deque = trader.completed_trades();
                 let start = deque.len().saturating_sub(new_count);
-                let sym = symbol.to_string();
+                let sym = meta.symbol.to_string();
                 for trade in deque.iter().skip(start) {
                     self.policy[idx].observe_trade(trade);
                     self.pending_trades.push_back(FleetTrade {
@@ -405,7 +457,7 @@ impl ShadowFleet {
                         self.active_count -= 1;
                         tracing::debug!(
                             config_id = *config_id,
-                            symbol,
+                            symbol = meta.symbol,
                             trades = session_n,
                             avg_pnl_pct = format!("{avg_pnl:.4}"),
                             "fleet: pruned (negative expectancy)"
@@ -418,7 +470,7 @@ impl ShadowFleet {
                 self.active_count -= 1;
                 tracing::debug!(
                     config_id = *config_id,
-                    symbol,
+                    symbol = meta.symbol,
                     elapsed_min = elapsed / 60_000,
                     "fleet: pruned (zero trades)"
                 );
@@ -507,6 +559,9 @@ mod tests {
                 catchup_pct: 0.3,
                 catchup_ms: 500,
                 gate_spread_at_entry_bps: 1.0,
+                gate_natr_30m_pct_at_entry: 0.0,
+                hold_ms: 500,
+                early_stop_churn: false,
             });
         }
         let snapshot = state.snapshot(42);
@@ -538,6 +593,9 @@ mod tests {
                 catchup_pct: 0.2,
                 catchup_ms: 300,
                 gate_spread_at_entry_bps: 1.0,
+                gate_natr_30m_pct_at_entry: 0.0,
+                hold_ms: 300,
+                early_stop_churn: false,
             });
         }
         let snapshot = state.snapshot(7);
@@ -552,7 +610,7 @@ mod tests {
     #[test]
     fn decayed_window_fades_old_observations() {
         let mut window = DecayedWindow::new(POLICY_WINDOW_6H_MS);
-        window.observe_trade(10_000, 1.0, false);
+        window.observe_trade(10_000, 1.0, false, false);
         window.decay_to(10_000 + POLICY_WINDOW_6H_MS);
         approx_eq(window.trades, std::f64::consts::E.recip(), 1e-6);
         approx_eq(window.pnl_sum_pct, std::f64::consts::E.recip(), 1e-6);
@@ -573,6 +631,9 @@ mod tests {
             catchup_pct: 0.2,
             catchup_ms: 500,
             gate_spread_at_entry_bps: 1.0,
+            gate_natr_30m_pct_at_entry: 0.0,
+            hold_ms: 500,
+            early_stop_churn: false,
         });
 
         let snapshot = state.snapshot(101);
@@ -610,6 +671,9 @@ mod tests {
                 catchup_pct: 0.2,
                 catchup_ms: 300,
                 gate_spread_at_entry_bps: 1.0,
+                gate_natr_30m_pct_at_entry: 0.0,
+                hold_ms: 300,
+                early_stop_churn: false,
             });
             fleet.policy[1].observe_trade(&ClosedTrade {
                 pnl_pct: -0.20,
@@ -623,6 +687,9 @@ mod tests {
                 catchup_pct: -0.2,
                 catchup_ms: 300,
                 gate_spread_at_entry_bps: 1.0,
+                gate_natr_30m_pct_at_entry: 0.0,
+                hold_ms: 300,
+                early_stop_churn: true,
             });
         }
 

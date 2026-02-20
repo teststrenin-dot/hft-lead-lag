@@ -16,10 +16,11 @@ pub mod utils;
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use serde::Serialize;
 
-use self::shadow_fleet::{generate_grid, ShadowFleet};
+use self::shadow_fleet::{generate_grid, FleetTickMeta, ShadowFleet};
 use self::shadow_trader::{ChartData, ShadowDebug};
 use self::state::{Quote, SymbolState};
 use self::utils::{now_ms, TimeDomainSample};
@@ -68,8 +69,16 @@ pub struct ScreenerRow {
 pub struct ScreenerStore {
     symbols: Arc<DashMap<String, SymbolState>>,
     window_ms: i64,
-    fleet_configs: Arc<Vec<TraderConfig>>,
+    fleet_configs: Arc<ArcSwap<Vec<TraderConfig>>>,
     db_writer: Option<DbWriter>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FleetReloadReport {
+    pub old_config_count: usize,
+    pub new_config_count: usize,
+    pub symbols_reset: usize,
+    pub drained_trades: usize,
 }
 
 impl ScreenerStore {
@@ -77,7 +86,7 @@ impl ScreenerStore {
         Self {
             symbols: Arc::new(DashMap::new()),
             window_ms,
-            fleet_configs: Arc::new(generate_grid()),
+            fleet_configs: Arc::new(ArcSwap::from_pointee(generate_grid())),
             db_writer: None,
         }
     }
@@ -87,8 +96,8 @@ impl ScreenerStore {
         self.db_writer = Some(writer);
     }
 
-    pub fn fleet_configs(&self) -> &[TraderConfig] {
-        &self.fleet_configs
+    pub fn fleet_configs(&self) -> Arc<Vec<TraderConfig>> {
+        self.fleet_configs.load_full()
     }
 
     pub fn window_ms(&self) -> i64 {
@@ -99,6 +108,58 @@ impl ScreenerStore {
     pub fn set_volumes(&self, volumes: &[(String, f64)]) {
         for (sym, vol) in volumes {
             self.symbols.entry(sym.clone()).or_default().volume_24h_usd = *vol;
+        }
+    }
+
+    /// Set Gate 30m NATR (%) snapshots for symbols.
+    pub fn set_gate_natr_30m(&self, values: &[(String, f64)]) {
+        for (sym, natr_pct) in values {
+            self.symbols
+                .entry(sym.clone())
+                .or_default()
+                .gate_natr_30m_pct = (*natr_pct).max(0.0);
+        }
+    }
+
+    /// Replace fleet configs for all symbols.
+    ///
+    /// Existing fleet instances are reset so that new configs are picked up
+    /// on the next tick. Pending completed trades are drained and forwarded
+    /// to DB writer before reset.
+    pub fn replace_fleet_configs(&self, new_configs: Vec<TraderConfig>) -> FleetReloadReport {
+        let old_config_count = self.fleet_configs.load().len();
+        let new_config_count = new_configs.len();
+        self.fleet_configs.store(Arc::new(new_configs));
+
+        let mut symbols_reset = 0usize;
+        let mut drained_trades = 0usize;
+        for mut entry in self.symbols.iter_mut() {
+            let state = entry.value_mut();
+            let Some(mut fleet) = state.fleet.take() else {
+                continue;
+            };
+            symbols_reset += 1;
+            let trades = fleet.drain_trades();
+            drained_trades += trades.len();
+            if let Some(writer) = &self.db_writer {
+                if !trades.is_empty() {
+                    writer.send(trades);
+                }
+            }
+        }
+
+        FleetReloadReport {
+            old_config_count,
+            new_config_count,
+            symbols_reset,
+            drained_trades,
+        }
+    }
+
+    /// Force flush pending DB writer buffers (best effort).
+    pub async fn flush_db_writer(&self) {
+        if let Some(writer) = self.db_writer.clone() {
+            writer.flush_all().await;
         }
     }
 
@@ -153,16 +214,20 @@ impl ScreenerStore {
             (Some(b), Some(g)) => (b, g),
             _ => return,
         };
+        let fleet_configs = self.fleet_configs.load_full();
         let fleet = state
             .fleet
-            .get_or_insert_with(|| ShadowFleet::new(&self.fleet_configs));
+            .get_or_insert_with(|| ShadowFleet::new(fleet_configs.as_ref()));
         fleet.tick_all(
             clocks.exchange_event_ts_ms,
             binance_ref,
             gate_ref,
             &state.price_samples,
             self.window_ms,
-            symbol,
+            FleetTickMeta {
+                symbol,
+                gate_natr_30m_pct_at_entry: state.gate_natr_30m_pct,
+            },
         );
         if let Some(ref writer) = self.db_writer {
             let trades = fleet.drain_trades();
@@ -191,7 +256,7 @@ impl ScreenerStore {
                     ws_drift_ingress_gate_ms: item.value().drifts.gate_ingress.unwrap_or(0.0),
                     entry_half_life_ms: item.value().entry_half_life_ms,
                     avg_gt_p90_ms: item.value().avg_gt_p90_ms,
-                    gate_natr_30m_pct: 0.0,
+                    gate_natr_30m_pct: item.value().gate_natr_30m_pct,
                     volume_24h_usd: item.value().volume_24h_usd,
                     shadow_session_pnl_pct: stats.session_pnl_pct,
                     shadow_session_trades: stats.session_trades,

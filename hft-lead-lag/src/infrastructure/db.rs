@@ -55,7 +55,10 @@ CREATE TABLE IF NOT EXISTS trades (
     spike_bps   REAL NOT NULL,
     pnl_pct     REAL NOT NULL,
     exit_reason TEXT NOT NULL,
-    gate_spread_at_entry_bps REAL NOT NULL
+    gate_spread_at_entry_bps REAL NOT NULL,
+    gate_natr_30m_pct_at_entry REAL NOT NULL DEFAULT 0.0,
+    hold_ms INTEGER NOT NULL DEFAULT 0,
+    early_stop_churn INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_config ON trades(config_id);
@@ -111,6 +114,13 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute_batch(
         "ALTER TABLE configs ADD COLUMN min_baseline_samples INTEGER NOT NULL DEFAULT 20;",
     );
+    let _ = conn.execute_batch(
+        "ALTER TABLE trades ADD COLUMN gate_natr_30m_pct_at_entry REAL NOT NULL DEFAULT 0.0;",
+    );
+    let _ = conn.execute_batch("ALTER TABLE trades ADD COLUMN hold_ms INTEGER NOT NULL DEFAULT 0;");
+    let _ = conn.execute_batch(
+        "ALTER TABLE trades ADD COLUMN early_stop_churn INTEGER NOT NULL DEFAULT 0;",
+    );
     Ok(conn)
 }
 
@@ -152,7 +162,13 @@ pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::
 /// Handle to send trades to the background writer.
 #[derive(Clone, Debug)]
 pub struct DbWriter {
-    tx: mpsc::Sender<Vec<FleetTrade>>,
+    tx: mpsc::Sender<DbCommand>,
+}
+
+#[derive(Debug)]
+enum DbCommand {
+    Trades(Vec<FleetTrade>),
+    Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 impl DbWriter {
@@ -161,13 +177,14 @@ impl DbWriter {
         if trades.is_empty() {
             return;
         }
-        match self.tx.try_send(trades) {
+        let command = DbCommand::Trades(trades);
+        match self.tx.try_send(command) {
             Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(trades)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(command)) => {
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     let tx = self.tx.clone();
                     handle.spawn(async move {
-                        if tx.send(trades).await.is_err() {
+                        if tx.send(command).await.is_err() {
                             let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
                             warn!("db writer closed during retry send (total dropped: {n})");
                         }
@@ -186,6 +203,16 @@ impl DbWriter {
         }
     }
 
+    /// Flush all buffered DB writer data to disk (best effort).
+    pub async fn flush_all(&self) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self.tx.send(DbCommand::Flush(tx)).await.is_err() {
+            warn!("db writer flush requested but channel is closed");
+            return;
+        }
+        let _ = rx.await;
+    }
+
     /// Number of trade batches lost to channel overflow since process start.
     pub fn dropped_batches() -> u64 {
         DROPPED_BATCHES.load(Ordering::Relaxed)
@@ -194,7 +221,7 @@ impl DbWriter {
 
 /// Spawn the background writer task. Returns a handle for sending trades.
 pub fn spawn_writer(db_path: &Path) -> DbWriter {
-    let (tx, mut rx) = mpsc::channel::<Vec<FleetTrade>>(CHANNEL_CAPACITY);
+    let (tx, mut rx) = mpsc::channel::<DbCommand>(CHANNEL_CAPACITY);
     let path = db_path.to_path_buf();
 
     tokio::spawn(async move {
@@ -213,9 +240,18 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
 
         loop {
             tokio::select! {
-                batch = rx.recv() => {
-                    match batch {
-                        Some(trades) => buf.extend(trades),
+                command = rx.recv() => {
+                    match command {
+                        Some(DbCommand::Trades(trades)) => buf.extend(trades),
+                        Some(DbCommand::Flush(done)) => {
+                            if !buf.is_empty() {
+                                match flush_trades(&conn, &buf) {
+                                    Ok(_) => buf.clear(),
+                                    Err(e) => warn!("db flush error on explicit flush (retaining {} trades): {e}", buf.len()),
+                                }
+                            }
+                            let _ = done.send(());
+                        }
                         None => break, // channel closed
                     }
                 }
@@ -245,8 +281,8 @@ fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()
         let mut stmt = tx.prepare_cached(
             "INSERT OR IGNORE INTO trades (config_id, symbol, direction, entry_ts_ms, exit_ts_ms,
              entry_price, exit_price, spike_bps, pnl_pct, exit_reason,
-             gate_spread_at_entry_bps)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             gate_spread_at_entry_bps, gate_natr_30m_pct_at_entry, hold_ms, early_stop_churn)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?;
         for ft in trades {
             let t = &ft.trade;
@@ -262,6 +298,9 @@ fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()
                 t.pnl_pct,
                 t.exit_reason,
                 t.gate_spread_at_entry_bps,
+                t.gate_natr_30m_pct_at_entry,
+                t.hold_ms,
+                if t.early_stop_churn { 1_i64 } else { 0_i64 },
             ])?;
         }
     }
@@ -298,6 +337,34 @@ mod tests {
             .and_then(|mut stmt| stmt.exists([]))
             .expect("pragma query");
         assert!(has_strategy_kind, "configs.strategy_kind column must exist");
+
+        drop(conn);
+        cleanup_temp_db(&path);
+    }
+
+    #[test]
+    fn open_db_adds_trade_context_columns() {
+        let path = temp_db_path("trade-context-columns");
+        let conn = open_db(&path).expect("open db");
+
+        let has_natr_col: bool = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('trades') WHERE name='gate_natr_30m_pct_at_entry'",
+            )
+            .and_then(|mut stmt| stmt.exists([]))
+            .expect("natr column pragma query");
+        let has_hold_ms_col: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('trades') WHERE name='hold_ms'")
+            .and_then(|mut stmt| stmt.exists([]))
+            .expect("hold_ms column pragma query");
+        let has_early_stop_col: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('trades') WHERE name='early_stop_churn'")
+            .and_then(|mut stmt| stmt.exists([]))
+            .expect("early_stop column pragma query");
+
+        assert!(has_natr_col, "trades.gate_natr_30m_pct_at_entry must exist");
+        assert!(has_hold_ms_col, "trades.hold_ms must exist");
+        assert!(has_early_stop_col, "trades.early_stop_churn must exist");
 
         drop(conn);
         cleanup_temp_db(&path);
