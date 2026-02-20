@@ -122,6 +122,21 @@ fn ingest_latest_batch<F: Fn() -> i64>(
     }
 }
 
+fn process_exchange_batch<F: Fn() -> i64>(
+    latest: &mut std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    first: hft_lead_lag::domain::BookTicker,
+    drained: Vec<hft_lead_lag::domain::BookTicker>,
+    exchange: &'static str,
+    ticker_count: &mut usize,
+    metrics: &mut EventLoopMetrics,
+    now_ms: &F,
+    screener: &ScreenerStore,
+    ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+) {
+    rebuild_latest_map(latest, first, drained);
+    ingest_latest_batch(latest, exchange, ticker_count, metrics, now_ms, screener, ws_tx);
+}
+
 #[derive(Debug)]
 struct EventLoopMetrics {
     drift_samples: Vec<i64>,
@@ -443,9 +458,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 match result {
                     Ok(ticker) => {
                         // Process this tick + drain all buffered ticks, keep latest per symbol
-                        rebuild_latest_map(&mut latest_bn, ticker, binance.drain_book_tickers());
-                        ingest_latest_batch(
-                            &latest_bn,
+                        process_exchange_batch(
+                            &mut latest_bn,
+                            ticker,
+                            binance.drain_book_tickers(),
                             "binance",
                             &mut ticker_count,
                             &mut metrics,
@@ -468,9 +484,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             result = gate.recv_book_ticker() => {
                 match result {
                     Ok(ticker) => {
-                        rebuild_latest_map(&mut latest_gt, ticker, gate.drain_book_tickers());
-                        ingest_latest_batch(
-                            &latest_gt,
+                        process_exchange_batch(
+                            &mut latest_gt,
+                            ticker,
+                            gate.drain_book_tickers(),
                             "gate",
                             &mut ticker_count,
                             &mut metrics,
@@ -736,5 +753,90 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].symbol, "BTCUSDT");
         assert_eq!(rows[0].leader_exchange, "gate");
+    }
+
+    #[test]
+    fn process_exchange_batch_rebuilds_and_ingests_latest_state() {
+        let mut latest = std::collections::HashMap::new();
+        latest.insert("OLD".to_string(), test_ticker("OLD", 1));
+        let mut ticker_count = 5usize;
+        let mut metrics = EventLoopMetrics::new();
+        let screener = ScreenerStore::default();
+        let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
+        let now_ms = || 150i64;
+
+        process_exchange_batch(
+            &mut latest,
+            test_ticker("BTCUSDT", 100_000_000),
+            vec![test_ticker("ETHUSDT", 110_000_000), test_ticker("BTCUSDT", 120_000_000)],
+            "binance",
+            &mut ticker_count,
+            &mut metrics,
+            &now_ms,
+            &screener,
+            &ws_tx,
+        );
+
+        assert!(!latest.contains_key("OLD"));
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest["BTCUSDT"].exchange_ts_ns, 120_000_000);
+        assert_eq!(ticker_count, 7);
+        assert_eq!(
+            metrics.drift_stats_string_and_reset(),
+            "n=2 avg=35ms p50=40ms p95=40ms p99=40ms max=40ms"
+        );
+
+        let mut events = vec![
+            ws_rx.try_recv().expect("first ws event"),
+            ws_rx.try_recv().expect("second ws event"),
+        ];
+        events.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        assert_eq!(events[0].symbol, "BTCUSDT");
+        assert_eq!(events[0].exchange, "binance");
+        assert_eq!(events[0].timestamp_ns, 120_000_000);
+        assert_eq!(events[1].symbol, "ETHUSDT");
+        assert_eq!(events[1].exchange, "binance");
+        assert_eq!(events[1].timestamp_ns, 110_000_000);
+        assert!(matches!(
+            ws_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        let rows = screener.rows_sorted();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].leader_exchange, "binance");
+        assert_eq!(rows[1].leader_exchange, "binance");
+    }
+
+    #[test]
+    fn process_exchange_batch_with_single_tick_updates_once() {
+        let mut latest = std::collections::HashMap::new();
+        let mut ticker_count = 0usize;
+        let mut metrics = EventLoopMetrics::new();
+        let screener = ScreenerStore::default();
+        let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
+        let now_ms = || 130i64;
+
+        process_exchange_batch(
+            &mut latest,
+            test_ticker("BTCUSDT", 100_000_000),
+            Vec::new(),
+            "gate",
+            &mut ticker_count,
+            &mut metrics,
+            &now_ms,
+            &screener,
+            &ws_tx,
+        );
+
+        assert_eq!(latest.len(), 1);
+        assert_eq!(ticker_count, 1);
+        assert_eq!(
+            metrics.drift_stats_string_and_reset(),
+            "n=1 avg=30ms p50=30ms p95=30ms p99=30ms max=30ms"
+        );
+        let event = ws_rx.try_recv().expect("ws event");
+        assert_eq!(event.symbol, "BTCUSDT");
+        assert_eq!(event.exchange, "gate");
     }
 }
