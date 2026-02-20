@@ -73,6 +73,16 @@ fn rebuild_latest_map(
     }
 }
 
+fn select_runtime_symbols(common_symbols: &[String]) -> (Vec<String>, Vec<String>, bool) {
+    if common_symbols.is_empty() {
+        let fallback = fallback_symbols();
+        (fallback.clone(), fallback, true)
+    } else {
+        let symbols = common_symbols.to_vec();
+        (symbols.clone(), symbols, false)
+    }
+}
+
 #[derive(Debug)]
 struct EventLoopMetrics {
     drift_samples: Vec<i64>,
@@ -206,19 +216,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Common symbols: {}", common_symbols.len());
 
     // Strategy fleet runs on all common symbols.
-    let mut strategy_symbols: Vec<String> = common_symbols
-        .iter()
-        .cloned()
-        .collect();
-    if strategy_symbols.is_empty() {
+    let (strategy_symbols, screener_symbols, used_fallback) =
+        select_runtime_symbols(&common_symbols);
+    if used_fallback {
         warn!("No common symbols found! Using fallback...");
-        strategy_symbols.extend_from_slice(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     }
-    let screener_symbols: Vec<String> = if common_symbols.is_empty() {
-        strategy_symbols.clone()
-    } else {
-        common_symbols.clone()
-    };
 
     info!(
         "Strategy symbols: {} | Screener symbols: {} | WS coverage Binance={} Gate={}",
@@ -609,5 +611,25 @@ mod tests {
         assert_eq!(latest.len(), 2);
         assert_eq!(latest["BTCUSDT"].exchange_ts_ns, 20);
         assert_eq!(latest["ETHUSDT"].exchange_ts_ns, 30);
+    }
+
+    #[test]
+    fn select_runtime_symbols_uses_common_when_present() {
+        let common = vec!["XRPUSDT".to_string(), "ADAUSDT".to_string()];
+        let (strategy, screener, used_fallback) = select_runtime_symbols(&common);
+
+        assert!(!used_fallback);
+        assert_eq!(strategy, common);
+        assert_eq!(screener, common);
+    }
+
+    #[test]
+    fn select_runtime_symbols_uses_fallback_when_common_empty() {
+        let common: Vec<String> = Vec::new();
+        let (strategy, screener, used_fallback) = select_runtime_symbols(&common);
+
+        assert!(used_fallback);
+        assert_eq!(strategy, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+        assert_eq!(screener, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     }
 }
