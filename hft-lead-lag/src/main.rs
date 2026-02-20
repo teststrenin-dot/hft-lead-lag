@@ -184,6 +184,128 @@ impl EventLoopMetrics {
     }
 }
 
+struct EventLoopState {
+    ticker_count: usize,
+    signal_count: usize,
+    last_status_at: Instant,
+    signal_interval: tokio::time::Interval,
+    latest_bn: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    latest_gt: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    metrics: EventLoopMetrics,
+}
+
+impl EventLoopState {
+    fn new() -> Self {
+        let mut signal_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+        signal_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self {
+            ticker_count: 0,
+            signal_count: 0,
+            last_status_at: Instant::now(),
+            signal_interval,
+            latest_bn: std::collections::HashMap::new(),
+            latest_gt: std::collections::HashMap::new(),
+            metrics: EventLoopMetrics::new(),
+        }
+    }
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64
+    }
+}
+
+async fn run_event_loop(
+    binance: &mut BinanceMarketData,
+    gate: &mut GateMarketData,
+    strategy: &LeadLagStrategy,
+    strategy_symbols: &[String],
+    screener: &ScreenerStore,
+    ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+) -> ! {
+    let mut state = EventLoopState::new();
+
+    loop {
+        tokio::select! {
+            result = binance.recv_book_ticker() => {
+                match result {
+                    Ok(ticker) => {
+                        process_exchange_batch(
+                            &mut state.latest_bn,
+                            ticker,
+                            binance.drain_book_tickers(),
+                            "binance",
+                            &mut state.ticker_count,
+                            &mut state.metrics,
+                            &EventLoopState::now_ms,
+                            screener,
+                            ws_tx,
+                        );
+                        for ticker in strategy_ticks_in_order(strategy_symbols, &state.latest_bn) {
+                            strategy.update_primary_book(ticker.clone()).await;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Binance data error: {}", e);
+                    }
+                }
+            }
+
+            result = gate.recv_book_ticker() => {
+                match result {
+                    Ok(ticker) => {
+                        process_exchange_batch(
+                            &mut state.latest_gt,
+                            ticker,
+                            gate.drain_book_tickers(),
+                            "gate",
+                            &mut state.ticker_count,
+                            &mut state.metrics,
+                            &EventLoopState::now_ms,
+                            screener,
+                            ws_tx,
+                        );
+                        for ticker in strategy_ticks_in_order(strategy_symbols, &state.latest_gt) {
+                            strategy.update_hedge_book(ticker.clone()).await;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Gate data error: {}", e);
+                    }
+                }
+            }
+
+            _ = state.signal_interval.tick() => {
+                for symbol in strategy_symbols {
+                    if let Some(signal) = strategy.check_signal(symbol).await {
+                        state.signal_count += 1;
+                        info!(
+                            "Lead-lag signal #{}: {} | spread={:.2}bps | leader={:?} | lagger={:?}",
+                            state.signal_count,
+                            signal.symbol,
+                            signal.spread_bps,
+                            signal.leader,
+                            signal.lagger
+                        );
+                    }
+                }
+
+                if state.last_status_at.elapsed() >= Duration::from_secs(5) {
+                    let interval_tickers = state.metrics.snapshot_and_roll_status(state.ticker_count);
+                    let drift_stats = state.metrics.drift_stats_string_and_reset();
+                    info!(
+                        "Status: tickers={} (+{}/5s) signals={} drift=[{}]",
+                        state.ticker_count, interval_tickers, state.signal_count, drift_stats
+                    );
+                    state.last_status_at = Instant::now();
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_centralized_logging("logs", "runtime.log")?;
@@ -433,106 +555,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
 
-    // Main event loop
-    let mut ticker_count = 0usize;
-    let mut signal_count = 0usize;
-    let mut last_status_at = Instant::now();
-    let mut signal_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
-    signal_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut latest_bn: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> = std::collections::HashMap::new();
-    let mut latest_gt: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> = std::collections::HashMap::new();
-
-    // Drift + status interval tracking for benchmarking.
-    let mut metrics = EventLoopMetrics::new();
-    let now_ms = || -> i64 {
-        SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64
-    };
-
-    loop {
-        tokio::select! {
-            // Receive from Binance
-            result = binance.recv_book_ticker() => {
-                match result {
-                    Ok(ticker) => {
-                        // Process this tick + drain all buffered ticks, keep latest per symbol
-                        process_exchange_batch(
-                            &mut latest_bn,
-                            ticker,
-                            binance.drain_book_tickers(),
-                            "binance",
-                            &mut ticker_count,
-                            &mut metrics,
-                            &now_ms,
-                            &screener,
-                            &ws_tx,
-                        );
-                        // Forward strategy ticks for bounded symbol set
-                        for ticker in strategy_ticks_in_order(&strategy_symbols, &latest_bn) {
-                            strategy.update_primary_book(ticker.clone()).await;
-                        }
-                    }
-                    Err(e) => {
-                        error!("Binance data error: {}", e);
-                    }
-                }
-            }
-            
-            // Receive from Gate
-            result = gate.recv_book_ticker() => {
-                match result {
-                    Ok(ticker) => {
-                        process_exchange_batch(
-                            &mut latest_gt,
-                            ticker,
-                            gate.drain_book_tickers(),
-                            "gate",
-                            &mut ticker_count,
-                            &mut metrics,
-                            &now_ms,
-                            &screener,
-                            &ws_tx,
-                        );
-                        for ticker in strategy_ticks_in_order(&strategy_symbols, &latest_gt) {
-                            strategy.update_hedge_book(ticker.clone()).await;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Gate data error: {}", e);
-                    }
-                }
-            }
-
-            // Check for lead-lag signals periodically
-            _ = signal_interval.tick() => {
-                for symbol in &strategy_symbols {
-                    if let Some(signal) = strategy.check_signal(symbol).await {
-                        signal_count += 1;
-                        info!("Lead-lag signal #{}: {} | spread={:.2}bps | leader={:?} | lagger={:?}", 
-                            signal_count,
-                            signal.symbol, 
-                            signal.spread_bps, 
-                            signal.leader, 
-                            signal.lagger
-                        );
-                    }
-                }
-                
-                // Status report every 5 seconds
-                if last_status_at.elapsed() >= Duration::from_secs(5) {
-                    let interval_tickers = metrics.snapshot_and_roll_status(ticker_count);
-                    let drift_stats = metrics.drift_stats_string_and_reset();
-                    info!(
-                        "Status: tickers={} (+{}/5s) signals={} drift=[{}]",
-                        ticker_count, interval_tickers, signal_count, drift_stats
-                    );
-                    last_status_at = Instant::now();
-                }
-            }
-        }
-    }
+    run_event_loop(
+        &mut binance,
+        &mut gate,
+        &strategy,
+        &strategy_symbols,
+        &screener,
+        &ws_tx,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -606,6 +637,21 @@ mod tests {
         assert_eq!(metrics.snapshot_and_roll_status(10), 10);
         assert_eq!(metrics.snapshot_and_roll_status(16), 6);
         assert_eq!(metrics.snapshot_and_roll_status(8), 0);
+    }
+
+    #[tokio::test]
+    async fn event_loop_state_starts_clean() {
+        let mut state = EventLoopState::new();
+        assert_eq!(state.ticker_count, 0);
+        assert_eq!(state.signal_count, 0);
+        assert!(state.latest_bn.is_empty());
+        assert!(state.latest_gt.is_empty());
+        assert_eq!(state.metrics.drift_stats_string_and_reset(), "no_data");
+    }
+
+    #[test]
+    fn event_loop_state_now_ms_is_positive() {
+        assert!(EventLoopState::now_ms() > 0);
     }
 
     fn test_ticker(symbol: &str, exchange_ts_ns: i64) -> hft_lead_lag::domain::BookTicker {
