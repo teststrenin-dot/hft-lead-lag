@@ -5,7 +5,7 @@
 Актуальные документы:
 
 - `docs/README.md`
-- `docs/sprints/shadow-fleet-deep-dive.md`
+- `docs/sprints/remaining-roadmap-2026-02-20.md`
 - `docs/review-2026-02-19-deep-dive.md`
 
 Исследовательский материал:

@@ -6,7 +6,6 @@
 
 1. `docs/review-2026-02-20-comprehensive-audit.md`
 2. `docs/review-2026-02-20-profit-deep-dive.md`
-3. `docs/sprints/strategy-runtime-modularity.md`
 
 ---
 

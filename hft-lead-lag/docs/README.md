@@ -23,8 +23,6 @@
 ## 2) Карта документации
 
 - `docs/README.md` (этот файл): текущий статус, математика, runbook.
-- `docs/sprints/shadow-fleet-deep-dive.md`: полный deep dive по fleet/runtime/DB/API.
-- `docs/sprints/strategy-runtime-modularity.md`: модульность runtime-стратегий и выбор через конфиг.
 - `docs/sprints/remaining-roadmap-2026-02-20.md`: дорожная карта оставшейся разработки (Sprint 004-007).
 - `docs/sprints/sprint-004-correctness-hardening.md`: фазы стабилизации корректности данных и quality gates.
 - `docs/sprints/sprint-005-policy-allocator-and-gates.md`: фазы policy allocator и symbol/regime gating.
