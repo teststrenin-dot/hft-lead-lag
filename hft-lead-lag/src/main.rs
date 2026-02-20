@@ -83,6 +83,22 @@ fn select_runtime_symbols(common_symbols: &[String]) -> (Vec<String>, Vec<String
     }
 }
 
+fn compute_common_symbols(
+    binance_symbols: &[String],
+    gate_symbols: &[String],
+    blacklist: &std::collections::HashSet<&str>,
+) -> Vec<String> {
+    let binance_set: std::collections::HashSet<String> = binance_symbols.iter().cloned().collect();
+    let gate_set: std::collections::HashSet<String> = gate_symbols.iter().cloned().collect();
+    let mut common_symbols: Vec<String> = binance_set
+        .intersection(&gate_set)
+        .filter(|s| !blacklist.contains(s.as_str()))
+        .cloned()
+        .collect();
+    common_symbols.sort_unstable();
+    common_symbols
+}
+
 fn strategy_ticks_in_order<'a>(
     strategy_symbols: &'a [String],
     latest: &'a std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
@@ -194,6 +210,28 @@ struct EventLoopState {
     metrics: EventLoopMetrics,
 }
 
+#[derive(Clone, Copy)]
+enum ExchangeSide {
+    Binance,
+    Gate,
+}
+
+impl ExchangeSide {
+    fn exchange_name(self) -> &'static str {
+        match self {
+            Self::Binance => "binance",
+            Self::Gate => "gate",
+        }
+    }
+
+    fn log_data_error(self, error: &hft_lead_lag::domain::ExchangeError) {
+        match self {
+            Self::Binance => error!("Binance data error: {}", error),
+            Self::Gate => warn!("Gate data error: {}", error),
+        }
+    }
+}
+
 impl EventLoopState {
     fn new() -> Self {
         let mut signal_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
@@ -215,6 +253,91 @@ impl EventLoopState {
             .unwrap_or_default()
             .as_millis() as i64
     }
+
+    fn process_exchange_result(
+        &mut self,
+        side: ExchangeSide,
+        result: Result<hft_lead_lag::domain::BookTicker, hft_lead_lag::domain::ExchangeError>,
+        drained: Vec<hft_lead_lag::domain::BookTicker>,
+        screener: &ScreenerStore,
+        ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+    ) -> Result<(), hft_lead_lag::domain::ExchangeError> {
+        let ticker = result?;
+        match side {
+            ExchangeSide::Binance => process_exchange_batch(
+                &mut self.latest_bn,
+                ticker,
+                drained,
+                side.exchange_name(),
+                &mut self.ticker_count,
+                &mut self.metrics,
+                &Self::now_ms,
+                screener,
+                ws_tx,
+            ),
+            ExchangeSide::Gate => process_exchange_batch(
+                &mut self.latest_gt,
+                ticker,
+                drained,
+                side.exchange_name(),
+                &mut self.ticker_count,
+                &mut self.metrics,
+                &Self::now_ms,
+                screener,
+                ws_tx,
+            ),
+        }
+        Ok(())
+    }
+
+    async fn update_strategy_books(
+        &self,
+        side: ExchangeSide,
+        strategy: &LeadLagStrategy,
+        strategy_symbols: &[String],
+    ) {
+        match side {
+            ExchangeSide::Binance => {
+                for ticker in strategy_ticks_in_order(strategy_symbols, &self.latest_bn) {
+                    strategy.update_primary_book(ticker.clone()).await;
+                }
+            }
+            ExchangeSide::Gate => {
+                for ticker in strategy_ticks_in_order(strategy_symbols, &self.latest_gt) {
+                    strategy.update_hedge_book(ticker.clone()).await;
+                }
+            }
+        }
+    }
+
+    async fn handle_signal_tick(&mut self, strategy: &LeadLagStrategy, strategy_symbols: &[String]) {
+        for symbol in strategy_symbols {
+            if let Some(signal) = strategy.check_signal(symbol).await {
+                self.signal_count += 1;
+                info!(
+                    "Lead-lag signal #{}: {} | spread={:.2}bps | leader={:?} | lagger={:?}",
+                    self.signal_count,
+                    signal.symbol,
+                    signal.spread_bps,
+                    signal.leader,
+                    signal.lagger
+                );
+            }
+        }
+        self.maybe_log_status();
+    }
+
+    fn maybe_log_status(&mut self) {
+        if self.last_status_at.elapsed() >= Duration::from_secs(5) {
+            let interval_tickers = self.metrics.snapshot_and_roll_status(self.ticker_count);
+            let drift_stats = self.metrics.drift_stats_string_and_reset();
+            info!(
+                "Status: tickers={} (+{}/5s) signals={} drift=[{}]",
+                self.ticker_count, interval_tickers, self.signal_count, drift_stats
+            );
+            self.last_status_at = Instant::now();
+        }
+    }
 }
 
 async fn run_event_loop(
@@ -230,77 +353,39 @@ async fn run_event_loop(
     loop {
         tokio::select! {
             result = binance.recv_book_ticker() => {
-                match result {
-                    Ok(ticker) => {
-                        process_exchange_batch(
-                            &mut state.latest_bn,
-                            ticker,
-                            binance.drain_book_tickers(),
-                            "binance",
-                            &mut state.ticker_count,
-                            &mut state.metrics,
-                            &EventLoopState::now_ms,
-                            screener,
-                            ws_tx,
-                        );
-                        for ticker in strategy_ticks_in_order(strategy_symbols, &state.latest_bn) {
-                            strategy.update_primary_book(ticker.clone()).await;
-                        }
-                    }
-                    Err(e) => {
-                        error!("Binance data error: {}", e);
-                    }
+                if let Err(e) = state.process_exchange_result(
+                    ExchangeSide::Binance,
+                    result,
+                    binance.drain_book_tickers(),
+                    screener,
+                    ws_tx,
+                ) {
+                    ExchangeSide::Binance.log_data_error(&e);
+                } else {
+                    state
+                        .update_strategy_books(ExchangeSide::Binance, strategy, strategy_symbols)
+                        .await;
                 }
             }
 
             result = gate.recv_book_ticker() => {
-                match result {
-                    Ok(ticker) => {
-                        process_exchange_batch(
-                            &mut state.latest_gt,
-                            ticker,
-                            gate.drain_book_tickers(),
-                            "gate",
-                            &mut state.ticker_count,
-                            &mut state.metrics,
-                            &EventLoopState::now_ms,
-                            screener,
-                            ws_tx,
-                        );
-                        for ticker in strategy_ticks_in_order(strategy_symbols, &state.latest_gt) {
-                            strategy.update_hedge_book(ticker.clone()).await;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Gate data error: {}", e);
-                    }
+                if let Err(e) = state.process_exchange_result(
+                    ExchangeSide::Gate,
+                    result,
+                    gate.drain_book_tickers(),
+                    screener,
+                    ws_tx,
+                ) {
+                    ExchangeSide::Gate.log_data_error(&e);
+                } else {
+                    state
+                        .update_strategy_books(ExchangeSide::Gate, strategy, strategy_symbols)
+                        .await;
                 }
             }
 
             _ = state.signal_interval.tick() => {
-                for symbol in strategy_symbols {
-                    if let Some(signal) = strategy.check_signal(symbol).await {
-                        state.signal_count += 1;
-                        info!(
-                            "Lead-lag signal #{}: {} | spread={:.2}bps | leader={:?} | lagger={:?}",
-                            state.signal_count,
-                            signal.symbol,
-                            signal.spread_bps,
-                            signal.leader,
-                            signal.lagger
-                        );
-                    }
-                }
-
-                if state.last_status_at.elapsed() >= Duration::from_secs(5) {
-                    let interval_tickers = state.metrics.snapshot_and_roll_status(state.ticker_count);
-                    let drift_stats = state.metrics.drift_stats_string_and_reset();
-                    info!(
-                        "Status: tickers={} (+{}/5s) signals={} drift=[{}]",
-                        state.ticker_count, interval_tickers, state.signal_count, drift_stats
-                    );
-                    state.last_status_at = Instant::now();
-                }
+                state.handle_signal_tick(strategy, strategy_symbols).await;
             }
         }
     }
@@ -370,8 +455,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Gate symbols with 24h vol >= ${:.0}M: {}", MIN_VOLUME_USD / 1_000_000.0, gate_symbols.len());
 
     // Find common symbols (available on both exchanges with sufficient volume)
-    let binance_set: std::collections::HashSet<String> = binance_symbols.iter().cloned().collect();
-    let gate_set: std::collections::HashSet<String> = gate_symbols.iter().cloned().collect();
     let blacklist: std::collections::HashSet<&str> = config_manager
         .binance_blacklist()
         .iter()
@@ -379,12 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(|s| s.as_str())
         .chain(STRATEGY_BLACKLIST.iter().copied())
         .collect();
-    let mut common_symbols: Vec<String> = binance_set
-        .intersection(&gate_set)
-        .filter(|s| !blacklist.contains(s.as_str()))
-        .cloned()
-        .collect();
-    common_symbols.sort_unstable();
+    let common_symbols = compute_common_symbols(&binance_symbols, &gate_symbols, &blacklist);
     
     if !blacklist.is_empty() {
         info!("Blacklisted symbols: {:?}", blacklist);
@@ -654,6 +732,49 @@ mod tests {
         assert!(EventLoopState::now_ms() > 0);
     }
 
+    #[tokio::test]
+    async fn event_loop_state_process_exchange_result_updates_binance_map() {
+        let mut state = EventLoopState::new();
+        let screener = ScreenerStore::default();
+        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(8);
+
+        let result = state.process_exchange_result(
+            ExchangeSide::Binance,
+            Ok(test_ticker("BTCUSDT", 100_000_000)),
+            vec![test_ticker("ETHUSDT", 110_000_000)],
+            &screener,
+            &ws_tx,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(state.latest_bn.len(), 2);
+        assert!(state.latest_gt.is_empty());
+        assert_eq!(state.ticker_count, 2);
+    }
+
+    #[tokio::test]
+    async fn event_loop_state_process_exchange_result_propagates_error() {
+        let mut state = EventLoopState::new();
+        let screener = ScreenerStore::default();
+        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(8);
+
+        let result = state.process_exchange_result(
+            ExchangeSide::Gate,
+            Err(hft_lead_lag::domain::ExchangeError::Timeout("test".to_string())),
+            Vec::new(),
+            &screener,
+            &ws_tx,
+        );
+
+        assert!(matches!(
+            result,
+            Err(hft_lead_lag::domain::ExchangeError::Timeout(msg)) if msg == "test"
+        ));
+        assert_eq!(state.ticker_count, 0);
+        assert!(state.latest_bn.is_empty());
+        assert!(state.latest_gt.is_empty());
+    }
+
     fn test_ticker(symbol: &str, exchange_ts_ns: i64) -> hft_lead_lag::domain::BookTicker {
         hft_lead_lag::domain::BookTicker::new(
             bytes::Bytes::copy_from_slice(symbol.as_bytes()),
@@ -709,6 +830,34 @@ mod tests {
         assert!(used_fallback);
         assert_eq!(strategy, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
         assert_eq!(screener, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    }
+
+    #[test]
+    fn compute_common_symbols_filters_blacklist_and_sorts() {
+        let binance_symbols = vec![
+            "XRPUSDT".to_string(),
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+        ];
+        let gate_symbols = vec![
+            "ETHUSDT".to_string(),
+            "XRPUSDT".to_string(),
+            "ADAUSDT".to_string(),
+        ];
+        let blacklist: std::collections::HashSet<&str> = ["ETHUSDT"].into_iter().collect();
+
+        let common = compute_common_symbols(&binance_symbols, &gate_symbols, &blacklist);
+        assert_eq!(common, vec!["XRPUSDT".to_string()]);
+    }
+
+    #[test]
+    fn compute_common_symbols_returns_empty_when_no_overlap() {
+        let binance_symbols = vec!["BTCUSDT".to_string()];
+        let gate_symbols = vec!["ETHUSDT".to_string()];
+        let blacklist: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        let common = compute_common_symbols(&binance_symbols, &gate_symbols, &blacklist);
+        assert!(common.is_empty());
     }
 
     #[test]
