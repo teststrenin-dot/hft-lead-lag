@@ -59,6 +59,20 @@ fn reconcile_volume_symbols(
     (binance_symbols, gate_symbols, outcome)
 }
 
+fn rebuild_latest_map(
+    latest: &mut std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    first: hft_lead_lag::domain::BookTicker,
+    drained: Vec<hft_lead_lag::domain::BookTicker>,
+) {
+    latest.clear();
+    let first_symbol = String::from_utf8_lossy(&first.symbol).to_string();
+    latest.insert(first_symbol, first);
+    for ticker in drained {
+        let symbol = String::from_utf8_lossy(&ticker.symbol).to_string();
+        latest.insert(symbol, ticker);
+    }
+}
+
 #[derive(Debug)]
 struct EventLoopMetrics {
     drift_samples: Vec<i64>,
@@ -388,13 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 match result {
                     Ok(ticker) => {
                         // Process this tick + drain all buffered ticks, keep latest per symbol
-                        latest_bn.clear();
-                        let sym = String::from_utf8_lossy(&ticker.symbol).to_string();
-                        latest_bn.insert(sym, ticker);
-                        for t in binance.drain_book_tickers() {
-                            let s = String::from_utf8_lossy(&t.symbol).to_string();
-                            latest_bn.insert(s, t);
-                        }
+                        rebuild_latest_map(&mut latest_bn, ticker, binance.drain_book_tickers());
                         for (symbol, ticker) in &latest_bn {
                             ticker_count += 1;
                             metrics.record_tick_drift(now_ms(), ticker.exchange_ts_ns);
@@ -431,13 +439,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             result = gate.recv_book_ticker() => {
                 match result {
                     Ok(ticker) => {
-                        latest_gt.clear();
-                        let sym = String::from_utf8_lossy(&ticker.symbol).to_string();
-                        latest_gt.insert(sym, ticker);
-                        for t in gate.drain_book_tickers() {
-                            let s = String::from_utf8_lossy(&t.symbol).to_string();
-                            latest_gt.insert(s, t);
-                        }
+                        rebuild_latest_map(&mut latest_gt, ticker, gate.drain_book_tickers());
                         for (symbol, ticker) in &latest_gt {
                             ticker_count += 1;
                             metrics.record_tick_drift(now_ms(), ticker.exchange_ts_ns);
@@ -570,5 +572,42 @@ mod tests {
         assert_eq!(metrics.snapshot_and_roll_status(10), 10);
         assert_eq!(metrics.snapshot_and_roll_status(16), 6);
         assert_eq!(metrics.snapshot_and_roll_status(8), 0);
+    }
+
+    fn test_ticker(symbol: &str, exchange_ts_ns: i64) -> hft_lead_lag::domain::BookTicker {
+        hft_lead_lag::domain::BookTicker::new(
+            bytes::Bytes::copy_from_slice(symbol.as_bytes()),
+            100,
+            101,
+            1,
+            1,
+            exchange_ts_ns,
+            exchange_ts_ns + 1,
+        )
+    }
+
+    #[test]
+    fn rebuild_latest_map_clears_old_entries() {
+        let mut latest = std::collections::HashMap::new();
+        latest.insert("OLD".to_string(), test_ticker("OLD", 1));
+
+        rebuild_latest_map(&mut latest, test_ticker("BTCUSDT", 10), Vec::new());
+
+        assert!(!latest.contains_key("OLD"));
+        assert!(latest.contains_key("BTCUSDT"));
+    }
+
+    #[test]
+    fn rebuild_latest_map_keeps_latest_ticker_per_symbol() {
+        let mut latest = std::collections::HashMap::new();
+        rebuild_latest_map(
+            &mut latest,
+            test_ticker("BTCUSDT", 10),
+            vec![test_ticker("BTCUSDT", 20), test_ticker("ETHUSDT", 30)],
+        );
+
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest["BTCUSDT"].exchange_ts_ns, 20);
+        assert_eq!(latest["ETHUSDT"].exchange_ts_ns, 30);
     }
 }
