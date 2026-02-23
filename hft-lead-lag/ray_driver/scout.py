@@ -1,22 +1,50 @@
 """Scout phase — coarse grid scan to find parameter regions with trades."""
 
 import itertools
+import random
 import time
 
 from .bounds import AXES, FIXED_DEFAULTS
 from .ipc import FleetIPC, RunMetrics
 
+MAX_SCOUT_CONFIGS = 3000
 
-def generate_scout_configs() -> list[dict]:
-    """Cartesian product over init ranges for all axes."""
+
+def generate_scout_configs(max_configs: int = MAX_SCOUT_CONFIGS) -> list[dict]:
+    """Generate scout configs via Latin Hypercube sampling from init ranges."""
     axis_values = {name: ax.init_values() for name, ax in AXES.items()}
     keys = list(axis_values.keys())
+
+    # Full cartesian product size
+    full_size = 1
+    for v in axis_values.values():
+        full_size *= len(v)
+
+    if full_size <= max_configs:
+        # Small enough — use full grid
+        configs = []
+        for combo in itertools.product(*(axis_values[k] for k in keys)):
+            cfg = dict(zip(keys, combo))
+            cfg.update(FIXED_DEFAULTS)
+            configs.append(cfg)
+        return configs
+
+    # Latin Hypercube: stratified sampling per axis
     configs = []
-    for combo in itertools.product(*(axis_values[k] for k in keys)):
-        cfg = dict(zip(keys, combo))
+    for _ in range(max_configs):
+        cfg = {k: random.choice(axis_values[k]) for k in keys}
         cfg.update(FIXED_DEFAULTS)
         configs.append(cfg)
-    return configs
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for cfg in configs:
+        key = tuple(cfg[k] for k in keys)
+        if key not in seen:
+            seen.add(key)
+            unique.append(cfg)
+    return unique
 
 
 def run_scout(
