@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Trials — 7D Reference Matrix</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background:#0b1020; color:#e5e7eb; }
+    .top { padding: 12px 16px; }
+    h1 { margin: 0 0 4px; font-size: 18px; }
+    .meta { margin-bottom: 8px; color: #9ca3af; font-size: 12px; }
+    nav { margin-bottom: 12px; }
+    nav a { color:#93c5fd; text-decoration:none; margin-right:16px; font-size:13px; }
+    nav a:hover { text-decoration:underline; }
+    h2 { font-size: 14px; color: #93c5fd; margin: 16px 0 6px; }
+    .summary { display:flex; gap:24px; margin:12px 0; flex-wrap:wrap; }
+    .card { background:#111827; border:1px solid #1f2937; border-radius:6px; padding:10px 14px; min-width:120px; }
+    .card .label { font-size:11px; color:#9ca3af; }
+    .card .value { font-size:20px; font-weight:600; margin-top:2px; }
+    .pos { color: #34d399; } .neg { color: #f87171; }
+
+    /* Run selector */
+    .run-select { margin: 8px 0; }
+    .run-select select { background:#111827; color:#e5e7eb; border:1px solid #374151; border-radius:4px; padding:6px 10px; font-size:13px; min-width:300px; }
+
+    /* Axis charts */
+    .axes-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
+    @media (max-width: 900px) { .axes-grid { grid-template-columns: 1fr; } }
+    .axis-panel { background:#111827; border:1px solid #1f2937; border-radius:6px; padding:12px; }
+    .axis-panel h3 { margin:0 0 8px; font-size:13px; color:#93c5fd; }
+    .axis-bars { display:flex; align-items:flex-end; gap:2px; height:100px; }
+    .bar-col { display:flex; flex-direction:column; align-items:center; flex:1; min-width:0; }
+    .bar { width:100%; border-radius:2px 2px 0 0; min-height:1px; transition: height 0.3s; position:relative; }
+    .bar:hover::after { content:attr(data-tip); position:absolute; bottom:calc(100% + 4px); left:50%; transform:translateX(-50%);
+      background:#1f2937; color:#e5e7eb; font-size:10px; padding:3px 6px; border-radius:3px; white-space:nowrap; z-index:10; pointer-events:none; }
+    .bar-label { font-size:9px; color:#6b7280; margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; text-align:center; }
+    .bar-alive { background: linear-gradient(180deg, #34d399, #059669); }
+    .bar-dead { background: linear-gradient(180deg, #4b5563, #374151); }
+    .bar-mixed { background: linear-gradient(180deg, #fbbf24, #d97706); }
+    .legend { display:flex; gap:16px; margin:8px 0; font-size:11px; }
+    .legend-dot { width:10px; height:10px; border-radius:2px; display:inline-block; margin-right:4px; vertical-align:middle; }
+
+    /* Runs table */
+    table { width:100%; border-collapse:collapse; background:#111827; font-size:12px; margin-bottom:16px; }
+    th, td { padding:4px 6px; border-bottom:1px solid #1f2937; text-align:left; }
+    th { position:sticky; top:0; background:#111827; color:#93c5fd; font-size:11px; }
+    .num { text-align:right; font-variant-numeric:tabular-nums; }
+    tr:hover { background:#162032 !important; }
+    tr.selected { background:#1e3a5f !important; }
+    .clickable { cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1>🔬 Trials — 7D Reference Matrix</h1>
+    <nav>
+      <a href="/screener">← Screener</a>
+      <a href="/fleet">Fleet Optimizer</a>
+    </nav>
+    <div class="meta" id="meta">Loading…</div>
+
+    <div class="summary" id="summary"></div>
+
+    <div class="legend">
+      <span><span class="legend-dot bar-alive"></span> Alive (trades &gt; 0)</span>
+      <span><span class="legend-dot bar-dead"></span> Dead (0 trades)</span>
+      <span><span class="legend-dot bar-mixed"></span> Mixed</span>
+    </div>
+
+    <div class="run-select">
+      <label style="font-size:12px;color:#9ca3af;">Filter by run: </label>
+      <select id="run-filter"><option value="">All runs (aggregate)</option></select>
+    </div>
+
+    <div class="axes-grid" id="axes-grid"></div>
+
+    <h2>📋 Trial Runs</h2>
+    <table id="tbl-runs">
+      <thead><tr>
+        <th>run_id</th>
+        <th class="num">Configs</th>
+        <th class="num">Trades</th>
+        <th class="num">Avg PnL%</th>
+        <th class="num">WR%</th>
+        <th class="num">Total PnL%</th>
+        <th class="num">SL%</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <h2 id="detail-title" style="display:none;">📊 Config Details</h2>
+    <table id="tbl-detail" style="display:none;">
+      <thead><tr>
+        <th>config_id</th>
+        <th>spike</th><th>target</th><th>SL</th><th>hold</th><th>spread</th><th>decay</th><th>baseline</th>
+        <th class="num">Trades</th><th class="num">Wins</th><th class="num">WR%</th>
+        <th class="num">Avg PnL%</th><th class="num">Total PnL%</th><th class="num">SL%</th><th class="num">Avg Hold</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+<script>
+const cl = (v, d=4) => `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(d)}</span>`;
+const holdFmt = ms => ms >= 1000 ? (ms/1000).toFixed(1)+'s' : ms+'ms';
+const AXIS_LABELS = {
+  spike_threshold_bps: 'Spike (bps)',
+  target_ratio: 'Target Ratio',
+  stop_loss_bps: 'Stop Loss (bps)',
+  max_hold_ms: 'Max Hold (ms)',
+  max_spread_bps: 'Max Spread (bps)',
+  trailing_decay_ratio: 'Trailing Decay',
+  baseline_window_ms: 'Baseline (ms)'
+};
+const AXIS_KEYS = Object.keys(AXIS_LABELS);
+
+let selectedRunId = '';
+
+// ── Fetch axes breakdown ──
+async function loadAxes() {
+  const url = selectedRunId ? `/api/v1/trials/axes?run_id=${encodeURIComponent(selectedRunId)}` : '/api/v1/trials/axes';
+  const res = await fetch(url);
+  const data = await res.json();
+  renderAxes(data);
+}
+
+function renderAxes(data) {
+  const grid = document.getElementById('axes-grid');
+  grid.innerHTML = '';
+
+  let totalConfigs = 0, totalAlive = 0, totalTrades = 0;
+
+  for (const key of AXIS_KEYS) {
+    const vals = data[key] || [];
+    if (!vals.length) continue;
+
+    const maxTrades = Math.max(...vals.map(v => v.total_trades), 1);
+    const maxConfigs = Math.max(...vals.map(v => v.configs_total), 1);
+
+    vals.forEach(v => {
+      totalConfigs += v.configs_total;
+      totalAlive += v.configs_with_trades;
+      totalTrades += v.total_trades;
+    });
+
+    const panel = document.createElement('div');
+    panel.className = 'axis-panel';
+
+    const aliveCount = vals.filter(v => v.configs_with_trades > 0).length;
+    const deadCount = vals.filter(v => v.configs_with_trades === 0).length;
+
+    panel.innerHTML = `<h3>${AXIS_LABELS[key]} <span style="color:#6b7280;font-size:11px;">(${vals.length} values, ${aliveCount} alive, ${deadCount} dead)</span></h3>`;
+
+    const barsDiv = document.createElement('div');
+    barsDiv.className = 'axis-bars';
+
+    for (const v of vals) {
+      const col = document.createElement('div');
+      col.className = 'bar-col';
+
+      const barH = Math.max(3, (v.total_trades / maxTrades) * 90);
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.style.height = barH + 'px';
+
+      if (v.configs_with_trades === 0) {
+        bar.classList.add('bar-dead');
+      } else if (v.configs_with_trades === v.configs_total) {
+        bar.classList.add('bar-alive');
+      } else {
+        bar.classList.add('bar-mixed');
+      }
+
+      const pnlStr = v.total_trades > 0 ? ` avg=${v.avg_pnl_pct.toFixed(4)}%` : '';
+      bar.setAttribute('data-tip', `${v.total_trades} trades, ${v.configs_with_trades}/${v.configs_total} alive${pnlStr}`);
+
+      const label = document.createElement('div');
+      label.className = 'bar-label';
+      label.textContent = key.endsWith('_ms') ? (v.value >= 1000 ? (v.value/1000)+'s' : v.value) : v.value;
+
+      col.appendChild(bar);
+      col.appendChild(label);
+      barsDiv.appendChild(col);
+    }
+
+    panel.appendChild(barsDiv);
+    grid.appendChild(panel);
+  }
+
+  // Deduplicate by dividing by number of axes rendered
+  const axesRendered = AXIS_KEYS.filter(k => (data[k] || []).length > 0).length || 1;
+  document.getElementById('summary').innerHTML = `
+    <div class="card"><div class="label">Explored Values</div><div class="value">${(totalConfigs / axesRendered)|0}</div></div>
+    <div class="card"><div class="label">Alive Zones</div><div class="value pos">${(totalAlive / axesRendered)|0}</div></div>
+    <div class="card"><div class="label">Total Trades</div><div class="value">${(totalTrades / axesRendered)|0}</div></div>
+    <div class="card"><div class="label">Run</div><div class="value" style="font-size:13px;">${selectedRunId || 'all'}</div></div>
+  `;
+}
+
+// ── Fetch runs list ──
+async function loadRuns() {
+  const res = await fetch('/api/v1/trials');
+  const runs = await res.json();
+  const sel = document.getElementById('run-filter');
+  sel.innerHTML = '<option value="">All runs (aggregate)</option>';
+  for (const r of runs) {
+    const opt = document.createElement('option');
+    opt.value = r.run_id;
+    opt.textContent = `${r.run_id} — ${r.total_configs} cfgs, ${r.total_trades} trades, avg ${r.avg_pnl_pct.toFixed(4)}%`;
+    sel.appendChild(opt);
+  }
+
+  const tb = document.querySelector('#tbl-runs tbody');
+  tb.innerHTML = runs.map(r =>
+    `<tr class="clickable" data-run="${r.run_id}">
+      <td>${r.run_id}</td>
+      <td class="num">${r.total_configs}</td>
+      <td class="num">${r.total_trades}</td>
+      <td class="num">${cl(r.avg_pnl_pct)}</td>
+      <td class="num">${r.win_rate_pct.toFixed(1)}</td>
+      <td class="num">${cl(r.total_pnl_pct, 3)}</td>
+      <td class="num">${r.stop_loss_pct.toFixed(1)}</td>
+    </tr>`
+  ).join('');
+
+  tb.querySelectorAll('tr.clickable').forEach(tr => {
+    tr.addEventListener('click', () => loadDetail(tr.dataset.run));
+  });
+}
+
+// ── Fetch per-config detail for a run ──
+async function loadDetail(runId) {
+  document.querySelectorAll('#tbl-runs tbody tr').forEach(tr => tr.classList.toggle('selected', tr.dataset.run === runId));
+  const h = document.getElementById('detail-title');
+  const tbl = document.getElementById('tbl-detail');
+  h.style.display = 'block'; h.textContent = `📊 Config Details — ${runId}`;
+  tbl.style.display = 'table';
+
+  const res = await fetch(`/api/v1/trials/${encodeURIComponent(runId)}`);
+  const configs = await res.json();
+  const tb = tbl.querySelector('tbody');
+  tb.innerHTML = configs.map(c =>
+    `<tr class="${c.avg_pnl_pct>=0?'row-pos':'row-neg'}">
+      <td>${c.config_id}</td>
+      <td>${c.spike_threshold_bps}</td><td>${c.target_ratio}</td><td>${c.stop_loss_bps}</td>
+      <td>${holdFmt(c.max_hold_ms)}</td><td>${c.max_spread_bps}</td><td>${c.trailing_decay_ratio}</td>
+      <td>${c.baseline_window_ms}</td>
+      <td class="num">${c.total_trades}</td><td class="num">${c.wins}</td>
+      <td class="num">${c.win_rate_pct.toFixed(1)}</td>
+      <td class="num">${cl(c.avg_pnl_pct)}</td><td class="num">${cl(c.total_pnl_pct, 3)}</td>
+      <td class="num">${c.stop_loss_pct.toFixed(1)}</td>
+      <td class="num">${holdFmt(c.avg_hold_ms)}</td>
+    </tr>`
+  ).join('');
+}
+
+// ── Run filter ──
+document.getElementById('run-filter').addEventListener('change', e => {
+  selectedRunId = e.target.value;
+  loadAxes();
+});
+
+// ── Init ──
+async function init() {
+  await Promise.all([loadAxes(), loadRuns()]);
+  document.getElementById('meta').textContent = `Updated: ${new Date().toLocaleTimeString()} | Auto-refresh 30s`;
+}
+init();
+setInterval(() => { loadAxes(); loadRuns(); }, 30000);
+</script>
+</body>
+</html>

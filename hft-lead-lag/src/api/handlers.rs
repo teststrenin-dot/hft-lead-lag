@@ -443,6 +443,232 @@ pub(crate) async fn get_fleet_ranked(
     Ok(Json(result))
 }
 
+// ── Trial runs ──────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TrialRunSummary {
+    run_id: String,
+    config_count: i64,
+    total_trades: i64,
+    wins: i64,
+    win_rate_pct: f64,
+    avg_pnl_pct: f64,
+    total_pnl_pct: f64,
+    first_trade_ms: i64,
+    last_trade_ms: i64,
+}
+
+pub(crate) async fn get_trial_runs(
+    State(_state): State<Arc<HttpState>>,
+) -> Result<Json<Vec<TrialRunSummary>>, (axum::http::StatusCode, String)> {
+    let db_path = std::path::Path::new("data/optimizer.db");
+    let conn = crate::infrastructure::db::open_db(db_path)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT t.run_id,
+                COUNT(DISTINCT t.config_id) as config_count,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(t.pnl_pct) as total_pnl,
+                MIN(t.entry_ts_ms) as first_trade,
+                MAX(t.exit_ts_ms) as last_trade
+         FROM trades t
+         WHERE t.run_id IS NOT NULL
+         GROUP BY t.run_id
+         ORDER BY last_trade DESC"
+    ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
+
+    let rows = stmt.query_map([], |row| {
+        let total: i64 = row.get(2)?;
+        let wins: i64 = row.get(3)?;
+        let total_pnl: f64 = row.get(4)?;
+        Ok(TrialRunSummary {
+            run_id: row.get(0)?,
+            config_count: row.get(1)?,
+            total_trades: total,
+            wins,
+            win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
+            avg_pnl_pct: if total > 0 { total_pnl / total as f64 } else { 0.0 },
+            total_pnl_pct: total_pnl,
+            first_trade_ms: row.get(5)?,
+            last_trade_ms: row.get(6)?,
+        })
+    }).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
+
+    let result: Vec<TrialRunSummary> = rows.filter_map(|r| r.ok()).collect();
+    Ok(Json(result))
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TrialConfigDetail {
+    config_id: i64,
+    spike_threshold_bps: f64,
+    target_ratio: f64,
+    stop_loss_bps: f64,
+    max_hold_ms: i64,
+    max_spread_bps: f64,
+    trailing_decay_ratio: f64,
+    baseline_window_ms: i64,
+    total_trades: i64,
+    wins: i64,
+    win_rate_pct: f64,
+    avg_pnl_pct: f64,
+    total_pnl_pct: f64,
+    stop_loss_share_pct: f64,
+    avg_hold_ms: f64,
+}
+
+pub(crate) async fn get_trial_configs(
+    State(_state): State<Arc<HttpState>>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+) -> Result<Json<Vec<TrialConfigDetail>>, (axum::http::StatusCode, String)> {
+    let db_path = std::path::Path::new("data/optimizer.db");
+    let conn = crate::infrastructure::db::open_db(db_path)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
+                c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                c.trailing_decay_ratio, c.baseline_window_ms,
+                COUNT(*) as total,
+                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(t.pnl_pct) as total_pnl,
+                SUM(CASE WHEN t.exit_reason = 'stop_loss' THEN 1 ELSE 0 END) as sl_count,
+                AVG(t.hold_ms) as avg_hold
+         FROM trades t
+         JOIN configs c ON t.config_id = c.id
+         WHERE t.run_id = ?1
+         GROUP BY c.id
+         ORDER BY SUM(t.pnl_pct) / COUNT(*) DESC"
+    ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
+
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        let total: i64 = row.get(8)?;
+        let wins: i64 = row.get(9)?;
+        let total_pnl: f64 = row.get(10)?;
+        let sl_count: i64 = row.get(11)?;
+        Ok(TrialConfigDetail {
+            config_id: row.get(0)?,
+            spike_threshold_bps: row.get(1)?,
+            target_ratio: row.get(2)?,
+            stop_loss_bps: row.get(3)?,
+            max_hold_ms: row.get(4)?,
+            max_spread_bps: row.get(5)?,
+            trailing_decay_ratio: row.get(6)?,
+            baseline_window_ms: row.get(7)?,
+            total_trades: total,
+            wins,
+            win_rate_pct: if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 },
+            avg_pnl_pct: if total > 0 { total_pnl / total as f64 } else { 0.0 },
+            total_pnl_pct: total_pnl,
+            stop_loss_share_pct: if total > 0 { (sl_count as f64 / total as f64) * 100.0 } else { 0.0 },
+            avg_hold_ms: row.get(12)?,
+        })
+    }).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
+
+    let result: Vec<TrialConfigDetail> = rows.filter_map(|r| r.ok()).collect();
+    Ok(Json(result))
+}
+
+// ── Trial axes breakdown (7D reference matrix) ──────────────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AxisValueStats {
+    value: f64,
+    configs_total: i64,
+    configs_with_trades: i64,
+    total_trades: i64,
+    avg_pnl_pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TrialAxesBreakdown {
+    run_id: Option<String>,
+    spike_threshold_bps: Vec<AxisValueStats>,
+    target_ratio: Vec<AxisValueStats>,
+    stop_loss_bps: Vec<AxisValueStats>,
+    max_hold_ms: Vec<AxisValueStats>,
+    max_spread_bps: Vec<AxisValueStats>,
+    trailing_decay_ratio: Vec<AxisValueStats>,
+    baseline_window_ms: Vec<AxisValueStats>,
+}
+
+pub(crate) async fn get_trial_axes(
+    State(_state): State<Arc<HttpState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<TrialAxesBreakdown>, (axum::http::StatusCode, String)> {
+    let db_path = std::path::Path::new("data/optimizer.db");
+    let conn = crate::infrastructure::db::open_db(db_path)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+
+    let run_id = params.get("run_id").cloned();
+
+    fn query_axis(conn: &rusqlite::Connection, column: &str, run_id: &Option<String>) -> Result<Vec<AxisValueStats>, String> {
+        let sql = if run_id.is_some() {
+            format!(
+                "SELECT c.{col}, COUNT(DISTINCT c.id), 
+                        COUNT(DISTINCT CASE WHEN t.id IS NOT NULL THEN c.id END),
+                        COUNT(t.id),
+                        COALESCE(AVG(t.pnl_pct), 0)
+                 FROM configs c
+                 LEFT JOIN trades t ON t.config_id = c.id AND t.run_id = ?1
+                 GROUP BY c.{col}
+                 ORDER BY c.{col}",
+                col = column
+            )
+        } else {
+            format!(
+                "SELECT c.{col}, COUNT(DISTINCT c.id),
+                        COUNT(DISTINCT CASE WHEN t.id IS NOT NULL THEN c.id END),
+                        COUNT(t.id),
+                        COALESCE(AVG(t.pnl_pct), 0)
+                 FROM configs c
+                 LEFT JOIN trades t ON t.config_id = c.id
+                 GROUP BY c.{col}
+                 ORDER BY c.{col}",
+                col = column
+            )
+        };
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("sql {column}: {e}"))?;
+        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<AxisValueStats> {
+            Ok(AxisValueStats {
+                value: row.get(0)?,
+                configs_total: row.get(1)?,
+                configs_with_trades: row.get(2)?,
+                total_trades: row.get(3)?,
+                avg_pnl_pct: row.get(4)?,
+            })
+        };
+        let result: Vec<AxisValueStats> = if let Some(rid) = run_id {
+            stmt.query_map(rusqlite::params![rid], map_row)
+                .map_err(|e| format!("query {column}: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect()
+        } else {
+            stmt.query_map([], map_row)
+                .map_err(|e| format!("query {column}: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        Ok(result)
+    }
+
+    let breakdown = TrialAxesBreakdown {
+        run_id: run_id.clone(),
+        spike_threshold_bps: query_axis(&conn, "spike_threshold_bps", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        target_ratio: query_axis(&conn, "target_ratio", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        stop_loss_bps: query_axis(&conn, "stop_loss_bps", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        max_hold_ms: query_axis(&conn, "max_hold_ms", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        max_spread_bps: query_axis(&conn, "max_spread_bps", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        trailing_decay_ratio: query_axis(&conn, "trailing_decay_ratio", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        baseline_window_ms: query_axis(&conn, "baseline_window_ms", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
+    };
+
+    Ok(Json(breakdown))
+}
+
 // ── Internal helpers ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
