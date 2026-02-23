@@ -118,9 +118,9 @@ def main():
     e.set_defaults(func=cmd_expand)
 
     f = sub.add_parser("forward", help="ASHA forward test")
-    f.add_argument("--max-budget", type=int, default=21600, help="Max time budget (s)")
-    f.add_argument("--grace-period", type=int, default=600, help="ASHA grace period (s)")
-    f.add_argument("--report-interval", type=int, default=60, help="Metric report interval (s)")
+    f.add_argument("--max-budget", type=int, default=240, help="Max time budget (s)")
+    f.add_argument("--grace-period", type=int, default=60, help="ASHA grace period (s)")
+    f.add_argument("--report-interval", type=int, default=30, help="Metric report interval (s)")
     f.set_defaults(func=cmd_forward)
 
     pr = sub.add_parser("promote", help="Export top configs from a run")

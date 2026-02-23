@@ -66,7 +66,6 @@ CREATE INDEX IF NOT EXISTS idx_trades_config ON trades(config_id);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_exit_ts ON trades(exit_ts_ms);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_natural_key ON trades(config_id, symbol, entry_ts_ms, exit_ts_ms);
-CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);
 ";
 
 // ---------------------------------------------------------------------------
@@ -124,6 +123,7 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
         "ALTER TABLE trades ADD COLUMN early_stop_churn INTEGER NOT NULL DEFAULT 0;",
     );
     let _ = conn.execute_batch("ALTER TABLE trades ADD COLUMN run_id TEXT;");
+    let _ = conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);");
     Ok(conn)
 }
 
