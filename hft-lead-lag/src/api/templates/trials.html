@@ -24,8 +24,7 @@
     .run-select select { background:#111827; color:#e5e7eb; border:1px solid #374151; border-radius:4px; padding:6px 10px; font-size:13px; min-width:300px; }
 
     /* Axis charts */
-    .axes-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
-    @media (max-width: 900px) { .axes-grid { grid-template-columns: 1fr; } }
+    .axes-grid { display: flex; flex-direction: column; gap: 16px; margin: 16px 0; }
     .axis-panel { background:#111827; border:1px solid #1f2937; border-radius:6px; padding:12px; }
     .axis-panel h3 { margin:0 0 8px; font-size:13px; color:#93c5fd; }
     .axis-bars { display:flex; align-items:flex-end; gap:2px; height:100px; }

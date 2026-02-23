@@ -604,66 +604,90 @@ pub(crate) async fn get_trial_axes(
 
     let run_id = params.get("run_id").cloned();
 
-    fn query_axis(conn: &rusqlite::Connection, column: &str, run_id: &Option<String>) -> Result<Vec<AxisValueStats>, String> {
-        let sql = if run_id.is_some() {
-            format!(
-                "SELECT c.{col}, COUNT(DISTINCT c.id), 
-                        COUNT(DISTINCT CASE WHEN t.id IS NOT NULL THEN c.id END),
-                        COUNT(t.id),
-                        COALESCE(AVG(t.pnl_pct), 0)
-                 FROM configs c
-                 LEFT JOIN trades t ON t.config_id = c.id AND t.run_id = ?1
-                 GROUP BY c.{col}
-                 ORDER BY c.{col}",
-                col = column
-            )
-        } else {
-            format!(
-                "SELECT c.{col}, COUNT(DISTINCT c.id),
-                        COUNT(DISTINCT CASE WHEN t.id IS NOT NULL THEN c.id END),
-                        COUNT(t.id),
-                        COALESCE(AVG(t.pnl_pct), 0)
-                 FROM configs c
-                 LEFT JOIN trades t ON t.config_id = c.id
-                 GROUP BY c.{col}
-                 ORDER BY c.{col}",
-                col = column
-            )
-        };
+    // Single query: per-config row with pre-aggregated trade stats.
+    let base_sql = if run_id.is_some() {
+        "SELECT c.spike_threshold_bps, c.target_ratio, c.stop_loss_bps,
+                c.max_hold_ms, c.max_spread_bps, c.trailing_decay_ratio, c.baseline_window_ms,
+                COUNT(t.id) AS trades, COALESCE(AVG(t.pnl_pct),0) AS avg_pnl
+         FROM configs c LEFT JOIN trades t ON t.config_id = c.id AND t.run_id = ?1
+         GROUP BY c.id"
+    } else {
+        "SELECT c.spike_threshold_bps, c.target_ratio, c.stop_loss_bps,
+                c.max_hold_ms, c.max_spread_bps, c.trailing_decay_ratio, c.baseline_window_ms,
+                COUNT(t.id) AS trades, COALESCE(AVG(t.pnl_pct),0) AS avg_pnl
+         FROM configs c LEFT JOIN trades t ON t.config_id = c.id
+         GROUP BY c.id"
+    };
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| format!("sql {column}: {e}"))?;
-        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<AxisValueStats> {
-            Ok(AxisValueStats {
-                value: row.get(0)?,
-                configs_total: row.get(1)?,
-                configs_with_trades: row.get(2)?,
-                total_trades: row.get(3)?,
-                avg_pnl_pct: row.get(4)?,
-            })
-        };
-        let result: Vec<AxisValueStats> = if let Some(rid) = run_id {
-            stmt.query_map(rusqlite::params![rid], map_row)
-                .map_err(|e| format!("query {column}: {e}"))?
-                .filter_map(|r| r.ok())
-                .collect()
-        } else {
-            stmt.query_map([], map_row)
-                .map_err(|e| format!("query {column}: {e}"))?
-                .filter_map(|r| r.ok())
-                .collect()
-        };
-        Ok(result)
+    struct ConfigRow { vals: [f64; 7], trades: i64, avg_pnl: f64 }
+
+    let mut stmt = conn.prepare(base_sql)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
+
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<ConfigRow> {
+        Ok(ConfigRow {
+            vals: [row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+                   row.get(4)?, row.get(5)?, row.get(6)?],
+            trades: row.get(7)?, avg_pnl: row.get(8)?,
+        })
+    };
+
+    let rows: Vec<ConfigRow> = if let Some(ref rid) = run_id {
+        stmt.query_map(rusqlite::params![rid], map_row)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?
+            .filter_map(|r| r.ok())
+            .collect()
+    } else {
+        stmt.query_map([], map_row)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?
+            .filter_map(|r| r.ok())
+            .collect()
+    };
+
+    // Bucket step for each axis (0 = no bucketing).
+    const BUCKET: [f64; 7] = [
+        0.0,     // spike_threshold_bps — low cardinality
+        0.0,     // target_ratio
+        2.0,     // stop_loss_bps — bucket by 2
+        5000.0,  // max_hold_ms — bucket by 5s
+        0.0,     // max_spread_bps
+        0.0,     // trailing_decay_ratio
+        10000.0, // baseline_window_ms — bucket by 10s
+    ];
+
+    fn bucket_val(v: f64, step: f64) -> f64 {
+        if step <= 0.0 { v } else { (v / step).round() * step }
+    }
+
+    fn aggregate_axis(rows: &[ConfigRow], idx: usize, step: f64) -> Vec<AxisValueStats> {
+        let mut map: std::collections::BTreeMap<i64, (i64, i64, i64, f64, f64)> = std::collections::BTreeMap::new();
+        for r in rows {
+            let bv = bucket_val(r.vals[idx], step);
+            let key = (bv * 1_000_000.0) as i64; // fixed-point key for BTreeMap ordering
+            let e = map.entry(key).or_insert((0, 0, 0, 0.0, bv));
+            e.0 += 1; // configs_total
+            if r.trades > 0 { e.1 += 1; } // configs_with_trades
+            e.2 += r.trades; // total_trades
+            e.3 += r.avg_pnl * r.trades as f64; // weighted pnl sum
+        }
+        map.values().map(|&(ct, cwt, tt, pnl_sum, bv)| AxisValueStats {
+            value: bv,
+            configs_total: ct,
+            configs_with_trades: cwt,
+            total_trades: tt,
+            avg_pnl_pct: if tt > 0 { pnl_sum / tt as f64 } else { 0.0 },
+        }).collect()
     }
 
     let breakdown = TrialAxesBreakdown {
-        run_id: run_id.clone(),
-        spike_threshold_bps: query_axis(&conn, "spike_threshold_bps", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
-        target_ratio: query_axis(&conn, "target_ratio", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
-        stop_loss_bps: query_axis(&conn, "stop_loss_bps", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
-        max_hold_ms: query_axis(&conn, "max_hold_ms", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
-        max_spread_bps: query_axis(&conn, "max_spread_bps", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
-        trailing_decay_ratio: query_axis(&conn, "trailing_decay_ratio", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
-        baseline_window_ms: query_axis(&conn, "baseline_window_ms", &run_id).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        run_id,
+        spike_threshold_bps: aggregate_axis(&rows, 0, BUCKET[0]),
+        target_ratio:        aggregate_axis(&rows, 1, BUCKET[1]),
+        stop_loss_bps:       aggregate_axis(&rows, 2, BUCKET[2]),
+        max_hold_ms:         aggregate_axis(&rows, 3, BUCKET[3]),
+        max_spread_bps:      aggregate_axis(&rows, 4, BUCKET[4]),
+        trailing_decay_ratio:aggregate_axis(&rows, 5, BUCKET[5]),
+        baseline_window_ms:  aggregate_axis(&rows, 6, BUCKET[6]),
     };
 
     Ok(Json(breakdown))
