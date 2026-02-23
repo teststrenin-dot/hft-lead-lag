@@ -1,10 +1,11 @@
 //! TraderConfig — all tunable parameters for a shadow trader instance.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Configuration for a single shadow trader instance.
 /// `Copy` + `Clone` so it can be shared across fleet without allocation.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TraderConfig {
     /// Min Binance move to trigger entry (bps). Ask for longs, bid for shorts.
     pub spike_threshold_bps: f64,

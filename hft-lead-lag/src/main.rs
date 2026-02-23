@@ -212,6 +212,50 @@ struct RuntimeGridGeneration {
     modified: SystemTime,
 }
 
+// ---------------------------------------------------------------------------
+// Trial batch — programmatic config injection (Ray driver)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+struct TrialBatch {
+    run_id: String,
+    configs: Vec<TraderConfig>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct TrialAck {
+    run_id: String,
+    applied_at_ms: i64,
+    config_count: usize,
+    drained_trades: usize,
+}
+
+fn load_trial_batch(path: &Path) -> Result<TrialBatch, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("read trial batch {}: {e}", path.display()))?;
+    let batch: TrialBatch = serde_json::from_str(&content)
+        .map_err(|e| format!("parse trial batch {}: {e}", path.display()))?;
+    if batch.configs.is_empty() {
+        return Err("trial batch has no configs".to_string());
+    }
+    if batch.run_id.is_empty() {
+        return Err("trial batch run_id is empty".to_string());
+    }
+    Ok(batch)
+}
+
+fn write_trial_ack(dir: &Path, ack: &TrialAck) {
+    let path = dir.join(".trial-ack");
+    match serde_json::to_string_pretty(ack) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                warn!("trial-ack: failed to write {}: {e}", path.display());
+            }
+        }
+        Err(e) => warn!("trial-ack: serialize error: {e}"),
+    }
+}
+
 const DEFAULT_RUNTIME_GRID_CONFIG_TOML: &str = r#"# Runtime grid hot-reload (deal-hunt phase A)
 enabled = true
 watch_interval_ms = 5000
@@ -398,6 +442,7 @@ fn spawn_runtime_grid_hot_reload(
     screener: ScreenerStore,
     db_path: PathBuf,
     config_path: PathBuf,
+    trial_batch_path: PathBuf,
     initial_modified: Option<SystemTime>,
     initial_signature: Option<u64>,
 ) {
@@ -406,8 +451,50 @@ fn spawn_runtime_grid_hot_reload(
         let mut last_applied_signature = initial_signature;
         let mut pending: Option<RuntimeGridGeneration> = None;
         let mut last_apply_ms = EventLoopState::now_ms();
+        let mut last_trial_modified: Option<SystemTime> = None;
 
         loop {
+            // --- Trial batch: immediate apply, no debounce ---
+            let trial_modified = std::fs::metadata(&trial_batch_path)
+                .and_then(|m| m.modified())
+                .ok();
+            if let Some(mod_time) = trial_modified {
+                let trial_changed = last_trial_modified.map_or(true, |prev| mod_time > prev);
+                if trial_changed {
+                    last_trial_modified = Some(mod_time);
+                    match load_trial_batch(&trial_batch_path) {
+                        Ok(batch) => {
+                            let run_id = batch.run_id.clone();
+                            let config_count = batch.configs.len();
+                            if let Err(e) = upsert_runtime_configs(&db_path, &batch.configs) {
+                                warn!("trial-batch: db upsert failed: {e}");
+                            } else {
+                                screener.set_run_id(Some(run_id.clone()));
+                                let report = screener.replace_fleet_configs(batch.configs);
+                                screener.flush_db_writer().await;
+                                info!(
+                                    "trial-batch: applied run_id={run_id} configs={config_count} \
+                                     drained_trades={}",
+                                    report.drained_trades
+                                );
+                                write_trial_ack(
+                                    trial_batch_path.parent().unwrap_or(Path::new(".")),
+                                    &TrialAck {
+                                        run_id,
+                                        applied_at_ms: EventLoopState::now_ms(),
+                                        config_count,
+                                        drained_trades: report.drained_trades,
+                                    },
+                                );
+                                pending = None;
+                            }
+                        }
+                        Err(e) => warn!("trial-batch: {e}"),
+                    }
+                }
+            }
+            // --- End trial batch ---
+
             let modified = std::fs::metadata(&config_path)
                 .and_then(|m| m.modified())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -1324,6 +1411,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         screener.clone(),
         db_path.to_path_buf(),
         runtime_grid_path.to_path_buf(),
+        PathBuf::from("config/trial-batch.json"),
         runtime_grid_last_modified,
         runtime_grid_last_signature,
     );

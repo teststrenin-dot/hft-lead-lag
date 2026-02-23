@@ -71,6 +71,7 @@ pub struct ScreenerStore {
     window_ms: i64,
     fleet_configs: Arc<ArcSwap<Vec<TraderConfig>>>,
     db_writer: Option<DbWriter>,
+    current_run_id: Arc<ArcSwap<Option<String>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +89,7 @@ impl ScreenerStore {
             window_ms,
             fleet_configs: Arc::new(ArcSwap::from_pointee(generate_grid())),
             db_writer: None,
+            current_run_id: Arc::new(ArcSwap::from_pointee(None)),
         }
     }
 
@@ -102,6 +104,14 @@ impl ScreenerStore {
 
     pub fn window_ms(&self) -> i64 {
         self.window_ms
+    }
+
+    pub fn set_run_id(&self, run_id: Option<String>) {
+        self.current_run_id.store(Arc::new(run_id));
+    }
+
+    pub fn current_run_id(&self) -> Option<String> {
+        (**self.current_run_id.load()).clone()
     }
 
     /// Set 24h volume for symbols (called once at startup from REST data).
@@ -218,6 +228,8 @@ impl ScreenerStore {
         let fleet = state
             .fleet
             .get_or_insert_with(|| ShadowFleet::new(fleet_configs.as_ref()));
+        let run_id_arc = self.current_run_id.load();
+        let run_id_ref = run_id_arc.as_deref();
         fleet.tick_all(
             clocks.exchange_event_ts_ms,
             binance_ref,
@@ -227,6 +239,7 @@ impl ScreenerStore {
             FleetTickMeta {
                 symbol,
                 gate_natr_30m_pct_at_entry: state.gate_natr_30m_pct,
+                run_id: run_id_ref,
             },
         );
         if let Some(ref writer) = self.db_writer {

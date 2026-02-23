@@ -35,21 +35,21 @@
 ## Текущий фокус
 
 - Gap-based lead-lag с baseline нормализацией.
-- Shadow Fleet exploration: **2304 configs**.
+- Shadow Fleet exploration через runtime-grid hot-reload (`max_configs=1500`).
 - Baseline timing как гиперпараметр (`baseline_window_ms`: 10s/20s/30s/60s).
-- Expectancy + composite ranking + runtime pruning.
-- Подготовка к следующему шагу: coverage expansion + policy selection.
+- Expectancy + composite ranking + runtime pruning + health degradation signals.
+- Следующий шаг: iterative hyperparam cycle и подготовка Ray/ASHA forward-testing.
 
 ---
 
 ## Source of truth
 
 - `docs/README.md`
-- `docs/sprints/remaining-roadmap-2026-02-20.md`
-- `docs/review-2026-02-19-deep-dive.md`
+- `docs/sprints/sprint-008-deal-hunt-natr-db.md`
+- `docs/plans/2026-02-21-iterative-hyperparam-methodology.md`
 
 Архивные документы не должны использоваться как source of truth.
 
 ---
 
-*Manifest v2.2 — synchronized with baseline-window fleet runtime*
+*Manifest v2.3 — synchronized with runtime-grid + deal-hunt Phase A state*

@@ -25,3 +25,14 @@ logs/
 
 # Examples (broken)
 examples/full_test.rs
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Ray
+ray_results/

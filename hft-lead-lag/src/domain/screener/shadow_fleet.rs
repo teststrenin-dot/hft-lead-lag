@@ -337,6 +337,7 @@ pub fn generate_grid() -> Vec<TraderConfig> {
 pub struct FleetTrade {
     pub config_id: u64,
     pub symbol: String,
+    pub run_id: Option<String>,
     pub trade: ClosedTrade,
 }
 
@@ -344,6 +345,7 @@ pub struct FleetTrade {
 pub struct FleetTickMeta<'a> {
     pub symbol: &'a str,
     pub gate_natr_30m_pct_at_entry: f64,
+    pub run_id: Option<&'a str>,
 }
 
 /// Fleet of shadow traders for one symbol.
@@ -444,6 +446,7 @@ impl ShadowFleet {
                     self.pending_trades.push_back(FleetTrade {
                         config_id: *config_id,
                         symbol: sym.clone(),
+                        run_id: meta.run_id.map(|s| s.to_string()),
                         trade: trade.clone(),
                     });
                 }

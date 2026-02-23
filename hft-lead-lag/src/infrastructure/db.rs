@@ -58,13 +58,15 @@ CREATE TABLE IF NOT EXISTS trades (
     gate_spread_at_entry_bps REAL NOT NULL,
     gate_natr_30m_pct_at_entry REAL NOT NULL DEFAULT 0.0,
     hold_ms INTEGER NOT NULL DEFAULT 0,
-    early_stop_churn INTEGER NOT NULL DEFAULT 0
+    early_stop_churn INTEGER NOT NULL DEFAULT 0,
+    run_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_config ON trades(config_id);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_exit_ts ON trades(exit_ts_ms);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_natural_key ON trades(config_id, symbol, entry_ts_ms, exit_ts_ms);
+CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);
 ";
 
 // ---------------------------------------------------------------------------
@@ -121,6 +123,7 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute_batch(
         "ALTER TABLE trades ADD COLUMN early_stop_churn INTEGER NOT NULL DEFAULT 0;",
     );
+    let _ = conn.execute_batch("ALTER TABLE trades ADD COLUMN run_id TEXT;");
     Ok(conn)
 }
 
@@ -281,8 +284,8 @@ fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()
         let mut stmt = tx.prepare_cached(
             "INSERT OR IGNORE INTO trades (config_id, symbol, direction, entry_ts_ms, exit_ts_ms,
              entry_price, exit_price, spike_bps, pnl_pct, exit_reason,
-             gate_spread_at_entry_bps, gate_natr_30m_pct_at_entry, hold_ms, early_stop_churn)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             gate_spread_at_entry_bps, gate_natr_30m_pct_at_entry, hold_ms, early_stop_churn, run_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )?;
         for ft in trades {
             let t = &ft.trade;
@@ -301,6 +304,7 @@ fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()
                 t.gate_natr_30m_pct_at_entry,
                 t.hold_ms,
                 if t.early_stop_churn { 1_i64 } else { 0_i64 },
+                ft.run_id.as_deref(),
             ])?;
         }
     }

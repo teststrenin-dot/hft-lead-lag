@@ -1,62 +1,65 @@
 # HFT Lead-Lag Documentation (Current)
 
-Актуальная документация по состоянию `main` и запущенного runtime.
+Актуальная документация по состоянию `main` (code-verified).
 
-**Snapshot:** 2026-02-19  
-**Branch/commit:** `main @ 807178a`  
+**Snapshot:** 2026-02-23  
+**Branch/commit:** `main @ 5ee071c`  
 **Mode:** paper trading + shadow fleet optimizer
 
 ---
 
 ## 1) Что обновлено в этой итерации
 
-1. Введён гиперпараметр `baseline_window_ms` в fleet/grid и БД.
-2. `detect_gap()` теперь считает baseline только по окну `baseline_window_ms`, а не по всей 2-минутной истории.
-3. Грид пересобран под диапазон тайминга **10s..60s**.
-4. В API-выгрузки добавлен `baseline_window_ms`:
-   - `/api/v1/fleet`
-   - `/api/v1/fleet/ranked`
-   - `/api/v1/fleet/symbols`
+1. Runtime hot-reload grid активен через `config/runtime-grid.toml`:
+   - startup apply + watch/apply loop в `src/main.rs` (`load_runtime_grid_generation`, `spawn_runtime_grid_hot_reload`);
+   - атомарная замена fleet-конфигов через `ScreenerStore::replace_fleet_configs`.
+2. Deal-hunt data contract доведён до прод-кода:
+   - в `ClosedTrade` добавлены `gate_natr_30m_pct_at_entry`, `hold_ms`, `early_stop_churn` (`src/domain/screener/shadow_trader.rs`);
+   - в SQLite `trades` добавлены те же поля + migration-safe `ALTER TABLE` (`src/infrastructure/db.rs`).
+3. В рантайме работает батчевый Gate NATR refresher:
+   - `spawn_gate_natr_refresher` + `refresh_gate_natr_batch` (`src/main.rs`);
+   - запись snapshot в state через `ScreenerStore::set_gate_natr_30m`.
+4. Health endpoint теперь учитывает staleness и drop counters:
+   - stale feed detection (`binance_last_tick_age_ms`, `gate_last_tick_age_ms`);
+   - drop counters (`binance_dropped_messages`, `gate_dropped_messages`, `db_dropped_batches`);
+   - деградация до `503` при проблемах (`src/api/handlers.rs`).
+5. Закрыты ключевые remediation-пункты:
+   - decayed policy snapshot "to now" (`metrics_at` в `src/domain/screener/shadow_fleet.rs`);
+   - корректный парсинг Binance `lastPrice` (`src/infrastructure/rest/mod.rs`);
+   - retry-path в `DbWriter::send` при full-channel (`src/infrastructure/db.rs`).
 
 ---
 
 ## 2) Карта документации
 
 - `docs/README.md` (этот файл): текущий статус, математика, runbook.
-- `docs/sprints/remaining-roadmap-2026-02-20.md`: дорожная карта оставшейся разработки (Sprint 004-007).
-- `docs/sprints/sprint-004-correctness-hardening.md`: фазы стабилизации корректности данных и quality gates.
-- `docs/sprints/sprint-005-policy-allocator-and-gates.md`: фазы policy allocator и symbol/regime gating.
-- `docs/sprints/sprint-006-dislocation-reversion-ab.md`: фазы реализации второй стратегии и A/B валидации.
-- `docs/sprints/sprint-007-prelive-reliability.md`: фазы pre-live hardening, CI и ops readiness.
-- `docs/review-2026-02-19-deep-dive.md`: инженерный статус проекта, риски, next actions.
-- `docs/review-2026-02-19-multi-agent.md`: мультиагентное ревью (коммиты/архитектура/математика/дубли/god objects).
-- `docs/review-2026-02-20-comprehensive-audit.md`: полный аудит (коммиты, баги, архитектура, математика, dead code, Screener/Shadow Fleet отдельно).
-- `docs/review-2026-02-20-profit-deep-dive.md`: deep dive по извлечению прибыли на основе live `optimizer.db` + roadmap на 72h.
 - `docs/manifest/MANIFESTO.md`: принципы и текущий фокус.
-- `docs/review-shadow-trader.md`: архив (legacy, read-only).
+- `docs/sprints/sprint-008-deal-hunt-natr-db.md`: sprint-факт по deal-hunt/NATR data foundation.
+- `docs/plans/2026-02-21-iterative-hyperparam-methodology.md`: активная методология итеративного поиска.
+- `docs/plans/2026-02-23-ray-asha-forward-testing-context.md`: целевой контур Ray/ASHA (контекст, не код).
 - `docs/studies/*.md`: исследовательские идеи, не source of truth.
 
 ---
 
-## 3) Runtime snapshot (живой сервер)
+## 3) Статус планов (что готово и что можно удалять)
 
-Метрики из текущего live paper запуска:
+Старые планы удалены из `docs/plans`:
 
-- `symbols_total`: **53**
-- `symbols_with_trades` (single shadow): **11**
-- `symbols_no_trades`: **42**
-- `fleet ranked rows (>=10 trades/config)`: **100**
-- `fleet/symbols` (best-by-symbol): **3 symbols**
+1. `2026-02-20-master-remediation-design.md`
+2. `2026-02-20-master-remediation-implementation.md`
+3. `2026-02-20-full-remediation-implementation.md`
+4. `2026-02-20-profit-extraction-brainstorm.md`
+5. `2026-02-21-deal-hunt-hot-reload-design.md`
+6. `2026-02-21-deal-hunt-hot-reload-implementation.md`
 
-Лучший конфиг по `/api/v1/fleet/ranked` на snapshot:
+Активные планы:
 
-- `gap=30 bps`, `target=0.7`, `sl=40`, `hold=5s`, `spread=5`, `trailing=0.7`, `baseline=60s`
-- `trades=35`, `win_rate=60%`, `avg_pnl=0.0199%`, `composite=0.592`
+- `docs/plans/2026-02-21-iterative-hyperparam-methodology.md`
+- `docs/plans/2026-02-23-ray-asha-forward-testing-context.md`
 
-Распределение top-100 ranked по `baseline_window_ms`:
+История выполненной фазы:
 
-- `20s`: 72
-- `60s`: 28
+- `docs/sprints/sprint-008-deal-hunt-natr-db.md`
 
 ---
 
@@ -110,15 +113,17 @@
 ## 6) Shadow Fleet grid (текущий)
 
 ```text
-gap_threshold_bps (spike_threshold_bps): [30, 50, 60, 80]           (4)
-target_ratio:                           [0.3, 0.5, 0.7]             (3)
-stop_loss_bps:                          [8, 15, 25, 40]              (4)
-max_hold_ms:                            [5000, 10000, 30000]         (3)
-max_spread_bps:                         [3, 5]                        (2)
-trailing_decay_ratio:                   [0.3, 0.7]                    (2)
-baseline_window_ms:                     [10000, 20000, 30000, 60000]  (4)
+runtime-grid axes (`config/runtime-grid.toml`):
+gap_threshold_bps:   30..80 step 10
+target_ratio:        0.3..0.7 step 0.1
+stop_loss_bps:       8..40 step 4
+max_hold_ms:         5000..30000 step 5000
+max_spread_bps:      3..5 step 1
+trailing_decay_ratio:0.3..0.7 step 0.1
+baseline_window_ms:  10000..60000 step 10000
 
-TOTAL: 4 * 3 * 4 * 3 * 2 * 2 * 4 = 2304
+raw combinations: 145800
+runtime cap: max_configs = 1500 (downsample_configs)
 ```
 
 Pruning:
@@ -171,7 +176,8 @@ curl -s http://localhost:5000/api/v1/fleet/symbols | head
 1. Это paper execution (real order routing ещё не интегрирован).
 2. Universe coverage пока узкий: многие символы не проходят пороги сигналов.
 3. Policy allocator между конфигами отсутствует (есть ranking, но нет auto-capital routing).
-4. Есть fail-open поведение в `DbWriter` при переполнении канала (batch drop с warn).
+4. Ray Tune + ASHA контур пока только в плане (`docs/plans/2026-02-23-ray-asha-forward-testing-context.md`), в `src/` интеграции нет.
+5. `dislocation_reversion` объявлен в config enum, но runtime-build пока поддерживает только `lead_lag_classic`.
 
 ---
 
@@ -186,4 +192,4 @@ curl -s http://localhost:5000/api/v1/fleet/symbols | head
 
 ---
 
-*Last updated: 2026-02-20 (strategy runtime modularity + comprehensive audit docs added)*
+*Last updated: 2026-02-23 (old plans removed from docs/plans, docs index synced)*
