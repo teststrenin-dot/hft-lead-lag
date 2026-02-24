@@ -128,6 +128,11 @@ impl HttpServer {
             .route("/api/v1/fleet", get(handlers::get_fleet_ranking))
             .route("/api/v1/fleet/ranked", get(handlers::get_fleet_ranked))
             .route("/api/v1/fleet/symbols", get(handlers::get_fleet_by_symbol))
+            .route("/api/v1/forward/runs", get(handlers::get_forward_runs))
+            .route(
+                "/api/v1/forward/symbols",
+                get(handlers::get_forward_by_symbol),
+            )
             .route("/fleet", get(templates::fleet_page))
             .route("/trials", get(templates::trials_page))
             .route("/api/v1/trials", get(handlers::get_trial_runs))

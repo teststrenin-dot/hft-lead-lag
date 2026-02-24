@@ -603,6 +603,150 @@ pub(crate) async fn get_trial_runs(
     Ok(Json(result))
 }
 
+pub(crate) async fn get_forward_runs(
+    State(_state): State<Arc<HttpState>>,
+) -> Result<Json<Vec<TrialRunSummary>>, (axum::http::StatusCode, String)> {
+    let db_path = std::path::Path::new("data/optimizer.db");
+    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e}"),
+        )
+    })?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.run_id,
+                COUNT(DISTINCT t.config_id) as config_count,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(t.pnl_pct) as total_pnl,
+                MIN(t.entry_ts_ms) as first_trade,
+                MAX(t.exit_ts_ms) as last_trade
+         FROM trades t
+         WHERE t.run_id LIKE 'forward-%'
+         GROUP BY t.run_id
+         ORDER BY last_trade DESC",
+        )
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("sql: {e}"),
+            )
+        })?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let total: i64 = row.get(2)?;
+            let wins: i64 = row.get(3)?;
+            let total_pnl: f64 = row.get(4)?;
+            Ok(TrialRunSummary {
+                run_id: row.get(0)?,
+                config_count: row.get(1)?,
+                total_trades: total,
+                wins,
+                win_rate_pct: if total > 0 {
+                    (wins as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                },
+                avg_pnl_pct: if total > 0 {
+                    total_pnl / total as f64
+                } else {
+                    0.0
+                },
+                total_pnl_pct: total_pnl,
+                first_trade_ms: row.get(5)?,
+                last_trade_ms: row.get(6)?,
+            })
+        })
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("query: {e}"),
+            )
+        })?;
+
+    let result: Vec<TrialRunSummary> = rows.filter_map(|r| r.ok()).collect();
+    Ok(Json(result))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ForwardSymbolsQuery {
+    run_id: Option<String>,
+}
+
+pub(crate) async fn get_forward_by_symbol(
+    State(_state): State<Arc<HttpState>>,
+    axum::extract::Query(query): axum::extract::Query<ForwardSymbolsQuery>,
+) -> Result<Json<Vec<SymbolBestConfig>>, (axum::http::StatusCode, String)> {
+    let db_path = std::path::Path::new("data/optimizer.db");
+    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e}"),
+        )
+    })?;
+
+    let run_id = resolve_forward_run_id(&conn, query.run_id.as_deref())?;
+
+    let mut stmt = conn.prepare(
+        "WITH ranked AS (
+            SELECT t.symbol, c.id as config_id,
+                   c.spike_threshold_bps, c.target_ratio,
+                   c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                   c.trailing_decay_ratio, c.baseline_window_ms,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                   SUM(t.pnl_pct) as total_pnl,
+                   ROW_NUMBER() OVER (PARTITION BY t.symbol ORDER BY SUM(t.pnl_pct)/COUNT(*) DESC) as rn
+            FROM trades t
+            JOIN configs c ON t.config_id = c.id
+            WHERE t.run_id = ?1
+            GROUP BY t.symbol, c.id
+            HAVING total >= 1
+        )
+        SELECT symbol, config_id, spike_threshold_bps, target_ratio,
+               stop_loss_bps, max_hold_ms, max_spread_bps, trailing_decay_ratio,
+               baseline_window_ms, total, wins, total_pnl
+        FROM ranked WHERE rn = 1
+        ORDER BY total_pnl / total DESC"
+    ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![run_id], |row| {
+            let total: i64 = row.get(9)?;
+            let wins: i64 = row.get(10)?;
+            let total_pnl: f64 = row.get(11)?;
+            let stats = compute_fleet_stats(total, wins, total_pnl);
+            Ok(SymbolBestConfig {
+                symbol: row.get(0)?,
+                config_id: row.get(1)?,
+                spike_threshold_bps: row.get(2)?,
+                target_ratio: row.get(3)?,
+                stop_loss_bps: row.get(4)?,
+                max_hold_ms: row.get(5)?,
+                max_spread_bps: row.get(6)?,
+                trailing_decay_ratio: row.get(7)?,
+                baseline_window_ms: row.get(8)?,
+                total_trades: total,
+                wins,
+                win_rate_pct: stats.win_rate_pct,
+                total_pnl_pct: total_pnl,
+                avg_pnl_pct: stats.avg_pnl_pct,
+            })
+        })
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("query: {e}"),
+            )
+        })?;
+
+    let result: Vec<SymbolBestConfig> = rows.filter_map(|r| r.ok()).collect();
+    Ok(Json(result))
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct TrialConfigDetail {
     config_id: i64,
@@ -929,6 +1073,64 @@ fn compute_fleet_stats(total: i64, wins: i64, total_pnl: f64) -> FleetStats {
             avg_pnl_pct: 0.0,
         }
     }
+}
+
+fn resolve_forward_run_id(
+    conn: &rusqlite::Connection,
+    requested: Option<&str>,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    let requested = requested.map(str::trim).filter(|v| !v.is_empty());
+    if let Some(rid) = requested {
+        if !rid.starts_with("forward-") {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "run_id must start with forward-".to_string(),
+            ));
+        }
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM trades WHERE run_id = ?1",
+                rusqlite::params![rid],
+                |row| row.get(0),
+            )
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("query: {e}"),
+                )
+            })?;
+        if exists == 0 {
+            return Err((
+                axum::http::StatusCode::NOT_FOUND,
+                format!("forward run not found: {rid}"),
+            ));
+        }
+        return Ok(rid.to_string());
+    }
+
+    let latest = conn
+        .query_row(
+            "SELECT run_id
+             FROM trades
+             WHERE run_id LIKE 'forward-%'
+             GROUP BY run_id
+             ORDER BY MAX(exit_ts_ms) DESC
+             LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => (
+                axum::http::StatusCode::NOT_FOUND,
+                "no forward runs found".to_string(),
+            ),
+            _ => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("query: {e}"),
+            ),
+        })?;
+
+    Ok(latest)
 }
 
 fn to_snapshots(exchange: &'static str, tickers: Vec<Ticker24h>) -> Vec<SymbolSnapshot> {

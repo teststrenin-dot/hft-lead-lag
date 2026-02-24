@@ -194,15 +194,19 @@
 
     <section id="view-forward" style="display:none;">
       <div class="summary" id="forward-summary"></div>
+      <div class="run-select">
+        <label style="font-size:12px;color:#9ca3af;">Forward run: </label>
+        <select id="forward-run-filter"><option value="">No forward runs</option></select>
+      </div>
+      <div class="meta" id="forward-meta">Loading forward data…</div>
 
       <h2>Top Configs (global, by expectancy)</h2>
       <table id="tbl-forward-global">
         <thead><tr>
-          <th>#</th><th>Gap</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th><th>Decay</th>
+          <th>#</th><th>config_id</th><th>Gap</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th><th>Decay</th><th>Baseline</th>
           <th class="num">Trades</th><th class="num">Wins</th>
           <th class="num">WR%</th>
-          <th class="num">PnL%</th><th class="num">Avg%</th>
-          <th class="num">Syms</th>
+          <th class="num">Avg%</th><th class="num">PnL%</th><th class="num">SL%</th><th class="num">Avg Hold</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -257,9 +261,11 @@ const AXIS_LABELS = {
 const AXIS_KEYS = Object.keys(AXIS_LABELS);
 
 let selectedRunId = '';
+let selectedForwardRunId = '';
 let activeTab = 'trials';
 let forwardGlobalRows = [];
 let forwardSymbolRows = [];
+let forwardRuns = [];
 let runnerConfig = {
   phases: [
     { name: 'scout' },
@@ -270,6 +276,7 @@ let runnerConfig = {
 };
 
 function tabFromUrl() {
+  if (window.location.pathname === '/fleet') return 'forward';
   const tab = new URLSearchParams(window.location.search).get('tab');
   return tab === 'forward' ? 'forward' : 'trials';
 }
@@ -298,8 +305,9 @@ function setActiveTab(tab, syncUrl=true) {
 function renderForward() {
   const globalRows = Array.isArray(forwardGlobalRows) ? forwardGlobalRows : [];
   const symbolRows = Array.isArray(forwardSymbolRows) ? forwardSymbolRows : [];
+  const runMeta = (forwardRuns || []).find(r => r.run_id === selectedForwardRunId) || null;
 
-  const totalTrades = globalRows.reduce((s, r) => s + asNum(r.total_trades, 0), 0);
+  const totalTrades = runMeta ? asNum(runMeta.total_trades, 0) : globalRows.reduce((s, r) => s + asNum(r.total_trades, 0), 0);
   const profConfigs = globalRows.filter(r => asNum(r.avg_pnl_pct, 0) > 0).length;
   const profSymbols = symbolRows.filter(r => asNum(r.avg_pnl_pct, 0) > 0).length;
   const bestAvg = globalRows.length ? asNum(globalRows[0].avg_pnl_pct, 0) : 0;
@@ -310,23 +318,29 @@ function renderForward() {
     <div class="card"><div class="label">Profitable Symbols</div><div class="value ${profSymbols?'pos':'neg'}">${profSymbols}/${symbolRows.length}</div></div>
     <div class="card"><div class="label">Best Avg PnL</div><div class="value ${bestAvg>=0?'pos':'neg'}">${bestAvg>=0?'+':''}${bestAvg.toFixed(4)}%</div></div>
   `;
+  document.getElementById('forward-meta').textContent = runMeta
+    ? `run=${runMeta.run_id} | trades=${asNum(runMeta.total_trades, 0)} | avg=${asNum(runMeta.avg_pnl_pct, 0).toFixed(4)}% | updated ${new Date().toLocaleTimeString()}`
+    : 'No forward data';
 
   const gb = document.querySelector('#tbl-forward-global tbody');
   gb.innerHTML = globalRows.map((r, i) =>
     `<tr class="${asNum(r.avg_pnl_pct, 0)>=0?'row-pos':'row-neg'}">
       <td>${i + 1}</td>
+      <td>${r.config_id ?? '-'}</td>
       <td>${asNum(r.spike_threshold_bps, 0)}</td>
       <td>${asNum(r.target_ratio, 0)}</td>
       <td>${asNum(r.stop_loss_bps, 0)}</td>
       <td>${holdFmt(r.max_hold_ms)}</td>
       <td>${asNum(r.max_spread_bps, 0)}</td>
       <td>${asNum(r.trailing_decay_ratio, 0)}</td>
+      <td>${asNum(r.baseline_window_ms, 0)}</td>
       <td class="num">${asNum(r.total_trades, 0)}</td>
       <td class="num">${asNum(r.wins, 0)}</td>
       <td class="num">${asNum(r.win_rate_pct, 0).toFixed(1)}</td>
-      <td class="num">${cl(r.total_pnl_pct, 3)}</td>
       <td class="num">${cl(r.avg_pnl_pct)}</td>
-      <td class="num">${asNum(r.symbols_traded, 0)}</td>
+      <td class="num">${cl(r.total_pnl_pct, 3)}</td>
+      <td class="num">${asNum(r.stop_loss_share_pct ?? r.stop_loss_pct, 0).toFixed(1)}</td>
+      <td class="num">${holdFmt(r.avg_hold_ms)}</td>
     </tr>`
   ).join('');
 
@@ -351,13 +365,44 @@ function renderForward() {
 
 async function loadForward() {
   try {
-    const [gRes, sRes] = await Promise.all([
-      fetch('/api/v1/fleet'),
-      fetch('/api/v1/fleet/symbols'),
+    const runsRes = await fetch('/api/v1/forward/runs');
+    if (!runsRes.ok) return;
+    forwardRuns = await runsRes.json();
+
+    const sel = document.getElementById('forward-run-filter');
+    sel.innerHTML = '';
+    if (!forwardRuns.length) {
+      selectedForwardRunId = '';
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No forward runs';
+      sel.appendChild(opt);
+      forwardGlobalRows = [];
+      forwardSymbolRows = [];
+      renderForward();
+      return;
+    }
+
+    const candidate = selectedForwardRunId && forwardRuns.some(r => r.run_id === selectedForwardRunId)
+      ? selectedForwardRunId
+      : forwardRuns[0].run_id;
+    selectedForwardRunId = candidate;
+
+    for (const r of forwardRuns) {
+      const opt = document.createElement('option');
+      opt.value = r.run_id;
+      opt.textContent = `${r.run_id} — ${asNum(r.total_trades, 0)} trades, avg ${asNum(r.avg_pnl_pct, 0).toFixed(4)}%`;
+      if (r.run_id === selectedForwardRunId) opt.selected = true;
+      sel.appendChild(opt);
+    }
+
+    const [cfgRes, symRes] = await Promise.all([
+      fetch(`/api/v1/trials/${encodeURIComponent(selectedForwardRunId)}`),
+      fetch(`/api/v1/forward/symbols?run_id=${encodeURIComponent(selectedForwardRunId)}`),
     ]);
-    if (!gRes.ok || !sRes.ok) return;
-    forwardGlobalRows = await gRes.json();
-    forwardSymbolRows = await sRes.json();
+    if (!cfgRes.ok || !symRes.ok) return;
+    forwardGlobalRows = await cfgRes.json();
+    forwardSymbolRows = await symRes.json();
     renderForward();
   } catch (_) {}
 }
@@ -658,6 +703,10 @@ async function loadDetail(runId) {
 document.getElementById('run-filter').addEventListener('change', e => {
   selectedRunId = e.target.value;
   loadAxes();
+});
+document.getElementById('forward-run-filter').addEventListener('change', e => {
+  selectedForwardRunId = e.target.value;
+  loadForward();
 });
 document.getElementById('tab-btn-trials').addEventListener('click', () => setActiveTab('trials'));
 document.getElementById('tab-btn-forward').addEventListener('click', () => setActiveTab('forward'));
