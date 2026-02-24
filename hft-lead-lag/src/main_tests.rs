@@ -13,6 +13,154 @@
     }
 
     #[test]
+    fn load_trial_batch_parses_incremental_mode() {
+        let config = TraderConfig::default();
+        let path = std::env::temp_dir().join(format!(
+            "hft-lead-lag-main-trial-batch-incremental-{}-{}.json",
+            std::process::id(),
+            EventLoopState::now_ms()
+        ));
+        let payload = serde_json::json!({
+            "run_id": "scout-1",
+            "mode": "incremental",
+            "changed_config_ids": [config.config_id()],
+            "symbols": ["BTCUSDT", "ETHUSDT"],
+            "configs": [config],
+        });
+        fs::write(
+            &path,
+            serde_json::to_string(&payload).expect("serialize trial batch"),
+        )
+        .expect("write trial batch");
+
+        let batch = load_trial_batch(&path).expect("load trial batch");
+
+        assert_eq!(
+            batch.parse_mode_strict().expect("parse trial mode"),
+            TrialBatchMode::Incremental
+        );
+        assert_eq!(batch.changed_config_ids, Some(vec![config.config_id()]));
+        assert_eq!(
+            batch.symbols,
+            Some(vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()])
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_trial_batch_defaults_to_full_replace_when_mode_missing() {
+        let config = TraderConfig::default();
+        let path = std::env::temp_dir().join(format!(
+            "hft-lead-lag-main-trial-batch-default-{}-{}.json",
+            std::process::id(),
+            EventLoopState::now_ms()
+        ));
+        let payload = serde_json::json!({
+            "run_id": "scout-2",
+            "configs": [config],
+        });
+        fs::write(
+            &path,
+            serde_json::to_string(&payload).expect("serialize trial batch"),
+        )
+        .expect("write trial batch");
+
+        let batch = load_trial_batch(&path).expect("load trial batch");
+
+        assert_eq!(
+            batch.parse_mode_strict().expect("parse trial mode"),
+            TrialBatchMode::FullReplace
+        );
+        assert_eq!(batch.changed_config_ids, None);
+        assert_eq!(batch.symbols, None);
+
+        let _ = fs::remove_file(path);
+    }
+
+    fn prime_symbol_fleet(screener: &ScreenerStore, symbol: &str, exchange_ts_ns: i64) {
+        screener.update(
+            symbol,
+            "binance",
+            100.0,
+            101.0,
+            exchange_ts_ns,
+            exchange_ts_ns + 10_000,
+        );
+        screener.update(
+            symbol,
+            "gate",
+            100.1,
+            101.1,
+            exchange_ts_ns,
+            exchange_ts_ns + 20_000,
+        );
+    }
+
+    #[test]
+    fn trial_batch_patch_plan_full_replace_resets_all_symbols() {
+        let screener = ScreenerStore::default();
+        let cfg_a = TraderConfig {
+            spike_threshold_bps: 31.0,
+            ..TraderConfig::default()
+        };
+        let cfg_b = TraderConfig {
+            spike_threshold_bps: 41.0,
+            ..TraderConfig::default()
+        };
+        screener.replace_fleet_configs(vec![cfg_a, cfg_b]);
+        prime_symbol_fleet(&screener, "BTCUSDT", 1_000_000_000);
+        prime_symbol_fleet(&screener, "ETHUSDT", 1_000_100_000);
+
+        let batch = TrialBatch {
+            run_id: "run-full".to_string(),
+            configs: vec![cfg_a, cfg_b],
+            mode: None,
+            changed_config_ids: None,
+            symbols: None,
+        };
+        let plan = build_trial_batch_patch_plan(&batch).expect("build patch plan");
+        assert!(matches!(plan.mode, FleetPatchMode::FullReplace));
+
+        let report = screener.apply_fleet_patch(batch.configs.clone(), plan);
+        assert_eq!(report.old_config_count, 2);
+        assert_eq!(report.new_config_count, 2);
+        assert_eq!(report.symbols_reset, 2);
+    }
+
+    #[test]
+    fn trial_batch_patch_plan_incremental_respects_symbol_scope() {
+        let screener = ScreenerStore::default();
+        let cfg_a = TraderConfig {
+            spike_threshold_bps: 51.0,
+            ..TraderConfig::default()
+        };
+        let cfg_b = TraderConfig {
+            spike_threshold_bps: 61.0,
+            ..TraderConfig::default()
+        };
+        screener.replace_fleet_configs(vec![cfg_a, cfg_b]);
+        prime_symbol_fleet(&screener, "BTCUSDT", 2_000_000_000);
+        prime_symbol_fleet(&screener, "ETHUSDT", 2_000_100_000);
+
+        let batch = TrialBatch {
+            run_id: "run-inc".to_string(),
+            configs: vec![cfg_a, cfg_b],
+            mode: Some("incremental".to_string()),
+            changed_config_ids: Some(vec![cfg_a.config_id()]),
+            symbols: Some(vec!["btcusdt".to_string()]),
+        };
+        let plan = build_trial_batch_patch_plan(&batch).expect("build patch plan");
+        assert!(matches!(plan.mode, FleetPatchMode::Incremental));
+
+        let report = screener.apply_fleet_patch(batch.configs.clone(), plan);
+        assert_eq!(report.old_config_count, 2);
+        assert_eq!(report.new_config_count, 2);
+        assert_eq!(report.symbols_reset, 1);
+        assert_eq!(report.drained_trades, 0);
+    }
+
+    #[test]
     fn reconcile_volume_symbols_uses_fallback_when_binance_missing() {
         let (binance, gate, outcome) =
             reconcile_volume_symbols(Vec::new(), vec!["XRPUSDT".to_string()]);

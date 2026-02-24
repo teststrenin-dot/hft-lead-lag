@@ -2,8 +2,8 @@
 
 Технический разбор фактической реализации Ray orchestration для Shadow Fleet.
 
-**Snapshot:** 2026-02-23  
-**Branch/commit:** `main @ 660d722`
+**Snapshot:** 2026-02-24  
+**Branch/commit:** `main @ HEAD`
 
 ---
 
@@ -52,6 +52,9 @@ api/ui             <--(read-only)--------   optimizer.db
 ```json
 {
   "run_id": "expand-1700000000",
+  "mode": "incremental",
+  "changed_config_ids": [1234567890],
+  "symbols": ["BTCUSDT"],
   "configs": [
     {
       "spike_threshold_bps": 50.0,
@@ -76,7 +79,13 @@ api/ui             <--(read-only)--------   optimizer.db
 
 - `run_id` не пустой;
 - `configs` не пустой;
-- JSON парсится в `TraderConfig`.
+- JSON парсится в `TraderConfig`;
+- `mode`:
+  - `full_replace` (default, если поля нет),
+  - `incremental` (строгая валидация);
+- для `incremental` обязателен непустой `changed_config_ids`;
+- `symbols` в `incremental` optional, но если поле передано, после нормализации список не может быть пустым;
+- invalid incremental payload не применяется частично (batch skip + `warn`).
 
 ### 3.2 Ack: `config/.trial-ack` (Rust -> Python)
 
@@ -104,9 +113,10 @@ api/ui             <--(read-only)--------   optimizer.db
 1. На каждом цикле watcher проверяет `mtime` у `config/trial-batch.json`.
 2. Если batch изменился:
    - `load_trial_batch()`,
+   - `build_trial_batch_patch_plan()` (strict validation),
    - `upsert_runtime_configs()` в SQLite `configs`,
    - `screener.set_run_id(Some(run_id))`,
-   - `screener.replace_fleet_configs(batch.configs)`,
+   - `screener.apply_fleet_patch(batch.configs, plan)`,
    - `screener.flush_db_writer().await`,
    - `write_trial_ack(...)`.
 3. Ошибки парсинга/DB не падают процессом, а логируются (`warn!`).
@@ -115,6 +125,12 @@ api/ui             <--(read-only)--------   optimizer.db
 
 - Trial batch применяется сразу (без debounce).
 - Runtime-grid (`config/runtime-grid.toml`) остаётся активным отдельным механизмом hot-reload.
+
+Rollback / fallback path:
+
+1. Перейти на `full_replace` (удалить `mode` или поставить `mode: "full_replace"`).
+2. Переотправить batch.
+3. Проверить `/api/v1/trials/runner/status?tail=50` и `config/.trial-ack`.
 
 ---
 

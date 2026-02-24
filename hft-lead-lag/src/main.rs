@@ -13,6 +13,7 @@ use hft_lead_lag::{
     build_runtime_strategy, BinanceMarketData, ConfigManager, GateMarketData, MarketDataStream,
     RuntimeStrategy,
 };
+use hft_lead_lag::domain::screener::fleet_patch::{FleetPatchMode, FleetPatchPlan};
 use hft_lead_lag::domain::screener::TraderConfig;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -220,6 +221,40 @@ struct RuntimeGridGeneration {
 struct TrialBatch {
     run_id: String,
     configs: Vec<TraderConfig>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    changed_config_ids: Option<Vec<u64>>,
+    #[serde(default)]
+    symbols: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrialBatchMode {
+    FullReplace,
+    Incremental,
+}
+
+impl TrialBatchMode {
+    fn from_strict(mode: Option<&str>) -> Result<Self, String> {
+        let Some(raw) = mode.map(str::trim) else {
+            return Ok(Self::FullReplace);
+        };
+        if raw.eq_ignore_ascii_case("full_replace") {
+            Ok(Self::FullReplace)
+        } else if raw.eq_ignore_ascii_case("incremental") {
+            Ok(Self::Incremental)
+        } else {
+            Err(format!("trial batch mode must be full_replace|incremental, got {raw}"))
+        }
+    }
+
+}
+
+impl TrialBatch {
+    fn parse_mode_strict(&self) -> Result<TrialBatchMode, String> {
+        TrialBatchMode::from_strict(self.mode.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -249,6 +284,58 @@ fn load_trial_batch(path: &Path) -> Result<TrialBatch, String> {
         return Err("trial batch run_id is empty".to_string());
     }
     Ok(batch)
+}
+
+fn normalize_symbol_scope(symbols: &[String]) -> Vec<String> {
+    let mut dedup = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for symbol in symbols {
+        let candidate = symbol.trim().to_uppercase();
+        if candidate.is_empty() {
+            continue;
+        }
+        if dedup.insert(candidate.clone()) {
+            normalized.push(candidate);
+        }
+    }
+    normalized
+}
+
+fn build_trial_batch_patch_plan(batch: &TrialBatch) -> Result<FleetPatchPlan, String> {
+    let mode = batch.parse_mode_strict()?;
+    match mode {
+        TrialBatchMode::FullReplace => Ok(FleetPatchPlan::new(
+            FleetPatchMode::FullReplace,
+            Vec::<u64>::new(),
+            None::<Vec<String>>,
+        )),
+        TrialBatchMode::Incremental => {
+            let changed_config_ids = batch
+                .changed_config_ids
+                .as_ref()
+                .ok_or_else(|| "incremental mode requires changed_config_ids".to_string())?;
+            if changed_config_ids.is_empty() {
+                return Err("incremental mode requires non-empty changed_config_ids".to_string());
+            }
+            let symbol_scope = if let Some(symbols) = batch.symbols.as_ref() {
+                let normalized = normalize_symbol_scope(symbols);
+                if normalized.is_empty() {
+                    return Err(
+                        "incremental mode symbols must contain at least one non-empty symbol"
+                            .to_string(),
+                    );
+                }
+                Some(normalized)
+            } else {
+                None
+            };
+            Ok(FleetPatchPlan::new(
+                FleetPatchMode::Incremental,
+                changed_config_ids.iter().copied(),
+                symbol_scope,
+            ))
+        }
+    }
 }
 
 fn load_trial_control(path: &Path) -> Result<TrialControl, String> {
@@ -557,6 +644,14 @@ fn spawn_runtime_grid_hot_reload(
                         Ok(batch) => {
                             let run_id = batch.run_id.clone();
                             let config_count = batch.configs.len();
+                            let patch_plan = match build_trial_batch_patch_plan(&batch) {
+                                Ok(plan) => plan,
+                                Err(e) => {
+                                    warn!("trial-batch: invalid payload: {e}");
+                                    continue;
+                                }
+                            };
+                            let mode = patch_plan.mode;
                             if let Err(e) = upsert_runtime_configs(&db_path, &batch.configs) {
                                 warn!("trial-batch: db upsert failed: {e}");
                             } else {
@@ -575,7 +670,7 @@ fn spawn_runtime_grid_hot_reload(
                                     }
                                 }
                                 screener.set_run_id(Some(run_id.clone()));
-                                let report = screener.replace_fleet_configs(batch.configs);
+                                let report = screener.apply_fleet_patch(batch.configs, patch_plan);
                                 screener.flush_db_writer().await;
                                 if let Err(e) = upsert_trial_run_meta(
                                     &db_path,
@@ -587,8 +682,10 @@ fn spawn_runtime_grid_hot_reload(
                                     warn!("trial-batch: meta upsert failed: {e}");
                                 }
                                 info!(
-                                    "trial-batch: applied run_id={run_id} configs={config_count} \
-                                     drained_trades={}",
+                                    "trial-batch: applied run_id={run_id} mode={} configs={config_count} \
+                                     symbols_reset={} drained_trades={}",
+                                    mode.as_str(),
+                                    report.symbols_reset,
                                     report.drained_trades
                                 );
                                 write_trial_ack(

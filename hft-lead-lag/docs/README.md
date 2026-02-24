@@ -2,8 +2,8 @@
 
 Актуальная документация по состоянию `main` (code-verified).
 
-**Snapshot:** 2026-02-23  
-**Branch/commit:** `main @ 660d722`  
+**Snapshot:** 2026-02-24  
+**Branch/commit:** `main @ HEAD`  
 **Mode:** paper trading + shadow fleet optimizer + Ray/ASHA orchestration
 
 ---
@@ -16,9 +16,10 @@
    - следит за `config/runtime-grid.toml` (обычный grid hot-reload),
    - и за `config/trial-batch.json` (внешние батчи от Ray driver).
 4. Когда Python driver пишет `config/trial-batch.json`, Rust:
-   - парсит `{run_id, configs[]}`,
+   - парсит `{run_id, configs[]}` + patch-mode (`full_replace`/`incremental`),
+   - валидирует incremental-контракт (`changed_config_ids`, optional `symbols`),
    - upsert-ит `configs` в SQLite,
-   - atomically заменяет fleet-конфиги в памяти,
+   - применяет patch в fleet: полный reset или symbol-scoped reset,
    - flush-ит pending trades,
    - пишет `config/.trial-ack` с `run_id`, `config_count`, `drained_trades`.
 5. После применения batch все новые fleet-сделки получают этот `run_id` и пишутся в `trades.run_id`.
@@ -48,6 +49,22 @@
    - HTML `/trials`.
 4. Добавлен deep-dive документ по этому контуру:
    - `docs/ray-asha-deep-dive.md`.
+
+### 2.1 Trial-Batch Contract Modes
+
+`config/trial-batch.json` поддерживает два режима:
+
+1. `full_replace`:
+   - default, если `mode` отсутствует;
+   - runtime сбрасывает fleet для всех символов.
+2. `incremental`:
+   - обязателен `changed_config_ids: [u64, ...]`;
+   - optional `symbols: [\"BTCUSDT\", ...]` ограничивает reset только этой областью.
+
+Safety behavior:
+
+- некорректный `incremental` payload не применяется частично;
+- runtime пишет `warn` и пропускает batch целиком.
 
 ---
 
@@ -155,10 +172,17 @@ python3 -m ray_driver promote <run_id> --top-k 50 --min-trades 5 --min-pnl 0.0
 
 Ключевые артефакты:
 
-- `config/trial-batch.json` — batch на применение в runtime.
+- `config/trial-batch.json` — batch на применение в runtime (`full_replace` или `incremental`).
 - `config/.trial-ack` — подтверждение применения.
 - `data/scout-references.json` — seed для expand/forward.
 - `data/promoted-<run_id>.json` — кандидаты на ручной promotion.
+
+Rollback к safe-path:
+
+1. Убери `mode` из payload (или явно поставь `mode: "full_replace"`).
+2. Отправь batch повторно.
+3. Проверь статус runner-а: `GET /api/v1/trials/runner/status?tail=50`.
+4. Убедись, что `.trial-ack` обновился с нужным `run_id`.
 
 ---
 
@@ -254,4 +278,4 @@ python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interv
 
 ---
 
-*Last updated: 2026-02-23 (Ray/ASHA docs synchronized with code)*
+*Last updated: 2026-02-24 (incremental fleet patch contract documented)*

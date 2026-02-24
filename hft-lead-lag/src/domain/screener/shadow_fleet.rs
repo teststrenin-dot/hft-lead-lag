@@ -5,7 +5,7 @@
 //! Auto-prunes configs with negative expectancy after enough trades.
 
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use super::price_samples::PriceSamples;
 use super::shadow_trader::{ClosedTrade, ShadowTrader};
@@ -404,6 +404,13 @@ impl ShadowFleet {
     #[inline]
     pub fn active(&self) -> usize {
         self.active_count
+    }
+
+    /// Returns true when at least one trader belongs to the provided config-id set.
+    pub fn contains_any_config_ids(&self, config_ids: &HashSet<u64>) -> bool {
+        self.traders
+            .iter()
+            .any(|(config_id, _)| config_ids.contains(config_id))
     }
 
     /// Tick all active traders with shared price data.

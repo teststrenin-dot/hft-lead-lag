@@ -7,6 +7,7 @@
 //! - `utils`          — percentile math, timestamp normalisation
 
 pub mod cycle_tracker;
+pub mod fleet_patch;
 pub mod price_samples;
 pub mod shadow_fleet;
 pub mod shadow_trader;
@@ -20,6 +21,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use serde::Serialize;
 
+use self::fleet_patch::{should_reset_symbol, FleetPatchMode, FleetPatchPlan};
 use self::shadow_fleet::{generate_grid, FleetTickMeta, ShadowFleet};
 use self::shadow_trader::{ChartData, ShadowDebug};
 use self::state::{Quote, SymbolState};
@@ -137,6 +139,23 @@ impl ScreenerStore {
     /// on the next tick. Pending completed trades are drained and forwarded
     /// to DB writer before reset.
     pub fn replace_fleet_configs(&self, new_configs: Vec<TraderConfig>) -> FleetReloadReport {
+        self.apply_fleet_patch(
+            new_configs,
+            FleetPatchPlan::new(
+                FleetPatchMode::FullReplace,
+                Vec::<u64>::new(),
+                None::<Vec<String>>,
+            ),
+        )
+    }
+
+    /// Apply a patch plan to fleet configs, resetting only symbols selected
+    /// by the planner in incremental mode.
+    pub fn apply_fleet_patch(
+        &self,
+        new_configs: Vec<TraderConfig>,
+        plan: FleetPatchPlan,
+    ) -> FleetReloadReport {
         let old_config_count = self.fleet_configs.load().len();
         let new_config_count = new_configs.len();
         self.fleet_configs.store(Arc::new(new_configs));
@@ -144,7 +163,22 @@ impl ScreenerStore {
         let mut symbols_reset = 0usize;
         let mut drained_trades = 0usize;
         for mut entry in self.symbols.iter_mut() {
+            let symbol = entry.key().clone();
             let state = entry.value_mut();
+            let symbol_has_touched_configs = if matches!(plan.mode, FleetPatchMode::FullReplace) {
+                true
+            } else if !plan.has_changed_configs() {
+                false
+            } else {
+                state
+                    .fleet
+                    .as_ref()
+                    .map(|fleet| fleet.contains_any_config_ids(&plan.changed_config_ids))
+                    .unwrap_or(false)
+            };
+            if !should_reset_symbol(&plan, &symbol, symbol_has_touched_configs) {
+                continue;
+            }
             let Some(mut fleet) = state.fleet.take() else {
                 continue;
             };
@@ -303,5 +337,120 @@ impl ScreenerStore {
 impl Default for ScreenerStore {
     fn default() -> Self {
         Self::new(TEN_MINUTES_MS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FleetPatchMode, FleetPatchPlan, ScreenerStore, ShadowFleet, SymbolState, TraderConfig};
+
+    fn config_with_gap(spike_threshold_bps: f64) -> TraderConfig {
+        TraderConfig {
+            spike_threshold_bps,
+            ..TraderConfig::default()
+        }
+    }
+
+    fn with_symbol_fleet(store: &ScreenerStore, symbol: &str, configs: &[TraderConfig]) {
+        let mut state = SymbolState::default();
+        state.fleet = Some(ShadowFleet::new(configs));
+        store.symbols.insert(symbol.to_string(), state);
+    }
+
+    #[test]
+    fn full_replace_resets_all_symbol_fleets() {
+        let store = ScreenerStore::default();
+        let old_a = config_with_gap(31.0);
+        let old_b = config_with_gap(32.0);
+        with_symbol_fleet(&store, "BTCUSDT", &[old_a]);
+        with_symbol_fleet(&store, "ETHUSDT", &[old_b]);
+
+        let report = store.apply_fleet_patch(
+            vec![config_with_gap(40.0)],
+            FleetPatchPlan::new(
+                FleetPatchMode::FullReplace,
+                Vec::<u64>::new(),
+                None::<Vec<String>>,
+            ),
+        );
+
+        assert_eq!(report.symbols_reset, 2);
+        assert_eq!(report.drained_trades, 0);
+        assert!(
+            store
+                .symbols
+                .get("BTCUSDT")
+                .expect("BTCUSDT state")
+                .fleet
+                .is_none()
+        );
+        assert!(
+            store
+                .symbols
+                .get("ETHUSDT")
+                .expect("ETHUSDT state")
+                .fleet
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn incremental_resets_only_symbols_with_touched_configs() {
+        let store = ScreenerStore::default();
+        let touched_cfg = config_with_gap(51.0);
+        let untouched_cfg = config_with_gap(61.0);
+        with_symbol_fleet(&store, "BTCUSDT", &[touched_cfg]);
+        with_symbol_fleet(&store, "ETHUSDT", &[untouched_cfg]);
+
+        let report = store.apply_fleet_patch(
+            vec![touched_cfg, untouched_cfg],
+            FleetPatchPlan::new(
+                FleetPatchMode::Incremental,
+                [touched_cfg.config_id()],
+                None::<Vec<String>>,
+            ),
+        );
+
+        assert_eq!(report.symbols_reset, 1);
+        assert!(
+            store
+                .symbols
+                .get("BTCUSDT")
+                .expect("BTCUSDT state")
+                .fleet
+                .is_none()
+        );
+        assert!(
+            store
+                .symbols
+                .get("ETHUSDT")
+                .expect("ETHUSDT state")
+                .fleet
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn incremental_preserves_unaffected_symbol_state_and_does_not_drain() {
+        let store = ScreenerStore::default();
+        let touched_cfg = config_with_gap(71.0);
+        let untouched_cfg = config_with_gap(81.0);
+        with_symbol_fleet(&store, "BTCUSDT", &[touched_cfg]);
+        with_symbol_fleet(&store, "ETHUSDT", &[untouched_cfg]);
+
+        let report = store.apply_fleet_patch(
+            vec![touched_cfg, untouched_cfg],
+            FleetPatchPlan::new(
+                FleetPatchMode::Incremental,
+                [touched_cfg.config_id()],
+                Some(vec!["BTCUSDT".to_string()]),
+            ),
+        );
+
+        assert_eq!(report.symbols_reset, 1);
+        assert_eq!(report.drained_trades, 0);
+        let eth = store.symbols.get("ETHUSDT").expect("ETHUSDT state");
+        assert!(eth.fleet.is_some());
+        assert_eq!(eth.fleet.as_ref().expect("ETH fleet").len(), 1);
     }
 }
