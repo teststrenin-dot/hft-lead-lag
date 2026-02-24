@@ -12,6 +12,7 @@ use tokio::sync::{oneshot, Mutex};
 pub const DEFAULT_SCOUT_DURATION_S: u64 = 900;
 pub const DEFAULT_SCOUT_CYCLES: u64 = 1;
 pub const DEFAULT_EXPAND_DURATION_S: u64 = 900;
+pub const DEFAULT_EXPAND_CYCLES: u64 = 1;
 pub const DEFAULT_FORWARD_MAX_BUDGET_S: u64 = 240;
 pub const DEFAULT_FORWARD_GRACE_PERIOD_S: u64 = 60;
 pub const DEFAULT_FORWARD_REPORT_INTERVAL_S: u64 = 30;
@@ -507,7 +508,7 @@ fn runner_ui_config() -> RunnerUiConfig {
             RunnerPhaseDefaults {
                 name: "expand".to_string(),
                 duration: Some(DEFAULT_EXPAND_DURATION_S),
-                cycles: None,
+                cycles: Some(DEFAULT_EXPAND_CYCLES),
                 max_budget: None,
                 grace_period: None,
                 report_interval: None,
@@ -596,9 +597,15 @@ pub fn build_trial_runner_command(req: &RunnerStartRequest) -> Result<RunnerComm
             args.push(cycles.to_string());
         }
         "expand" => {
+            let cycles = req.cycles.unwrap_or(DEFAULT_EXPAND_CYCLES);
+            if cycles == 0 {
+                return Err("cycles must be >= 1".to_string());
+            }
             args.push("expand".to_string());
             args.push("--duration".to_string());
             args.push(req.duration.unwrap_or(DEFAULT_EXPAND_DURATION_S).to_string());
+            args.push("--cycles".to_string());
+            args.push(cycles.to_string());
         }
         "forward" => {
             args.push("forward".to_string());
@@ -750,6 +757,36 @@ mod tests {
     }
 
     #[test]
+    fn build_expand_command_with_custom_cycles() {
+        let req = RunnerStartRequest {
+            phase: "expand".to_string(),
+            duration: Some(300),
+            cycles: Some(7),
+            max_budget: None,
+            grace_period: None,
+            report_interval: None,
+            run_id: None,
+            top_k: None,
+            min_trades: None,
+            min_pnl: None,
+        };
+
+        let cmd = build_trial_runner_command(&req).expect("command");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-m".to_string(),
+                "ray_driver".to_string(),
+                "expand".to_string(),
+                "--duration".to_string(),
+                "300".to_string(),
+                "--cycles".to_string(),
+                "7".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn promote_requires_run_id() {
         let req = RunnerStartRequest {
             phase: "promote".to_string(),
@@ -796,6 +833,11 @@ mod tests {
             .iter()
             .find(|p| p.name == "scout")
             .expect("scout phase");
+        let expand = cfg
+            .phases
+            .iter()
+            .find(|p| p.name == "expand")
+            .expect("expand phase");
         let forward = cfg
             .phases
             .iter()
@@ -809,6 +851,8 @@ mod tests {
 
         assert_eq!(scout.duration, Some(DEFAULT_SCOUT_DURATION_S));
         assert_eq!(scout.cycles, Some(DEFAULT_SCOUT_CYCLES));
+        assert_eq!(expand.duration, Some(DEFAULT_EXPAND_DURATION_S));
+        assert_eq!(expand.cycles, Some(DEFAULT_EXPAND_CYCLES));
         assert_eq!(forward.max_budget, Some(DEFAULT_FORWARD_MAX_BUDGET_S));
         assert_eq!(forward.grace_period, Some(DEFAULT_FORWARD_GRACE_PERIOD_S));
         assert_eq!(

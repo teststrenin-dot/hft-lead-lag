@@ -119,8 +119,18 @@ def cmd_expand(args):
                    total_pnl_pct=0, stop_loss_share_pct=0)
         for r in json.loads(refs_path.read_text())
     ]
-    alive = run_expand(ipc, refs, duration_s=args.duration)
-    print(f"\n[result] {len(alive)} expanded configs alive")
+    cycles = max(1, int(args.cycles))
+    total_alive = 0
+    for idx in range(cycles):
+        print(f"\n[expand] cycle {idx + 1}/{cycles}")
+        alive = run_expand(ipc, refs, duration_s=args.duration)
+        total_alive += len(alive)
+        print(f"[result] cycle {idx + 1}/{cycles}: {len(alive)} expanded configs alive")
+
+    print(
+        f"\n[expand] completed cycles={cycles}, duration={args.duration}s, "
+        f"total_alive={total_alive}"
+    )
 
 
 def cmd_forward(args):
@@ -192,6 +202,7 @@ def main():
 
     e = sub.add_parser("expand", help="Expand around scout references")
     e.add_argument("--duration", type=int, default=600, help="Expand duration (s)")
+    e.add_argument("--cycles", type=int, default=1, help="Expand cycles to run sequentially")
     e.set_defaults(func=cmd_expand)
 
     f = sub.add_parser("forward", help="ASHA forward test")
