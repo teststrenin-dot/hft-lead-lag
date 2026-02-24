@@ -89,7 +89,6 @@
       <button class="tab-btn" id="tab-btn-forward" data-tab="forward">Forward</button>
     </div>
 
-    <section id="view-trials">
     <h2>Runner Control</h2>
     <div class="runner-panel">
       <div class="runner-grid">
@@ -149,6 +148,8 @@
       <div class="runner-status" id="runner-history-title">Recent Jobs</div>
       <div class="runner-logs" id="runner-history">No finished jobs yet.</div>
     </div>
+
+    <section id="view-trials">
 
     <div class="summary" id="summary"></div>
 
@@ -266,6 +267,10 @@ let activeTab = 'trials';
 let forwardGlobalRows = [];
 let forwardSymbolRows = [];
 let forwardRuns = [];
+const PHASES_BY_TAB = {
+  trials: ['scout', 'expand'],
+  forward: ['forward', 'promote'],
+};
 let runnerConfig = {
   phases: [
     { name: 'scout' },
@@ -274,6 +279,28 @@ let runnerConfig = {
     { name: 'promote' },
   ]
 };
+
+function refreshRunnerPhaseOptions() {
+  const sel = document.getElementById('runner-phase');
+  const prev = sel.value;
+  const allowed = PHASES_BY_TAB[activeTab] || [];
+  const phaseMap = new Map((runnerConfig.phases || []).map(p => [p.name, p]));
+
+  sel.innerHTML = '';
+  allowed.forEach((name, idx) => {
+    if (!phaseMap.has(name)) return;
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    if (prev === name || (!prev && idx === 0)) opt.selected = true;
+    sel.appendChild(opt);
+  });
+
+  if (!sel.value && sel.options.length > 0) {
+    sel.options[0].selected = true;
+  }
+  updatePhaseFields();
+}
 
 function tabFromUrl() {
   if (window.location.pathname === '/fleet') return 'forward';
@@ -297,6 +324,7 @@ function setActiveTab(tab, syncUrl=true) {
     history.replaceState(null, '', qs ? `${window.location.pathname}?${qs}` : window.location.pathname);
   }
 
+  refreshRunnerPhaseOptions();
   if (activeTab === 'forward') {
     loadForward();
   }
@@ -427,19 +455,6 @@ async function loadRunnerConfig() {
     }
   } catch (_) {}
 
-  const sel = document.getElementById('runner-phase');
-  sel.innerHTML = '';
-  (runnerConfig.phases || []).forEach((p, idx) => {
-    const opt = document.createElement('option');
-    opt.value = p.name;
-    opt.textContent = p.name;
-    if (idx === 0) opt.selected = true;
-    sel.appendChild(opt);
-  });
-  if (!sel.value) {
-    sel.innerHTML = '<option value="scout">scout</option>';
-  }
-
   setIfMissing('runner-duration', phaseCfg('scout').duration, true);
   setIfMissing('runner-max-budget', phaseCfg('forward').max_budget, true);
   setIfMissing('runner-grace-period', phaseCfg('forward').grace_period, true);
@@ -447,6 +462,7 @@ async function loadRunnerConfig() {
   setIfMissing('runner-top-k', phaseCfg('promote').top_k, true);
   setIfMissing('runner-min-trades', phaseCfg('promote').min_trades, true);
   setIfMissing('runner-min-pnl', phaseCfg('promote').min_pnl, true);
+  refreshRunnerPhaseOptions();
 }
 
 function updatePhaseFields() {
@@ -484,7 +500,7 @@ function collectRunnerPayload() {
     if (gracePeriod !== null) payload.grace_period = Math.max(10, gracePeriod);
     if (reportInterval !== null) payload.report_interval = Math.max(5, reportInterval);
   } else if (phase === 'promote') {
-    payload.run_id = document.getElementById('runner-run-id').value.trim();
+    payload.run_id = document.getElementById('runner-run-id').value.trim() || selectedForwardRunId;
     const topK = maybeNum('runner-top-k');
     const minTrades = maybeNum('runner-min-trades');
     const minPnl = maybeNum('runner-min-pnl');
@@ -716,9 +732,8 @@ document.getElementById('runner-start').addEventListener('click', startRunner);
 document.getElementById('runner-stop').addEventListener('click', stopRunner);
 
 async function init() {
-  await loadRunnerConfig();
-  updatePhaseFields();
   setActiveTab(tabFromUrl(), false);
+  await loadRunnerConfig();
   await Promise.all([loadAxes(), loadRuns(), loadRunnerStatus(), loadForward()]);
   document.getElementById('meta').textContent = `Updated: ${new Date().toLocaleTimeString()} | Auto-refresh 30s`;
 }
