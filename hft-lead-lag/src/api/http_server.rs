@@ -5,6 +5,7 @@ use axum::{
     Router,
 };
 use dashmap::DashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 use tracing::info;
@@ -108,6 +109,13 @@ impl HttpServer {
         &self,
         listener: tokio::net::TcpListener,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let db_path = PathBuf::from("data/optimizer.db");
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Run schema init/migrations once on server boot; handlers use read-only opens.
+        let _ = crate::infrastructure::db::open_db(&db_path)?;
+
         let state = Arc::new(HttpState {
             min_volume_usd: self.min_volume_usd,
             screener: self.screener.clone(),
@@ -116,6 +124,7 @@ impl HttpServer {
             trial_runner: super::runner::TrialRunnerManager::new(
                 super::runner::resolve_runner_workdir(),
             ),
+            db_path,
         });
 
         let app = Router::new()

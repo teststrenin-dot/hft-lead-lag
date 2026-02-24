@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -30,6 +31,7 @@ pub(crate) struct HttpState {
     pub natr_cache: Arc<DashMap<String, CachedNatr>>,
     pub health: Arc<HealthState>,
     pub trial_runner: TrialRunnerManager,
+    pub db_path: PathBuf,
 }
 
 // ── Response DTOs ───────────────────────────────────────────────────
@@ -234,15 +236,9 @@ pub(crate) struct FleetConfigRank {
 }
 
 pub(crate) async fn get_fleet_ranking(
-    State(_state): State<Arc<HttpState>>,
+    State(state): State<Arc<HttpState>>,
 ) -> Result<Json<Vec<FleetConfigRank>>, (axum::http::StatusCode, String)> {
-    let db_path = std::path::Path::new("data/optimizer.db");
-    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db: {e}"),
-        )
-    })?;
+    let conn = open_readonly_conn(&state)?;
 
     let mut stmt = conn
         .prepare(
@@ -322,15 +318,9 @@ pub(crate) struct SymbolBestConfig {
 }
 
 pub(crate) async fn get_fleet_by_symbol(
-    State(_state): State<Arc<HttpState>>,
+    State(state): State<Arc<HttpState>>,
 ) -> Result<Json<Vec<SymbolBestConfig>>, (axum::http::StatusCode, String)> {
-    let db_path = std::path::Path::new("data/optimizer.db");
-    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db: {e}"),
-        )
-    })?;
+    let conn = open_readonly_conn(&state)?;
 
     let mut stmt = conn.prepare(
         "WITH ranked AS (
@@ -413,15 +403,9 @@ pub(crate) struct FleetRankedConfig {
 }
 
 pub(crate) async fn get_fleet_ranked(
-    State(_state): State<Arc<HttpState>>,
+    State(state): State<Arc<HttpState>>,
 ) -> Result<Json<Vec<FleetRankedConfig>>, (axum::http::StatusCode, String)> {
-    let db_path = std::path::Path::new("data/optimizer.db");
-    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db: {e}"),
-        )
-    })?;
+    let conn = open_readonly_conn(&state)?;
 
     let mut stmt = conn
         .prepare(
@@ -537,15 +521,9 @@ pub(crate) struct TrialRunSummary {
 }
 
 pub(crate) async fn get_trial_runs(
-    State(_state): State<Arc<HttpState>>,
+    State(state): State<Arc<HttpState>>,
 ) -> Result<Json<Vec<TrialRunSummary>>, (axum::http::StatusCode, String)> {
-    let db_path = std::path::Path::new("data/optimizer.db");
-    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db: {e}"),
-        )
-    })?;
+    let conn = open_readonly_conn(&state)?;
 
     let mut stmt = conn
         .prepare(
@@ -628,15 +606,9 @@ pub(crate) async fn get_trial_runs(
 }
 
 pub(crate) async fn get_forward_runs(
-    State(_state): State<Arc<HttpState>>,
+    State(state): State<Arc<HttpState>>,
 ) -> Result<Json<Vec<TrialRunSummary>>, (axum::http::StatusCode, String)> {
-    let db_path = std::path::Path::new("data/optimizer.db");
-    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db: {e}"),
-        )
-    })?;
+    let conn = open_readonly_conn(&state)?;
 
     let mut stmt = conn
         .prepare(
@@ -720,16 +692,10 @@ pub(crate) struct ForwardSymbolsQuery {
 }
 
 pub(crate) async fn get_forward_by_symbol(
-    State(_state): State<Arc<HttpState>>,
+    State(state): State<Arc<HttpState>>,
     axum::extract::Query(query): axum::extract::Query<ForwardSymbolsQuery>,
 ) -> Result<Json<Vec<SymbolBestConfig>>, (axum::http::StatusCode, String)> {
-    let db_path = std::path::Path::new("data/optimizer.db");
-    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db: {e}"),
-        )
-    })?;
+    let conn = open_readonly_conn(&state)?;
 
     let run_id = resolve_forward_run_id(&conn, query.run_id.as_deref())?;
 
@@ -810,16 +776,10 @@ pub(crate) struct TrialConfigDetail {
 }
 
 pub(crate) async fn get_trial_configs(
-    State(_state): State<Arc<HttpState>>,
+    State(state): State<Arc<HttpState>>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<Vec<TrialConfigDetail>>, (axum::http::StatusCode, String)> {
-    let db_path = std::path::Path::new("data/optimizer.db");
-    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db: {e}"),
-        )
-    })?;
+    let conn = open_readonly_conn(&state)?;
 
     let mut stmt = conn
         .prepare(
@@ -915,16 +875,10 @@ pub(crate) struct TrialAxesBreakdown {
 }
 
 pub(crate) async fn get_trial_axes(
-    State(_state): State<Arc<HttpState>>,
+    State(state): State<Arc<HttpState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<TrialAxesBreakdown>, (axum::http::StatusCode, String)> {
-    let db_path = std::path::Path::new("data/optimizer.db");
-    let conn = crate::infrastructure::db::open_db(db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db: {e}"),
-        )
-    })?;
+    let conn = open_readonly_conn(&state)?;
 
     let run_id = params.get("run_id").cloned();
 
@@ -1196,6 +1150,17 @@ fn internal_error(error: crate::domain::ExchangeError) -> (axum::http::StatusCod
     )
 }
 
+fn open_readonly_conn(
+    state: &HttpState,
+) -> Result<rusqlite::Connection, (axum::http::StatusCode, String)> {
+    crate::infrastructure::db::open_db_readonly(&state.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e}"),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1239,6 +1204,7 @@ mod tests {
             trial_runner: TrialRunnerManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ),
+            db_path: PathBuf::from("data/optimizer.db"),
         });
 
         let (code, Json(resp)) = health(State(state)).await;
@@ -1259,6 +1225,7 @@ mod tests {
             trial_runner: TrialRunnerManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ),
+            db_path: PathBuf::from("data/optimizer.db"),
         });
 
         let (_code, Json(resp)) = health(State(state)).await;

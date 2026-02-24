@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -174,6 +174,14 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Open optimizer database in read-only mode for API queries.
+pub fn open_db_readonly(path: &Path) -> rusqlite::Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
+    let conn = Connection::open_with_flags(path, flags)?;
+    conn.execute_batch("PRAGMA query_only=ON; PRAGMA busy_timeout=5000;")?;
+    Ok(conn)
+}
+
 /// Insert configs into the database (idempotent — uses OR IGNORE).
 pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
@@ -281,10 +289,12 @@ impl DbWriter {
                         }
                     });
                 } else {
-                    let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                    warn!(
-                        "db writer channel full and no runtime for async retry, dropping batch (total dropped: {n})"
-                    );
+                    if self.tx.blocking_send(command).is_err() {
+                        let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                        warn!(
+                            "db writer channel full and blocking retry failed, dropping batch (total dropped: {n})"
+                        );
+                    }
                 }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -560,6 +570,20 @@ mod tests {
         }
 
         drop(conn);
+        cleanup_temp_db(&path);
+    }
+
+    #[test]
+    fn open_db_readonly_rejects_writes() {
+        let path = temp_db_path("readonly-open");
+        let conn = open_db(&path).expect("open db");
+        drop(conn);
+
+        let ro = open_db_readonly(&path).expect("open readonly db");
+        let write_res = ro.execute("PRAGMA user_version = 1", []);
+        assert!(write_res.is_err(), "readonly connection must reject writes");
+
+        drop(ro);
         cleanup_temp_db(&path);
     }
 }

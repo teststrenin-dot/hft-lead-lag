@@ -3,8 +3,11 @@
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+import fcntl
 
 
 @dataclass
@@ -38,6 +41,7 @@ class FleetIPC:
         self.batch_path = config_dir / "trial-batch.json"
         self.control_path = config_dir / "trial-control.json"
         self.ack_path = config_dir / ".trial-ack"
+        self.lock_path = config_dir / ".trial-lock"
 
     def submit_batch(
         self,
@@ -46,12 +50,25 @@ class FleetIPC:
         timeout_s: float = 30.0,
     ) -> TrialAck:
         """Write trial-batch.json and wait for .trial-ack from Rust."""
-        batch = {"run_id": run_id, "configs": configs}
-        tmp = self.batch_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(batch, indent=2))
-        tmp.rename(self.batch_path)  # atomic on same FS
+        with self._submission_lock():
+            batch = {"run_id": run_id, "configs": configs}
+            tmp = self.batch_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(batch, indent=2))
+            tmp.rename(self.batch_path)  # atomic on same FS
 
-        return self._wait_ack(run_id, timeout_s)
+            return self._wait_ack(run_id, timeout_s)
+
+    @contextmanager
+    def _submission_lock(self):
+        """Serialize batch submissions across parallel driver processes."""
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = self.lock_path.open("a+")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
 
     def _wait_ack(self, run_id: str, timeout_s: float) -> TrialAck:
         deadline = time.monotonic() + timeout_s
