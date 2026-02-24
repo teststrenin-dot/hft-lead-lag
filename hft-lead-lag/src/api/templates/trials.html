@@ -13,6 +13,12 @@
     nav { margin-bottom: 12px; }
     nav a { color:#93c5fd; text-decoration:none; margin-right:16px; font-size:13px; }
     nav a:hover { text-decoration:underline; }
+    .tab-strip { display:flex; gap:8px; margin: 6px 0 14px; }
+    .tab-btn {
+      border:1px solid #374151; background:#0f172a; color:#9ca3af;
+      border-radius:4px; padding:6px 12px; font-size:12px; cursor:pointer;
+    }
+    .tab-btn.active { background:#1d4ed8; border-color:#1d4ed8; color:#fff; }
     h2 { font-size: 14px; color: #93c5fd; margin: 16px 0 6px; }
     .summary { display:flex; gap:24px; margin:12px 0; flex-wrap:wrap; }
     .card { background:#111827; border:1px solid #1f2937; border-radius:6px; padding:10px 14px; min-width:120px; }
@@ -64,6 +70,8 @@
     th, td { padding:4px 6px; border-bottom:1px solid #1f2937; text-align:left; }
     th { position:sticky; top:0; background:#111827; color:#93c5fd; font-size:11px; }
     .num { text-align:right; font-variant-numeric:tabular-nums; }
+    .row-pos { background: rgba(52,211,153,0.05); }
+    .row-neg { background: rgba(248,113,113,0.05); }
     tr:hover { background:#162032 !important; }
     tr.selected { background:#1e3a5f !important; }
     .clickable { cursor:pointer; }
@@ -74,10 +82,14 @@
     <h1>Trials — 7D Reference Matrix</h1>
     <nav>
       <a href="/screener">Screener</a>
-      <a href="/fleet">Fleet Optimizer</a>
     </nav>
     <div class="meta" id="meta">Loading…</div>
+    <div class="tab-strip">
+      <button class="tab-btn active" id="tab-btn-trials" data-tab="trials">Trials</button>
+      <button class="tab-btn" id="tab-btn-forward" data-tab="forward">Forward</button>
+    </div>
 
+    <section id="view-trials">
     <h2>Runner Control</h2>
     <div class="runner-panel">
       <div class="runner-grid">
@@ -178,6 +190,34 @@
       </tr></thead>
       <tbody></tbody>
     </table>
+    </section>
+
+    <section id="view-forward" style="display:none;">
+      <div class="summary" id="forward-summary"></div>
+
+      <h2>Top Configs (global, by expectancy)</h2>
+      <table id="tbl-forward-global">
+        <thead><tr>
+          <th>#</th><th>Gap</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th><th>Decay</th>
+          <th class="num">Trades</th><th class="num">Wins</th>
+          <th class="num">WR%</th>
+          <th class="num">PnL%</th><th class="num">Avg%</th>
+          <th class="num">Syms</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <h2>Best Config Per Symbol</h2>
+      <table id="tbl-forward-symbol">
+        <thead><tr>
+          <th>Symbol</th><th>Gap</th><th>Tgt</th><th>SL</th><th>Hold</th><th>Spread</th><th>Decay</th>
+          <th class="num">Trades</th><th class="num">Wins</th>
+          <th class="num">WR%</th>
+          <th class="num">PnL%</th><th class="num">Avg%</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
   </div>
 
 <script>
@@ -217,6 +257,9 @@ const AXIS_LABELS = {
 const AXIS_KEYS = Object.keys(AXIS_LABELS);
 
 let selectedRunId = '';
+let activeTab = 'trials';
+let forwardGlobalRows = [];
+let forwardSymbolRows = [];
 let runnerConfig = {
   phases: [
     { name: 'scout' },
@@ -225,6 +268,99 @@ let runnerConfig = {
     { name: 'promote' },
   ]
 };
+
+function tabFromUrl() {
+  const tab = new URLSearchParams(window.location.search).get('tab');
+  return tab === 'forward' ? 'forward' : 'trials';
+}
+
+function setActiveTab(tab, syncUrl=true) {
+  activeTab = tab === 'forward' ? 'forward' : 'trials';
+
+  document.getElementById('view-trials').style.display = activeTab === 'trials' ? 'block' : 'none';
+  document.getElementById('view-forward').style.display = activeTab === 'forward' ? 'block' : 'none';
+  document.getElementById('tab-btn-trials').classList.toggle('active', activeTab === 'trials');
+  document.getElementById('tab-btn-forward').classList.toggle('active', activeTab === 'forward');
+
+  if (syncUrl) {
+    const q = new URLSearchParams(window.location.search);
+    if (activeTab === 'forward') q.set('tab', 'forward');
+    else q.delete('tab');
+    const qs = q.toString();
+    history.replaceState(null, '', qs ? `${window.location.pathname}?${qs}` : window.location.pathname);
+  }
+
+  if (activeTab === 'forward') {
+    loadForward();
+  }
+}
+
+function renderForward() {
+  const globalRows = Array.isArray(forwardGlobalRows) ? forwardGlobalRows : [];
+  const symbolRows = Array.isArray(forwardSymbolRows) ? forwardSymbolRows : [];
+
+  const totalTrades = globalRows.reduce((s, r) => s + asNum(r.total_trades, 0), 0);
+  const profConfigs = globalRows.filter(r => asNum(r.avg_pnl_pct, 0) > 0).length;
+  const profSymbols = symbolRows.filter(r => asNum(r.avg_pnl_pct, 0) > 0).length;
+  const bestAvg = globalRows.length ? asNum(globalRows[0].avg_pnl_pct, 0) : 0;
+
+  document.getElementById('forward-summary').innerHTML = `
+    <div class="card"><div class="label">Total Trades</div><div class="value">${totalTrades.toLocaleString()}</div></div>
+    <div class="card"><div class="label">Profitable Configs</div><div class="value ${profConfigs?'pos':'neg'}">${profConfigs}/${globalRows.length}</div></div>
+    <div class="card"><div class="label">Profitable Symbols</div><div class="value ${profSymbols?'pos':'neg'}">${profSymbols}/${symbolRows.length}</div></div>
+    <div class="card"><div class="label">Best Avg PnL</div><div class="value ${bestAvg>=0?'pos':'neg'}">${bestAvg>=0?'+':''}${bestAvg.toFixed(4)}%</div></div>
+  `;
+
+  const gb = document.querySelector('#tbl-forward-global tbody');
+  gb.innerHTML = globalRows.map((r, i) =>
+    `<tr class="${asNum(r.avg_pnl_pct, 0)>=0?'row-pos':'row-neg'}">
+      <td>${i + 1}</td>
+      <td>${asNum(r.spike_threshold_bps, 0)}</td>
+      <td>${asNum(r.target_ratio, 0)}</td>
+      <td>${asNum(r.stop_loss_bps, 0)}</td>
+      <td>${holdFmt(r.max_hold_ms)}</td>
+      <td>${asNum(r.max_spread_bps, 0)}</td>
+      <td>${asNum(r.trailing_decay_ratio, 0)}</td>
+      <td class="num">${asNum(r.total_trades, 0)}</td>
+      <td class="num">${asNum(r.wins, 0)}</td>
+      <td class="num">${asNum(r.win_rate_pct, 0).toFixed(1)}</td>
+      <td class="num">${cl(r.total_pnl_pct, 3)}</td>
+      <td class="num">${cl(r.avg_pnl_pct)}</td>
+      <td class="num">${asNum(r.symbols_traded, 0)}</td>
+    </tr>`
+  ).join('');
+
+  const sb = document.querySelector('#tbl-forward-symbol tbody');
+  sb.innerHTML = symbolRows.map(r =>
+    `<tr class="${asNum(r.avg_pnl_pct, 0)>=0?'row-pos':'row-neg'}">
+      <td>${r.symbol ?? '-'}</td>
+      <td>${asNum(r.spike_threshold_bps, 0)}</td>
+      <td>${asNum(r.target_ratio, 0)}</td>
+      <td>${asNum(r.stop_loss_bps, 0)}</td>
+      <td>${holdFmt(r.max_hold_ms)}</td>
+      <td>${asNum(r.max_spread_bps, 0)}</td>
+      <td>${asNum(r.trailing_decay_ratio, 0)}</td>
+      <td class="num">${asNum(r.total_trades, 0)}</td>
+      <td class="num">${asNum(r.wins, 0)}</td>
+      <td class="num">${asNum(r.win_rate_pct, 0).toFixed(1)}</td>
+      <td class="num">${cl(r.total_pnl_pct, 3)}</td>
+      <td class="num">${cl(r.avg_pnl_pct)}</td>
+    </tr>`
+  ).join('');
+}
+
+async function loadForward() {
+  try {
+    const [gRes, sRes] = await Promise.all([
+      fetch('/api/v1/fleet'),
+      fetch('/api/v1/fleet/symbols'),
+    ]);
+    if (!gRes.ok || !sRes.ok) return;
+    forwardGlobalRows = await gRes.json();
+    forwardSymbolRows = await sRes.json();
+    renderForward();
+  } catch (_) {}
+}
 
 function phaseCfg(name) {
   return (runnerConfig.phases || []).find(p => p.name === name) || {};
@@ -523,6 +659,8 @@ document.getElementById('run-filter').addEventListener('change', e => {
   selectedRunId = e.target.value;
   loadAxes();
 });
+document.getElementById('tab-btn-trials').addEventListener('click', () => setActiveTab('trials'));
+document.getElementById('tab-btn-forward').addEventListener('click', () => setActiveTab('forward'));
 
 document.getElementById('runner-phase').addEventListener('change', updatePhaseFields);
 document.getElementById('runner-start').addEventListener('click', startRunner);
@@ -531,12 +669,13 @@ document.getElementById('runner-stop').addEventListener('click', stopRunner);
 async function init() {
   await loadRunnerConfig();
   updatePhaseFields();
-  await Promise.all([loadAxes(), loadRuns(), loadRunnerStatus()]);
+  setActiveTab(tabFromUrl(), false);
+  await Promise.all([loadAxes(), loadRuns(), loadRunnerStatus(), loadForward()]);
   document.getElementById('meta').textContent = `Updated: ${new Date().toLocaleTimeString()} | Auto-refresh 30s`;
 }
 
 init();
-setInterval(() => { loadAxes(); loadRuns(); }, 30000);
+setInterval(() => { loadAxes(); loadRuns(); loadForward(); }, 30000);
 setInterval(() => { loadRunnerStatus(); }, 2000);
 </script>
 </body>
