@@ -62,9 +62,18 @@ CREATE TABLE IF NOT EXISTS trades (
     run_id TEXT
 );
 
+CREATE TABLE IF NOT EXISTS trial_runs_meta (
+    run_id TEXT PRIMARY KEY,
+    submitted_config_count INTEGER NOT NULL,
+    applied_at_ms INTEGER NOT NULL,
+    drained_trades INTEGER NOT NULL DEFAULT 0,
+    closed_at_ms INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_config ON trades(config_id);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_exit_ts ON trades(exit_ts_ms);
+CREATE INDEX IF NOT EXISTS idx_trial_runs_meta_applied_at ON trial_runs_meta(applied_at_ms);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_natural_key ON trades(config_id, symbol, entry_ts_ms, exit_ts_ms);
 ";
 
@@ -124,6 +133,10 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     );
     let _ = conn.execute_batch("ALTER TABLE trades ADD COLUMN run_id TEXT;");
     let _ = conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);");
+    let _ = conn.execute_batch("ALTER TABLE trial_runs_meta ADD COLUMN closed_at_ms INTEGER;");
+    let _ = conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_trial_runs_meta_closed_at ON trial_runs_meta(closed_at_ms);",
+    );
     Ok(conn)
 }
 
@@ -155,6 +168,47 @@ pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::
             c.min_baseline_samples as i64,
         ])?;
     }
+    Ok(())
+}
+
+/// Persist submitted config metadata for a trial run.
+pub fn upsert_trial_run_meta(
+    conn: &Connection,
+    run_id: &str,
+    submitted_config_count: usize,
+    applied_at_ms: i64,
+    drained_trades: usize,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO trial_runs_meta (
+            run_id, submitted_config_count, applied_at_ms, drained_trades, closed_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, NULL)
+         ON CONFLICT(run_id) DO UPDATE SET
+            submitted_config_count = excluded.submitted_config_count,
+            applied_at_ms = excluded.applied_at_ms,
+            drained_trades = excluded.drained_trades,
+            closed_at_ms = NULL",
+        params![
+            run_id,
+            submitted_config_count as i64,
+            applied_at_ms,
+            drained_trades as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Mark a trial run as closed (idempotent, preserves existing close timestamp).
+pub fn close_trial_run_meta(conn: &Connection, run_id: &str, closed_at_ms: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE trial_runs_meta
+         SET closed_at_ms = CASE
+             WHEN closed_at_ms IS NULL THEN ?2
+             ELSE closed_at_ms
+         END
+         WHERE run_id = ?1",
+        params![run_id, closed_at_ms],
+    )?;
     Ok(())
 }
 
@@ -390,6 +444,63 @@ mod tests {
             )
             .expect("fetch strategy kind");
         assert_eq!(strategy_kind, "baseline_gap");
+
+        drop(conn);
+        cleanup_temp_db(&path);
+    }
+
+    #[test]
+    fn open_db_creates_trial_runs_meta_table() {
+        let path = temp_db_path("trial-runs-meta");
+        let conn = open_db(&path).expect("open db");
+
+        let has_table: bool = conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trial_runs_meta'")
+            .and_then(|mut stmt| stmt.exists([]))
+            .expect("trial_runs_meta exists query");
+        assert!(has_table, "trial_runs_meta table must exist");
+        let has_closed_at_col: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('trial_runs_meta') WHERE name='closed_at_ms'")
+            .and_then(|mut stmt| stmt.exists([]))
+            .expect("trial_runs_meta.closed_at_ms exists query");
+        assert!(has_closed_at_col, "trial_runs_meta.closed_at_ms column must exist");
+
+        drop(conn);
+        cleanup_temp_db(&path);
+    }
+
+    #[test]
+    fn upsert_trial_run_meta_updates_existing_row() {
+        let path = temp_db_path("trial-runs-meta-upsert");
+        let conn = open_db(&path).expect("open db");
+
+        upsert_trial_run_meta(&conn, "scout-1", 100, 1_000, 5).expect("first upsert");
+        upsert_trial_run_meta(&conn, "scout-1", 250, 2_000, 12).expect("second upsert");
+
+        let (submitted, applied_at, drained, closed_at): (i64, i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT submitted_config_count, applied_at_ms, drained_trades, closed_at_ms
+                 FROM trial_runs_meta
+                 WHERE run_id = ?1",
+                ["scout-1"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("fetch trial_runs_meta");
+        assert_eq!(submitted, 250);
+        assert_eq!(applied_at, 2_000);
+        assert_eq!(drained, 12);
+        assert_eq!(closed_at, None);
+
+        close_trial_run_meta(&conn, "scout-1", 3_000).expect("close run");
+        close_trial_run_meta(&conn, "scout-1", 4_000).expect("close run idempotent");
+        let closed_at_after: Option<i64> = conn
+            .query_row(
+                "SELECT closed_at_ms FROM trial_runs_meta WHERE run_id = ?1",
+                ["scout-1"],
+                |row| row.get(0),
+            )
+            .expect("fetch closed_at_ms");
+        assert_eq!(closed_at_after, Some(3_000));
 
         drop(conn);
         cleanup_temp_db(&path);

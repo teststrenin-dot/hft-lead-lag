@@ -222,6 +222,13 @@ struct TrialBatch {
     configs: Vec<TraderConfig>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct TrialControl {
+    clear_run_id: bool,
+    run_id: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct TrialAck {
     run_id: String,
@@ -242,6 +249,13 @@ fn load_trial_batch(path: &Path) -> Result<TrialBatch, String> {
         return Err("trial batch run_id is empty".to_string());
     }
     Ok(batch)
+}
+
+fn load_trial_control(path: &Path) -> Result<TrialControl, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("read trial control {}: {e}", path.display()))?;
+    serde_json::from_str::<TrialControl>(&content)
+        .map_err(|e| format!("parse trial control {}: {e}", path.display()))
 }
 
 fn write_trial_ack(dir: &Path, ack: &TrialAck) {
@@ -438,11 +452,40 @@ fn upsert_runtime_configs(db_path: &Path, configs: &[TraderConfig]) -> Result<()
     Ok(())
 }
 
+fn upsert_trial_run_meta(
+    db_path: &Path,
+    run_id: &str,
+    submitted_config_count: usize,
+    applied_at_ms: i64,
+    drained_trades: usize,
+) -> Result<(), String> {
+    let conn = hft_lead_lag::infrastructure::db::open_db(db_path)
+        .map_err(|e| format!("open db {}: {e}", db_path.display()))?;
+    hft_lead_lag::infrastructure::db::upsert_trial_run_meta(
+        &conn,
+        run_id,
+        submitted_config_count,
+        applied_at_ms,
+        drained_trades,
+    )
+    .map_err(|e| format!("upsert trial run meta: {e}"))?;
+    Ok(())
+}
+
+fn close_trial_run_meta(db_path: &Path, run_id: &str, closed_at_ms: i64) -> Result<(), String> {
+    let conn = hft_lead_lag::infrastructure::db::open_db(db_path)
+        .map_err(|e| format!("open db {}: {e}", db_path.display()))?;
+    hft_lead_lag::infrastructure::db::close_trial_run_meta(&conn, run_id, closed_at_ms)
+        .map_err(|e| format!("close trial run meta: {e}"))?;
+    Ok(())
+}
+
 fn spawn_runtime_grid_hot_reload(
     screener: ScreenerStore,
     db_path: PathBuf,
     config_path: PathBuf,
     trial_batch_path: PathBuf,
+    trial_control_path: PathBuf,
     initial_modified: Option<SystemTime>,
     initial_signature: Option<u64>,
 ) {
@@ -452,8 +495,56 @@ fn spawn_runtime_grid_hot_reload(
         let mut pending: Option<RuntimeGridGeneration> = None;
         let mut last_apply_ms = EventLoopState::now_ms();
         let mut last_trial_modified: Option<SystemTime> = None;
+        let mut last_trial_control_modified: Option<SystemTime> = None;
 
         loop {
+            // --- Trial control: clear current run_id ---
+            let trial_control_modified = std::fs::metadata(&trial_control_path)
+                .and_then(|m| m.modified())
+                .ok();
+            if let Some(mod_time) = trial_control_modified {
+                let control_changed =
+                    last_trial_control_modified.map_or(true, |prev| mod_time > prev);
+                if control_changed {
+                    last_trial_control_modified = Some(mod_time);
+                    match load_trial_control(&trial_control_path) {
+                        Ok(control) => {
+                            if control.clear_run_id {
+                                let active_run_id = screener.current_run_id();
+                                match active_run_id {
+                                    Some(active) => {
+                                        let request_matches = control
+                                            .run_id
+                                            .as_ref()
+                                            .map_or(true, |requested| requested == &active);
+                                        if request_matches {
+                                            let closed_at_ms = EventLoopState::now_ms();
+                                            if let Err(e) =
+                                                close_trial_run_meta(&db_path, &active, closed_at_ms)
+                                            {
+                                                warn!("trial-control: failed to close run {active}: {e}");
+                                            }
+                                            screener.set_run_id(None);
+                                            info!(
+                                                "trial-control: cleared run_id={active} closed_at_ms={closed_at_ms}"
+                                            );
+                                        } else if let Some(requested) = control.run_id {
+                                            warn!(
+                                                "trial-control: requested run_id={} does not match active run_id={}",
+                                                requested, active
+                                            );
+                                        }
+                                    }
+                                    None => info!("trial-control: no active run_id to clear"),
+                                }
+                            }
+                        }
+                        Err(e) => warn!("trial-control: {e}"),
+                    }
+                }
+            }
+            // --- End trial control ---
+
             // --- Trial batch: immediate apply, no debounce ---
             let trial_modified = std::fs::metadata(&trial_batch_path)
                 .and_then(|m| m.modified())
@@ -469,9 +560,32 @@ fn spawn_runtime_grid_hot_reload(
                             if let Err(e) = upsert_runtime_configs(&db_path, &batch.configs) {
                                 warn!("trial-batch: db upsert failed: {e}");
                             } else {
+                                let applied_at_ms = EventLoopState::now_ms();
+                                if let Some(previous_run_id) = screener.current_run_id() {
+                                    if previous_run_id != run_id {
+                                        if let Err(e) = close_trial_run_meta(
+                                            &db_path,
+                                            &previous_run_id,
+                                            applied_at_ms,
+                                        ) {
+                                            warn!(
+                                                "trial-batch: failed to close previous run_id={previous_run_id}: {e}"
+                                            );
+                                        }
+                                    }
+                                }
                                 screener.set_run_id(Some(run_id.clone()));
                                 let report = screener.replace_fleet_configs(batch.configs);
                                 screener.flush_db_writer().await;
+                                if let Err(e) = upsert_trial_run_meta(
+                                    &db_path,
+                                    &run_id,
+                                    config_count,
+                                    applied_at_ms,
+                                    report.drained_trades,
+                                ) {
+                                    warn!("trial-batch: meta upsert failed: {e}");
+                                }
                                 info!(
                                     "trial-batch: applied run_id={run_id} configs={config_count} \
                                      drained_trades={}",
@@ -481,7 +595,7 @@ fn spawn_runtime_grid_hot_reload(
                                     trial_batch_path.parent().unwrap_or(Path::new(".")),
                                     &TrialAck {
                                         run_id,
-                                        applied_at_ms: EventLoopState::now_ms(),
+                                        applied_at_ms,
                                         config_count,
                                         drained_trades: report.drained_trades,
                                     },
@@ -1412,6 +1526,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         db_path.to_path_buf(),
         runtime_grid_path.to_path_buf(),
         PathBuf::from("config/trial-batch.json"),
+        PathBuf::from("config/trial-control.json"),
         runtime_grid_last_modified,
         runtime_grid_last_signature,
     );

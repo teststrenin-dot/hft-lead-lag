@@ -36,6 +36,7 @@ class FleetIPC:
         self.config_dir = config_dir
         self.db_path = db_path
         self.batch_path = config_dir / "trial-batch.json"
+        self.control_path = config_dir / "trial-control.json"
         self.ack_path = config_dir / ".trial-ack"
 
     def submit_batch(
@@ -115,3 +116,12 @@ class FleetIPC:
     def clear_ack(self):
         """Remove stale ack file."""
         self.ack_path.unlink(missing_ok=True)
+
+    def clear_active_run(self, run_id: str | None = None):
+        """Request runtime to clear current run_id (best effort)."""
+        payload: dict[str, object] = {"clear_run_id": True}
+        if run_id:
+            payload["run_id"] = run_id
+        tmp = self.control_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.rename(self.control_path)  # atomic on same FS

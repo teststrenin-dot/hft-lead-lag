@@ -7,7 +7,7 @@ import time
 from .bounds import AXES, FIXED_DEFAULTS
 from .ipc import FleetIPC, RunMetrics
 
-MAX_SCOUT_CONFIGS = 3000
+MAX_SCOUT_CONFIGS = 5000
 
 
 def generate_scout_configs(max_configs: int = MAX_SCOUT_CONFIGS) -> list[dict]:
@@ -61,13 +61,19 @@ def run_scout(
     ack = ipc.submit_batch(run_id, configs)
     print(f"[scout] ack: {ack.config_count} configs applied")
 
-    print(f"[scout] waiting {duration_s}s for trades to accumulate...")
-    time.sleep(duration_s)
+    try:
+        print(f"[scout] waiting {duration_s}s for trades to accumulate...")
+        time.sleep(duration_s)
 
-    metrics = ipc.query_run_metrics(run_id)
-    alive = [m for m in metrics if m.trades >= min_trades]
+        metrics = ipc.query_run_metrics(run_id)
+        alive = [m for m in metrics if m.trades >= min_trades]
 
-    print(
-        f"[scout] {len(alive)}/{len(metrics)} configs had ≥{min_trades} trades"
-    )
-    return run_id, alive
+        print(
+            f"[scout] {len(alive)}/{len(metrics)} configs had ≥{min_trades} trades"
+        )
+        return run_id, alive
+    finally:
+        try:
+            ipc.clear_active_run(run_id)
+        except Exception as e:
+            print(f"[warn] failed to clear active run_id={run_id}: {e}")

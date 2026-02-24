@@ -525,6 +525,7 @@ pub(crate) async fn get_fleet_ranked(
 #[derive(Debug, Serialize)]
 pub(crate) struct TrialRunSummary {
     run_id: String,
+    submitted_config_count: Option<i64>,
     config_count: i64,
     total_trades: i64,
     wins: i64,
@@ -548,17 +549,39 @@ pub(crate) async fn get_trial_runs(
 
     let mut stmt = conn
         .prepare(
-            "SELECT t.run_id,
-                COUNT(DISTINCT t.config_id) as config_count,
-                COUNT(*) as total_trades,
-                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(t.pnl_pct) as total_pnl,
-                MIN(t.entry_ts_ms) as first_trade,
-                MAX(t.exit_ts_ms) as last_trade
-         FROM trades t
-         WHERE t.run_id IS NOT NULL
-         GROUP BY t.run_id
-         ORDER BY last_trade DESC",
+            "WITH runs AS (
+                SELECT run_id
+                FROM trial_runs_meta
+                WHERE run_id LIKE 'scout-%' OR run_id LIKE 'expand-%'
+                UNION
+                SELECT DISTINCT run_id
+                FROM trades
+                WHERE run_id LIKE 'scout-%' OR run_id LIKE 'expand-%'
+            ),
+            trade_stats AS (
+                SELECT t.run_id,
+                       COUNT(DISTINCT t.config_id) as config_count,
+                       COUNT(*) as total_trades,
+                       SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                       SUM(t.pnl_pct) as total_pnl,
+                       MIN(t.entry_ts_ms) as first_trade,
+                       MAX(t.exit_ts_ms) as last_trade
+                FROM trades t
+                WHERE t.run_id LIKE 'scout-%' OR t.run_id LIKE 'expand-%'
+                GROUP BY t.run_id
+            )
+            SELECT r.run_id,
+                   m.submitted_config_count as submitted_config_count,
+                   COALESCE(s.config_count, 0) as config_count,
+                   COALESCE(s.total_trades, 0) as total_trades,
+                   COALESCE(s.wins, 0) as wins,
+                   COALESCE(s.total_pnl, 0.0) as total_pnl,
+                   COALESCE(s.first_trade, m.applied_at_ms, 0) as first_trade,
+                   COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) as last_trade
+            FROM runs r
+            LEFT JOIN trade_stats s ON s.run_id = r.run_id
+            LEFT JOIN trial_runs_meta m ON m.run_id = r.run_id
+            ORDER BY COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) DESC",
         )
         .map_err(|e| {
             (
@@ -569,12 +592,13 @@ pub(crate) async fn get_trial_runs(
 
     let rows = stmt
         .query_map([], |row| {
-            let total: i64 = row.get(2)?;
-            let wins: i64 = row.get(3)?;
-            let total_pnl: f64 = row.get(4)?;
+            let total: i64 = row.get(3)?;
+            let wins: i64 = row.get(4)?;
+            let total_pnl: f64 = row.get(5)?;
             Ok(TrialRunSummary {
                 run_id: row.get(0)?,
-                config_count: row.get(1)?,
+                submitted_config_count: row.get(1)?,
+                config_count: row.get(2)?,
                 total_trades: total,
                 wins,
                 win_rate_pct: if total > 0 {
@@ -588,8 +612,8 @@ pub(crate) async fn get_trial_runs(
                     0.0
                 },
                 total_pnl_pct: total_pnl,
-                first_trade_ms: row.get(5)?,
-                last_trade_ms: row.get(6)?,
+                first_trade_ms: row.get(6)?,
+                last_trade_ms: row.get(7)?,
             })
         })
         .map_err(|e| {
@@ -616,17 +640,35 @@ pub(crate) async fn get_forward_runs(
 
     let mut stmt = conn
         .prepare(
-            "SELECT t.run_id,
-                COUNT(DISTINCT t.config_id) as config_count,
-                COUNT(*) as total_trades,
-                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(t.pnl_pct) as total_pnl,
-                MIN(t.entry_ts_ms) as first_trade,
-                MAX(t.exit_ts_ms) as last_trade
-         FROM trades t
-         WHERE t.run_id LIKE 'forward-%'
-         GROUP BY t.run_id
-         ORDER BY last_trade DESC",
+            "WITH runs AS (
+                SELECT run_id FROM trial_runs_meta WHERE run_id LIKE 'forward-%'
+                UNION
+                SELECT DISTINCT run_id FROM trades WHERE run_id LIKE 'forward-%'
+            ),
+            trade_stats AS (
+                SELECT t.run_id,
+                       COUNT(DISTINCT t.config_id) as config_count,
+                       COUNT(*) as total_trades,
+                       SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                       SUM(t.pnl_pct) as total_pnl,
+                       MIN(t.entry_ts_ms) as first_trade,
+                       MAX(t.exit_ts_ms) as last_trade
+                FROM trades t
+                WHERE t.run_id LIKE 'forward-%'
+                GROUP BY t.run_id
+            )
+            SELECT r.run_id,
+                   m.submitted_config_count as submitted_config_count,
+                   COALESCE(s.config_count, 0) as config_count,
+                   COALESCE(s.total_trades, 0) as total_trades,
+                   COALESCE(s.wins, 0) as wins,
+                   COALESCE(s.total_pnl, 0.0) as total_pnl,
+                   COALESCE(s.first_trade, m.applied_at_ms, 0) as first_trade,
+                   COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) as last_trade
+            FROM runs r
+            LEFT JOIN trade_stats s ON s.run_id = r.run_id
+            LEFT JOIN trial_runs_meta m ON m.run_id = r.run_id
+            ORDER BY COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) DESC",
         )
         .map_err(|e| {
             (
@@ -637,12 +679,13 @@ pub(crate) async fn get_forward_runs(
 
     let rows = stmt
         .query_map([], |row| {
-            let total: i64 = row.get(2)?;
-            let wins: i64 = row.get(3)?;
-            let total_pnl: f64 = row.get(4)?;
+            let total: i64 = row.get(3)?;
+            let wins: i64 = row.get(4)?;
+            let total_pnl: f64 = row.get(5)?;
             Ok(TrialRunSummary {
                 run_id: row.get(0)?,
-                config_count: row.get(1)?,
+                submitted_config_count: row.get(1)?,
+                config_count: row.get(2)?,
                 total_trades: total,
                 wins,
                 win_rate_pct: if total > 0 {
@@ -656,8 +699,8 @@ pub(crate) async fn get_forward_runs(
                     0.0
                 },
                 total_pnl_pct: total_pnl,
-                first_trade_ms: row.get(5)?,
-                last_trade_ms: row.get(6)?,
+                first_trade_ms: row.get(6)?,
+                last_trade_ms: row.get(7)?,
             })
         })
         .map_err(|e| {

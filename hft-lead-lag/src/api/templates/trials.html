@@ -175,11 +175,9 @@
     <table id="tbl-runs">
       <thead><tr>
         <th>run_id</th>
-        <th class="num">Configs</th>
+        <th class="num">Submitted cfgs</th>
+        <th class="num">Cfgs w/ trades</th>
         <th class="num">Trades</th>
-        <th class="num">Avg PnL%</th>
-        <th class="num">WR%</th>
-        <th class="num">Total PnL%</th>
         <th>First</th>
         <th>Last</th>
       </tr></thead>
@@ -674,12 +672,12 @@ async function loadRuns() {
   const sel = document.getElementById('run-filter');
   sel.innerHTML = '<option value="">All runs (aggregate)</option>';
   for (const r of runs) {
-    const cfgCount = asNum(r.config_count ?? r.total_configs, 0);
+    const submittedCfgCount = Number.isFinite(Number(r.submitted_config_count)) ? Number(r.submitted_config_count) : null;
+    const cfgCount = asNum(r.config_count ?? 0, 0);
     const totalTrades = asNum(r.total_trades, 0);
-    const avgPnl = asNum(r.avg_pnl_pct ?? r.avg_pnl, 0);
     const opt = document.createElement('option');
     opt.value = r.run_id;
-    opt.textContent = `${r.run_id} — ${cfgCount} cfgs, ${totalTrades} trades, avg ${avgPnl.toFixed(4)}%`;
+    opt.textContent = `${r.run_id} — ${submittedCfgCount ?? '—'} submitted, ${cfgCount} w/ trades, ${totalTrades} trades`;
     sel.appendChild(opt);
   }
 
@@ -687,11 +685,9 @@ async function loadRuns() {
   tb.innerHTML = runs.map(r =>
     `<tr class="clickable" data-run="${r.run_id}">
       <td>${r.run_id}</td>
-      <td class="num">${asNum(r.config_count ?? r.total_configs, 0)}</td>
+      <td class="num">${Number.isFinite(Number(r.submitted_config_count)) ? Number(r.submitted_config_count) : '—'}</td>
+      <td class="num">${asNum(r.config_count ?? 0, 0)}</td>
       <td class="num">${asNum(r.total_trades, 0)}</td>
-      <td class="num">${cl(r.avg_pnl_pct ?? r.avg_pnl)}</td>
-      <td class="num">${asNum(r.win_rate_pct, 0).toFixed(1)}</td>
-      <td class="num">${cl(r.total_pnl_pct ?? r.total_pnl, 3)}</td>
       <td>${tsFmt(r.first_trade_ms)}</td>
       <td>${tsFmt(r.last_trade_ms)}</td>
     </tr>`

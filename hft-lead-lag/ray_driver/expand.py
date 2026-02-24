@@ -84,12 +84,18 @@ def run_expand(
     ack = ipc.submit_batch(run_id, configs)
     print(f"[expand] ack: {ack.config_count} configs applied")
 
-    print(f"[expand] waiting {duration_s}s...")
-    time.sleep(duration_s)
+    try:
+        print(f"[expand] waiting {duration_s}s...")
+        time.sleep(duration_s)
 
-    metrics = ipc.query_run_metrics(run_id)
-    alive = [m for m in metrics if m.trades >= min_trades]
-    print(
-        f"[expand] {len(alive)}/{len(metrics)} configs had ≥{min_trades} trades"
-    )
-    return alive
+        metrics = ipc.query_run_metrics(run_id)
+        alive = [m for m in metrics if m.trades >= min_trades]
+        print(
+            f"[expand] {len(alive)}/{len(metrics)} configs had ≥{min_trades} trades"
+        )
+        return alive
+    finally:
+        try:
+            ipc.clear_active_run(run_id)
+        except Exception as e:
+            print(f"[warn] failed to clear active run_id={run_id}: {e}")
