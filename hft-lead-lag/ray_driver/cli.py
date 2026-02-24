@@ -77,21 +77,32 @@ def merge_scout_references(
 
 def cmd_scout(args):
     ipc = FleetIPC(Path(args.config_dir), Path(args.db_path))
-    run_id, alive = run_scout(ipc, duration_s=args.duration)
-    print(f"\n[result] {len(alive)} reference configs found")
-    for m in sorted(alive, key=lambda x: x.avg_pnl_pct, reverse=True)[:20]:
-        print(
-            f"  config_id={m.config_id} trades={m.trades} "
-            f"avg_pnl={m.avg_pnl_pct:.4f}% win={m.win_rate_pct:.1f}%"
-        )
+    cycles = max(1, int(args.cycles))
     out = Path("data/scout-references.json")
     out.parent.mkdir(parents=True, exist_ok=True)
-    existing = load_scout_references(out)
-    merged = merge_scout_references(existing, alive)
-    out.write_text(json.dumps(merged, indent=2))
+    merged = load_scout_references(out)
+
+    for idx in range(cycles):
+        print(f"\n[scout] cycle {idx + 1}/{cycles}")
+        run_id, alive = run_scout(ipc, duration_s=args.duration)
+        print(f"\n[result] {len(alive)} reference configs found")
+        for m in sorted(alive, key=lambda x: x.avg_pnl_pct, reverse=True)[:20]:
+            print(
+                f"  config_id={m.config_id} trades={m.trades} "
+                f"avg_pnl={m.avg_pnl_pct:.4f}% win={m.win_rate_pct:.1f}%"
+            )
+
+        prev_len = len(merged)
+        merged = merge_scout_references(merged, alive)
+        out.write_text(json.dumps(merged, indent=2))
+        print(
+            f"[saved] {out} run_id={run_id} cycle={idx + 1}/{cycles} "
+            f"(prev={prev_len} new={len(alive)} total={len(merged)})"
+        )
+
     print(
-        f"[saved] {out} run_id={run_id} "
-        f"(prev={len(existing)} new={len(alive)} total={len(merged)})"
+        f"\n[scout] completed cycles={cycles}, duration={args.duration}s, "
+        f"cumulative_refs={len(merged)}"
     )
 
 
@@ -176,6 +187,7 @@ def main():
 
     s = sub.add_parser("scout", help="Coarse scan for reference configs")
     s.add_argument("--duration", type=int, default=600, help="Scout duration (s)")
+    s.add_argument("--cycles", type=int, default=1, help="Scout cycles to run sequentially")
     s.set_defaults(func=cmd_scout)
 
     e = sub.add_parser("expand", help="Expand around scout references")

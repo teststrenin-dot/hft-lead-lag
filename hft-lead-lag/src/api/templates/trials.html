@@ -102,6 +102,11 @@
           <input id="runner-duration" type="number" min="30" step="30"/>
         </div>
 
+        <div class="runner-field phase-scout">
+          <label>Cycles</label>
+          <input id="runner-cycles" type="number" min="1" step="1"/>
+        </div>
+
         <div class="runner-field phase-forward">
           <label>Max Budget (s)</label>
           <input id="runner-max-budget" type="number" min="30" step="30"/>
@@ -456,6 +461,7 @@ async function loadRunnerConfig() {
   } catch (_) {}
 
   setIfMissing('runner-duration', phaseCfg('scout').duration, true);
+  setIfMissing('runner-cycles', phaseCfg('scout').cycles, true);
   setIfMissing('runner-max-budget', phaseCfg('forward').max_budget, true);
   setIfMissing('runner-grace-period', phaseCfg('forward').grace_period, true);
   setIfMissing('runner-report-interval', phaseCfg('forward').report_interval, true);
@@ -474,6 +480,9 @@ function updatePhaseFields() {
   const cfg = phaseCfg(phase);
   if (phase === 'scout' || phase === 'expand') {
     setIfMissing('runner-duration', cfg.duration);
+    if (phase === 'scout') {
+      setIfMissing('runner-cycles', cfg.cycles);
+    }
   } else if (phase === 'forward') {
     setIfMissing('runner-max-budget', cfg.max_budget);
     setIfMissing('runner-grace-period', cfg.grace_period);
@@ -492,6 +501,10 @@ function collectRunnerPayload() {
   if (phase === 'scout' || phase === 'expand') {
     const duration = maybeNum('runner-duration');
     if (duration !== null) payload.duration = Math.max(30, duration);
+    if (phase === 'scout') {
+      const cycles = maybeNum('runner-cycles');
+      if (cycles !== null) payload.cycles = Math.max(1, Math.floor(cycles));
+    }
   } else if (phase === 'forward') {
     const maxBudget = maybeNum('runner-max-budget');
     const gracePeriod = maybeNum('runner-grace-period');

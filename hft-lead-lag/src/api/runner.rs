@@ -10,6 +10,7 @@ use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
 
 pub const DEFAULT_SCOUT_DURATION_S: u64 = 900;
+pub const DEFAULT_SCOUT_CYCLES: u64 = 1;
 pub const DEFAULT_EXPAND_DURATION_S: u64 = 900;
 pub const DEFAULT_FORWARD_MAX_BUDGET_S: u64 = 240;
 pub const DEFAULT_FORWARD_GRACE_PERIOD_S: u64 = 60;
@@ -22,6 +23,7 @@ pub const DEFAULT_PROMOTE_MIN_PNL: f64 = 0.0;
 pub struct RunnerStartRequest {
     pub phase: String,
     pub duration: Option<u64>,
+    pub cycles: Option<u64>,
     pub max_budget: Option<u64>,
     pub grace_period: Option<u64>,
     pub report_interval: Option<u64>,
@@ -48,6 +50,7 @@ pub struct RunnerStopResponse {
 pub struct RunnerPhaseDefaults {
     pub name: String,
     pub duration: Option<u64>,
+    pub cycles: Option<u64>,
     pub max_budget: Option<u64>,
     pub grace_period: Option<u64>,
     pub report_interval: Option<u64>,
@@ -493,6 +496,7 @@ fn runner_ui_config() -> RunnerUiConfig {
             RunnerPhaseDefaults {
                 name: "scout".to_string(),
                 duration: Some(DEFAULT_SCOUT_DURATION_S),
+                cycles: Some(DEFAULT_SCOUT_CYCLES),
                 max_budget: None,
                 grace_period: None,
                 report_interval: None,
@@ -503,6 +507,7 @@ fn runner_ui_config() -> RunnerUiConfig {
             RunnerPhaseDefaults {
                 name: "expand".to_string(),
                 duration: Some(DEFAULT_EXPAND_DURATION_S),
+                cycles: None,
                 max_budget: None,
                 grace_period: None,
                 report_interval: None,
@@ -513,6 +518,7 @@ fn runner_ui_config() -> RunnerUiConfig {
             RunnerPhaseDefaults {
                 name: "forward".to_string(),
                 duration: None,
+                cycles: None,
                 max_budget: Some(DEFAULT_FORWARD_MAX_BUDGET_S),
                 grace_period: Some(DEFAULT_FORWARD_GRACE_PERIOD_S),
                 report_interval: Some(DEFAULT_FORWARD_REPORT_INTERVAL_S),
@@ -523,6 +529,7 @@ fn runner_ui_config() -> RunnerUiConfig {
             RunnerPhaseDefaults {
                 name: "promote".to_string(),
                 duration: None,
+                cycles: None,
                 max_budget: None,
                 grace_period: None,
                 report_interval: None,
@@ -578,9 +585,15 @@ pub fn build_trial_runner_command(req: &RunnerStartRequest) -> Result<RunnerComm
 
     match phase.as_str() {
         "scout" => {
+            let cycles = req.cycles.unwrap_or(DEFAULT_SCOUT_CYCLES);
+            if cycles == 0 {
+                return Err("cycles must be >= 1".to_string());
+            }
             args.push("scout".to_string());
             args.push("--duration".to_string());
             args.push(req.duration.unwrap_or(DEFAULT_SCOUT_DURATION_S).to_string());
+            args.push("--cycles".to_string());
+            args.push(cycles.to_string());
         }
         "expand" => {
             args.push("expand".to_string());
@@ -648,6 +661,7 @@ mod tests {
         let req = RunnerStartRequest {
             phase: "scout".to_string(),
             duration: None,
+            cycles: None,
             max_budget: None,
             grace_period: None,
             report_interval: None,
@@ -667,6 +681,38 @@ mod tests {
                 "scout".to_string(),
                 "--duration".to_string(),
                 "900".to_string(),
+                "--cycles".to_string(),
+                "1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_scout_command_with_custom_cycles() {
+        let req = RunnerStartRequest {
+            phase: "scout".to_string(),
+            duration: Some(60),
+            cycles: Some(303),
+            max_budget: None,
+            grace_period: None,
+            report_interval: None,
+            run_id: None,
+            top_k: None,
+            min_trades: None,
+            min_pnl: None,
+        };
+
+        let cmd = build_trial_runner_command(&req).expect("command");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-m".to_string(),
+                "ray_driver".to_string(),
+                "scout".to_string(),
+                "--duration".to_string(),
+                "60".to_string(),
+                "--cycles".to_string(),
+                "303".to_string(),
             ]
         );
     }
@@ -676,6 +722,7 @@ mod tests {
         let req = RunnerStartRequest {
             phase: "forward".to_string(),
             duration: None,
+            cycles: None,
             max_budget: Some(720),
             grace_period: Some(120),
             report_interval: Some(15),
@@ -707,6 +754,7 @@ mod tests {
         let req = RunnerStartRequest {
             phase: "promote".to_string(),
             duration: None,
+            cycles: None,
             max_budget: None,
             grace_period: None,
             report_interval: None,
@@ -725,6 +773,7 @@ mod tests {
         let req = RunnerStartRequest {
             phase: "hack".to_string(),
             duration: None,
+            cycles: None,
             max_budget: None,
             grace_period: None,
             report_interval: None,
@@ -759,6 +808,7 @@ mod tests {
             .expect("promote phase");
 
         assert_eq!(scout.duration, Some(DEFAULT_SCOUT_DURATION_S));
+        assert_eq!(scout.cycles, Some(DEFAULT_SCOUT_CYCLES));
         assert_eq!(forward.max_budget, Some(DEFAULT_FORWARD_MAX_BUDGET_S));
         assert_eq!(forward.grace_period, Some(DEFAULT_FORWARD_GRACE_PERIOD_S));
         assert_eq!(
