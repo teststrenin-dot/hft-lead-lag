@@ -1,9 +1,12 @@
 //! HTTP server — routing and configuration.
 
-use axum::{Router, routing::get};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use dashmap::DashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::Arc;
 use tracing::info;
 
 use crate::domain::screener::ScreenerStore;
@@ -67,7 +70,12 @@ impl HttpServer {
     }
 
     pub fn with_min_volume(config: HttpServerConfig, min_volume_usd: f64) -> Self {
-        Self::with_runtime(config, min_volume_usd, ScreenerStore::default(), Arc::new(HealthState::new()))
+        Self::with_runtime(
+            config,
+            min_volume_usd,
+            ScreenerStore::default(),
+            Arc::new(HealthState::new()),
+        )
     }
 
     pub fn with_runtime(
@@ -96,12 +104,18 @@ impl HttpServer {
     }
 
     /// Start serving on a pre-bound listener (fail-fast: bind in main, serve in task)
-    pub async fn serve(&self, listener: tokio::net::TcpListener) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn serve(
+        &self,
+        listener: tokio::net::TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let state = Arc::new(HttpState {
             min_volume_usd: self.min_volume_usd,
             screener: self.screener.clone(),
             natr_cache: Arc::new(DashMap::new()),
             health: self.health.clone(),
+            trial_runner: super::runner::TrialRunnerManager::new(
+                super::runner::resolve_runner_workdir(),
+            ),
         });
 
         let app = Router::new()
@@ -119,6 +133,22 @@ impl HttpServer {
             .route("/api/v1/trials", get(handlers::get_trial_runs))
             .route("/api/v1/trials/axes", get(handlers::get_trial_axes))
             .route("/api/v1/trials/:run_id", get(handlers::get_trial_configs))
+            .route(
+                "/api/v1/trials/runner/config",
+                get(handlers::get_trial_runner_config),
+            )
+            .route(
+                "/api/v1/trials/runner/status",
+                get(handlers::get_trial_runner_status),
+            )
+            .route(
+                "/api/v1/trials/runner/start",
+                post(handlers::start_trial_runner),
+            )
+            .route(
+                "/api/v1/trials/runner/stop",
+                post(handlers::stop_trial_runner),
+            )
             .with_state(state);
 
         axum::serve(listener, app).await?;

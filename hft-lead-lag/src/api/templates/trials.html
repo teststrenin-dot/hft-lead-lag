@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <link rel="icon" href="data:,"/>
   <title>Trials — 7D Reference Matrix</title>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background:#0b1020; color:#e5e7eb; }
@@ -19,11 +20,31 @@
     .card .value { font-size:20px; font-weight:600; margin-top:2px; }
     .pos { color: #34d399; } .neg { color: #f87171; }
 
-    /* Run selector */
+    .runner-panel { background:#111827; border:1px solid #1f2937; border-radius:8px; padding:12px; margin: 8px 0 16px; }
+    .runner-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap:8px; align-items:end; }
+    .runner-field label { display:block; font-size:11px; color:#9ca3af; margin-bottom:3px; }
+    .runner-field input, .runner-field select {
+      width:100%; box-sizing:border-box; background:#0f172a; color:#e5e7eb;
+      border:1px solid #374151; border-radius:4px; padding:6px 8px; font-size:12px;
+    }
+    .runner-actions { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+    .btn {
+      background:#1d4ed8; color:#fff; border:none; border-radius:4px; padding:7px 12px;
+      font-size:12px; cursor:pointer;
+    }
+    .btn:hover { filter:brightness(1.08); }
+    .btn:disabled { opacity:0.5; cursor:not-allowed; }
+    .btn-stop { background:#b91c1c; }
+    .runner-status { margin-top:10px; font-size:12px; color:#9ca3af; }
+    .runner-logs {
+      margin-top:8px; background:#0b1220; border:1px solid #1f2937; border-radius:4px;
+      padding:8px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size:11px; white-space:pre-wrap; max-height:220px; overflow:auto;
+    }
+
     .run-select { margin: 8px 0; }
     .run-select select { background:#111827; color:#e5e7eb; border:1px solid #374151; border-radius:4px; padding:6px 10px; font-size:13px; min-width:300px; }
 
-    /* Axis charts */
     .axes-grid { display: flex; flex-direction: column; gap: 16px; margin: 16px 0; }
     .axis-panel { background:#111827; border:1px solid #1f2937; border-radius:6px; padding:12px; }
     .axis-panel h3 { margin:0 0 8px; font-size:13px; color:#93c5fd; }
@@ -39,7 +60,6 @@
     .legend { display:flex; gap:16px; margin:8px 0; font-size:11px; }
     .legend-dot { width:10px; height:10px; border-radius:2px; display:inline-block; margin-right:4px; vertical-align:middle; }
 
-    /* Runs table */
     table { width:100%; border-collapse:collapse; background:#111827; font-size:12px; margin-bottom:16px; }
     th, td { padding:4px 6px; border-bottom:1px solid #1f2937; text-align:left; }
     th { position:sticky; top:0; background:#111827; color:#93c5fd; font-size:11px; }
@@ -51,12 +71,72 @@
 </head>
 <body>
   <div class="top">
-    <h1>🔬 Trials — 7D Reference Matrix</h1>
+    <h1>Trials — 7D Reference Matrix</h1>
     <nav>
-      <a href="/screener">← Screener</a>
+      <a href="/screener">Screener</a>
       <a href="/fleet">Fleet Optimizer</a>
     </nav>
     <div class="meta" id="meta">Loading…</div>
+
+    <h2>Runner Control</h2>
+    <div class="runner-panel">
+      <div class="runner-grid">
+        <div class="runner-field">
+          <label>Phase</label>
+          <select id="runner-phase"></select>
+        </div>
+
+        <div class="runner-field phase-scout phase-expand">
+          <label>Duration (s)</label>
+          <input id="runner-duration" type="number" min="30" step="30"/>
+        </div>
+
+        <div class="runner-field phase-forward">
+          <label>Max Budget (s)</label>
+          <input id="runner-max-budget" type="number" min="30" step="30"/>
+        </div>
+
+        <div class="runner-field phase-forward">
+          <label>Grace Period (s)</label>
+          <input id="runner-grace-period" type="number" min="10" step="10"/>
+        </div>
+
+        <div class="runner-field phase-forward">
+          <label>Report Interval (s)</label>
+          <input id="runner-report-interval" type="number" min="5" step="5"/>
+        </div>
+
+        <div class="runner-field phase-promote">
+          <label>Run ID</label>
+          <input id="runner-run-id" type="text" placeholder="forward-..."/>
+        </div>
+
+        <div class="runner-field phase-promote">
+          <label>Top K</label>
+          <input id="runner-top-k" type="number" min="1" step="1"/>
+        </div>
+
+        <div class="runner-field phase-promote">
+          <label>Min Trades</label>
+          <input id="runner-min-trades" type="number" min="1" step="1"/>
+        </div>
+
+        <div class="runner-field phase-promote">
+          <label>Min PnL</label>
+          <input id="runner-min-pnl" type="number" step="0.001"/>
+        </div>
+      </div>
+
+      <div class="runner-actions">
+        <button class="btn" id="runner-start">Start</button>
+        <button class="btn btn-stop" id="runner-stop">Stop</button>
+      </div>
+      <div class="runner-status" id="runner-status">Status: unknown</div>
+      <div class="runner-status" id="runner-meta"></div>
+      <div class="runner-logs" id="runner-logs">No logs yet.</div>
+      <div class="runner-status" id="runner-history-title">Recent Jobs</div>
+      <div class="runner-logs" id="runner-history">No finished jobs yet.</div>
+    </div>
 
     <div class="summary" id="summary"></div>
 
@@ -73,7 +153,7 @@
 
     <div class="axes-grid" id="axes-grid"></div>
 
-    <h2>📋 Trial Runs</h2>
+    <h2>Trial Runs</h2>
     <table id="tbl-runs">
       <thead><tr>
         <th>run_id</th>
@@ -82,12 +162,13 @@
         <th class="num">Avg PnL%</th>
         <th class="num">WR%</th>
         <th class="num">Total PnL%</th>
-        <th class="num">SL%</th>
+        <th>First</th>
+        <th>Last</th>
       </tr></thead>
       <tbody></tbody>
     </table>
 
-    <h2 id="detail-title" style="display:none;">📊 Config Details</h2>
+    <h2 id="detail-title" style="display:none;">Config Details</h2>
     <table id="tbl-detail" style="display:none;">
       <thead><tr>
         <th>config_id</th>
@@ -100,8 +181,30 @@
   </div>
 
 <script>
-const cl = (v, d=4) => `<span class="${v>=0?'pos':'neg'}">${v>=0?'+':''}${v.toFixed(d)}</span>`;
-const holdFmt = ms => ms >= 1000 ? (ms/1000).toFixed(1)+'s' : ms+'ms';
+const asNum = (v, def=0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+};
+const cl = (v, d=4) => {
+  const x = asNum(v, 0);
+  return `<span class="${x>=0?'pos':'neg'}">${x>=0?'+':''}${x.toFixed(d)}</span>`;
+};
+const holdFmt = ms => {
+  const v = Number(ms);
+  if (!Number.isFinite(v)) return '-';
+  return v >= 1000 ? (v/1000).toFixed(1)+'s' : v+'ms';
+};
+const tsFmt = ms => {
+  const v = Number(ms);
+  return Number.isFinite(v) && v > 0 ? new Date(v).toLocaleString() : '-';
+};
+const maybeNum = id => {
+  const raw = String(document.getElementById(id).value || '').trim();
+  if (!raw) return null;
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : null;
+};
+
 const AXIS_LABELS = {
   spike_threshold_bps: 'Spike (bps)',
   target_ratio: 'Target Ratio',
@@ -114,8 +217,169 @@ const AXIS_LABELS = {
 const AXIS_KEYS = Object.keys(AXIS_LABELS);
 
 let selectedRunId = '';
+let runnerConfig = {
+  phases: [
+    { name: 'scout' },
+    { name: 'expand' },
+    { name: 'forward' },
+    { name: 'promote' },
+  ]
+};
 
-// ── Fetch axes breakdown ──
+function phaseCfg(name) {
+  return (runnerConfig.phases || []).find(p => p.name === name) || {};
+}
+
+function setIfMissing(id, val, force=false) {
+  if (val === null || val === undefined) return;
+  const el = document.getElementById(id);
+  if (force || !String(el.value || '').trim()) {
+    el.value = String(val);
+  }
+}
+
+async function loadRunnerConfig() {
+  try {
+    const res = await fetch('/api/v1/trials/runner/config');
+    if (res.ok) {
+      runnerConfig = await res.json();
+    }
+  } catch (_) {}
+
+  const sel = document.getElementById('runner-phase');
+  sel.innerHTML = '';
+  (runnerConfig.phases || []).forEach((p, idx) => {
+    const opt = document.createElement('option');
+    opt.value = p.name;
+    opt.textContent = p.name;
+    if (idx === 0) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  if (!sel.value) {
+    sel.innerHTML = '<option value="scout">scout</option>';
+  }
+
+  setIfMissing('runner-duration', phaseCfg('scout').duration, true);
+  setIfMissing('runner-max-budget', phaseCfg('forward').max_budget, true);
+  setIfMissing('runner-grace-period', phaseCfg('forward').grace_period, true);
+  setIfMissing('runner-report-interval', phaseCfg('forward').report_interval, true);
+  setIfMissing('runner-top-k', phaseCfg('promote').top_k, true);
+  setIfMissing('runner-min-trades', phaseCfg('promote').min_trades, true);
+  setIfMissing('runner-min-pnl', phaseCfg('promote').min_pnl, true);
+}
+
+function updatePhaseFields() {
+  const phase = document.getElementById('runner-phase').value;
+  document.querySelectorAll('.phase-scout,.phase-expand,.phase-forward,.phase-promote')
+    .forEach(el => el.style.display = 'none');
+  document.querySelectorAll(`.phase-${phase}`).forEach(el => el.style.display = 'block');
+
+  const cfg = phaseCfg(phase);
+  if (phase === 'scout' || phase === 'expand') {
+    setIfMissing('runner-duration', cfg.duration);
+  } else if (phase === 'forward') {
+    setIfMissing('runner-max-budget', cfg.max_budget);
+    setIfMissing('runner-grace-period', cfg.grace_period);
+    setIfMissing('runner-report-interval', cfg.report_interval);
+  } else if (phase === 'promote') {
+    setIfMissing('runner-top-k', cfg.top_k);
+    setIfMissing('runner-min-trades', cfg.min_trades);
+    setIfMissing('runner-min-pnl', cfg.min_pnl);
+  }
+}
+
+function collectRunnerPayload() {
+  const phase = document.getElementById('runner-phase').value;
+  const payload = { phase };
+
+  if (phase === 'scout' || phase === 'expand') {
+    const duration = maybeNum('runner-duration');
+    if (duration !== null) payload.duration = Math.max(30, duration);
+  } else if (phase === 'forward') {
+    const maxBudget = maybeNum('runner-max-budget');
+    const gracePeriod = maybeNum('runner-grace-period');
+    const reportInterval = maybeNum('runner-report-interval');
+    if (maxBudget !== null) payload.max_budget = Math.max(30, maxBudget);
+    if (gracePeriod !== null) payload.grace_period = Math.max(10, gracePeriod);
+    if (reportInterval !== null) payload.report_interval = Math.max(5, reportInterval);
+  } else if (phase === 'promote') {
+    payload.run_id = document.getElementById('runner-run-id').value.trim();
+    const topK = maybeNum('runner-top-k');
+    const minTrades = maybeNum('runner-min-trades');
+    const minPnl = maybeNum('runner-min-pnl');
+    if (topK !== null) payload.top_k = Math.max(1, topK);
+    if (minTrades !== null) payload.min_trades = Math.max(1, minTrades);
+    if (minPnl !== null) payload.min_pnl = minPnl;
+  }
+
+  return payload;
+}
+
+async function startRunner() {
+  const payload = collectRunnerPayload();
+  const res = await fetch('/api/v1/trials/runner/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const msg = await res.text();
+    alert(`Start failed: ${msg}`);
+    return;
+  }
+  await loadRunnerStatus();
+}
+
+async function stopRunner() {
+  const res = await fetch('/api/v1/trials/runner/stop', { method: 'POST' });
+  if (!res.ok) {
+    const msg = await res.text();
+    alert(`Stop failed: ${msg}`);
+    return;
+  }
+  await loadRunnerStatus();
+}
+
+async function loadRunnerStatus() {
+  const res = await fetch('/api/v1/trials/runner/status?tail=200');
+  if (!res.ok) return;
+  const data = await res.json();
+
+  const statusEl = document.getElementById('runner-status');
+  const metaEl = document.getElementById('runner-meta');
+  const logsEl = document.getElementById('runner-logs');
+  const historyEl = document.getElementById('runner-history');
+  const startBtn = document.getElementById('runner-start');
+  const stopBtn = document.getElementById('runner-stop');
+
+  const recent = (data.recent_jobs || []).map(j =>
+    `#${j.job_id} ${j.phase} ${j.state} start=${tsFmt(j.started_at_ms)}`
+    + (j.finished_at_ms ? ` finish=${tsFmt(j.finished_at_ms)}` : '')
+    + (j.exit_code !== null ? ` exit=${j.exit_code}` : '')
+    + (j.error ? ` err=${j.error}` : '')
+  );
+  historyEl.textContent = recent.length ? recent.join('\n') : 'No finished jobs yet.';
+
+  if (!data.active_job) {
+    statusEl.textContent = 'Status: idle';
+    metaEl.textContent = '';
+  } else {
+    const j = data.active_job;
+    statusEl.textContent = `Status: ${j.state}${data.running ? ' (running)' : ''}`;
+    metaEl.textContent =
+      `Job #${j.job_id} | phase=${j.phase} | started=${tsFmt(j.started_at_ms)}`
+      + (j.finished_at_ms ? ` | finished=${tsFmt(j.finished_at_ms)}` : '')
+      + (j.exit_code !== null ? ` | exit=${j.exit_code}` : '')
+      + (j.error ? ` | error=${j.error}` : '');
+  }
+
+  const lines = (data.logs || []).map(l => `[${tsFmt(l.ts_ms)}] ${l.stream}: ${l.line}`);
+  logsEl.textContent = lines.length ? lines.join('\n') : 'No logs yet.';
+
+  startBtn.disabled = data.running;
+  stopBtn.disabled = !data.running;
+}
+
 async function loadAxes() {
   const url = selectedRunId ? `/api/v1/trials/axes?run_id=${encodeURIComponent(selectedRunId)}` : '/api/v1/trials/axes';
   const res = await fetch(url);
@@ -134,8 +398,6 @@ function renderAxes(data) {
     if (!vals.length) continue;
 
     const maxTrades = Math.max(...vals.map(v => v.total_trades), 1);
-    const maxConfigs = Math.max(...vals.map(v => v.configs_total), 1);
-
     vals.forEach(v => {
       totalConfigs += v.configs_total;
       totalAlive += v.configs_with_trades;
@@ -147,7 +409,6 @@ function renderAxes(data) {
 
     const aliveCount = vals.filter(v => v.configs_with_trades > 0).length;
     const deadCount = vals.filter(v => v.configs_with_trades === 0).length;
-
     panel.innerHTML = `<h3>${AXIS_LABELS[key]} <span style="color:#6b7280;font-size:11px;">(${vals.length} values, ${aliveCount} alive, ${deadCount} dead)</span></h3>`;
 
     const barsDiv = document.createElement('div');
@@ -186,7 +447,6 @@ function renderAxes(data) {
     grid.appendChild(panel);
   }
 
-  // Deduplicate by dividing by number of axes rendered
   const axesRendered = AXIS_KEYS.filter(k => (data[k] || []).length > 0).length || 1;
   document.getElementById('summary').innerHTML = `
     <div class="card"><div class="label">Explored Values</div><div class="value">${(totalConfigs / axesRendered)|0}</div></div>
@@ -196,16 +456,20 @@ function renderAxes(data) {
   `;
 }
 
-// ── Fetch runs list ──
 async function loadRuns() {
   const res = await fetch('/api/v1/trials');
+  if (!res.ok) return;
   const runs = await res.json();
+
   const sel = document.getElementById('run-filter');
   sel.innerHTML = '<option value="">All runs (aggregate)</option>';
   for (const r of runs) {
+    const cfgCount = asNum(r.config_count ?? r.total_configs, 0);
+    const totalTrades = asNum(r.total_trades, 0);
+    const avgPnl = asNum(r.avg_pnl_pct ?? r.avg_pnl, 0);
     const opt = document.createElement('option');
     opt.value = r.run_id;
-    opt.textContent = `${r.run_id} — ${r.total_configs} cfgs, ${r.total_trades} trades, avg ${r.avg_pnl_pct.toFixed(4)}%`;
+    opt.textContent = `${r.run_id} — ${cfgCount} cfgs, ${totalTrades} trades, avg ${avgPnl.toFixed(4)}%`;
     sel.appendChild(opt);
   }
 
@@ -213,12 +477,13 @@ async function loadRuns() {
   tb.innerHTML = runs.map(r =>
     `<tr class="clickable" data-run="${r.run_id}">
       <td>${r.run_id}</td>
-      <td class="num">${r.total_configs}</td>
-      <td class="num">${r.total_trades}</td>
-      <td class="num">${cl(r.avg_pnl_pct)}</td>
-      <td class="num">${r.win_rate_pct.toFixed(1)}</td>
-      <td class="num">${cl(r.total_pnl_pct, 3)}</td>
-      <td class="num">${r.stop_loss_pct.toFixed(1)}</td>
+      <td class="num">${asNum(r.config_count ?? r.total_configs, 0)}</td>
+      <td class="num">${asNum(r.total_trades, 0)}</td>
+      <td class="num">${cl(r.avg_pnl_pct ?? r.avg_pnl)}</td>
+      <td class="num">${asNum(r.win_rate_pct, 0).toFixed(1)}</td>
+      <td class="num">${cl(r.total_pnl_pct ?? r.total_pnl, 3)}</td>
+      <td>${tsFmt(r.first_trade_ms)}</td>
+      <td>${tsFmt(r.last_trade_ms)}</td>
     </tr>`
   ).join('');
 
@@ -227,45 +492,52 @@ async function loadRuns() {
   });
 }
 
-// ── Fetch per-config detail for a run ──
 async function loadDetail(runId) {
   document.querySelectorAll('#tbl-runs tbody tr').forEach(tr => tr.classList.toggle('selected', tr.dataset.run === runId));
   const h = document.getElementById('detail-title');
   const tbl = document.getElementById('tbl-detail');
-  h.style.display = 'block'; h.textContent = `📊 Config Details — ${runId}`;
+  h.style.display = 'block';
+  h.textContent = `Config Details — ${runId}`;
   tbl.style.display = 'table';
 
   const res = await fetch(`/api/v1/trials/${encodeURIComponent(runId)}`);
+  if (!res.ok) return;
   const configs = await res.json();
   const tb = tbl.querySelector('tbody');
   tb.innerHTML = configs.map(c =>
-    `<tr class="${c.avg_pnl_pct>=0?'row-pos':'row-neg'}">
+    `<tr>
       <td>${c.config_id}</td>
       <td>${c.spike_threshold_bps}</td><td>${c.target_ratio}</td><td>${c.stop_loss_bps}</td>
       <td>${holdFmt(c.max_hold_ms)}</td><td>${c.max_spread_bps}</td><td>${c.trailing_decay_ratio}</td>
       <td>${c.baseline_window_ms}</td>
-      <td class="num">${c.total_trades}</td><td class="num">${c.wins}</td>
-      <td class="num">${c.win_rate_pct.toFixed(1)}</td>
+      <td class="num">${asNum(c.total_trades, 0)}</td><td class="num">${asNum(c.wins, 0)}</td>
+      <td class="num">${asNum(c.win_rate_pct, 0).toFixed(1)}</td>
       <td class="num">${cl(c.avg_pnl_pct)}</td><td class="num">${cl(c.total_pnl_pct, 3)}</td>
-      <td class="num">${c.stop_loss_pct.toFixed(1)}</td>
+      <td class="num">${asNum(c.stop_loss_share_pct ?? c.stop_loss_pct, 0).toFixed(1)}</td>
       <td class="num">${holdFmt(c.avg_hold_ms)}</td>
     </tr>`
   ).join('');
 }
 
-// ── Run filter ──
 document.getElementById('run-filter').addEventListener('change', e => {
   selectedRunId = e.target.value;
   loadAxes();
 });
 
-// ── Init ──
+document.getElementById('runner-phase').addEventListener('change', updatePhaseFields);
+document.getElementById('runner-start').addEventListener('click', startRunner);
+document.getElementById('runner-stop').addEventListener('click', stopRunner);
+
 async function init() {
-  await Promise.all([loadAxes(), loadRuns()]);
+  await loadRunnerConfig();
+  updatePhaseFields();
+  await Promise.all([loadAxes(), loadRuns(), loadRunnerStatus()]);
   document.getElementById('meta').textContent = `Updated: ${new Date().toLocaleTimeString()} | Auto-refresh 30s`;
 }
+
 init();
 setInterval(() => { loadAxes(); loadRuns(); }, 30000);
+setInterval(() => { loadRunnerStatus(); }, 2000);
 </script>
 </body>
 </html>

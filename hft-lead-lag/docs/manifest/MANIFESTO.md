@@ -37,19 +37,21 @@
 - Gap-based lead-lag с baseline нормализацией.
 - Shadow Fleet exploration через runtime-grid hot-reload (`max_configs=1500`).
 - Baseline timing как гиперпараметр (`baseline_window_ms`: 10s/20s/30s/60s).
-- Expectancy + composite ranking + runtime pruning + health degradation signals.
-- Следующий шаг: iterative hyperparam cycle и подготовка Ray/ASHA forward-testing.
+- Ray orchestration контур активен: `ray_driver` + `trial-batch.json`/`.trial-ack`.
+- Trial analytics доступны через `/api/v1/trials*` и `/trials`.
+- Следующий шаг: multi-trial ASHA (не `num_samples=1`) и контролируемый auto-promotion.
 
 ---
 
 ## Source of truth
 
 - `docs/README.md`
-- `docs/sprints/sprint-008-deal-hunt-natr-db.md`
-- `docs/plans/2026-02-21-iterative-hyperparam-methodology.md`
+- `docs/ray-asha-deep-dive.md`
+- `src/main.rs`
+- `ray_driver/*`
 
 Архивные документы не должны использоваться как source of truth.
 
 ---
 
-*Manifest v2.3 — synchronized with runtime-grid + deal-hunt Phase A state*
+*Manifest v2.4 — synchronized with live Ray/ASHA integration state*

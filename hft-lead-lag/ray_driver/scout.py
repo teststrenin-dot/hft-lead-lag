@@ -51,7 +51,7 @@ def run_scout(
     ipc: FleetIPC,
     duration_s: int = 600,
     min_trades: int = 1,
-) -> list[RunMetrics]:
+) -> tuple[str, list[RunMetrics]]:
     """Submit scout grid, wait, return configs that produced trades."""
     configs = generate_scout_configs()
     run_id = f"scout-{int(time.time())}"
@@ -70,4 +70,4 @@ def run_scout(
     print(
         f"[scout] {len(alive)}/{len(metrics)} configs had ≥{min_trades} trades"
     )
-    return alive
+    return run_id, alive

@@ -11,9 +11,73 @@ from .scout import run_scout
 from .expand import run_expand
 
 
+def load_scout_references(path: Path) -> list[dict]:
+    """Load scout references JSON as a list; return empty on malformed input."""
+    if not path.exists():
+        return []
+
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        print(f"[warn] malformed {path}; starting fresh")
+        return []
+
+    if not isinstance(payload, list):
+        print(f"[warn] expected list in {path}; starting fresh")
+        return []
+    return payload
+
+
+def merge_scout_references(
+    existing_rows: list[dict],
+    fresh_metrics: list[RunMetrics],
+) -> list[dict]:
+    """Merge references by config_id with trade-weighted avg pnl."""
+    agg: dict[int, dict[str, float]] = {}
+
+    for row in existing_rows:
+        try:
+            config_id = int(row["config_id"])
+            trades = int(row.get("trades", 0))
+            avg_pnl_pct = float(row.get("avg_pnl_pct", 0.0))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if trades <= 0:
+            continue
+
+        total_pnl = avg_pnl_pct * trades
+        cur = agg.setdefault(config_id, {"trades": 0.0, "total_pnl": 0.0})
+        cur["trades"] += trades
+        cur["total_pnl"] += total_pnl
+
+    for metric in fresh_metrics:
+        if metric.trades <= 0:
+            continue
+        cur = agg.setdefault(metric.config_id, {"trades": 0.0, "total_pnl": 0.0})
+        cur["trades"] += metric.trades
+        cur["total_pnl"] += metric.avg_pnl_pct * metric.trades
+
+    merged = []
+    for config_id, stats in agg.items():
+        trades = int(stats["trades"])
+        if trades <= 0:
+            continue
+        merged.append(
+            {
+                "config_id": config_id,
+                "trades": trades,
+                "avg_pnl_pct": stats["total_pnl"] / trades,
+            }
+        )
+
+    merged.sort(key=lambda row: (row["avg_pnl_pct"], row["trades"]), reverse=True)
+    return merged
+
+
 def cmd_scout(args):
     ipc = FleetIPC(Path(args.config_dir), Path(args.db_path))
-    alive = run_scout(ipc, duration_s=args.duration)
+    run_id, alive = run_scout(ipc, duration_s=args.duration)
     print(f"\n[result] {len(alive)} reference configs found")
     for m in sorted(alive, key=lambda x: x.avg_pnl_pct, reverse=True)[:20]:
         print(
@@ -22,12 +86,13 @@ def cmd_scout(args):
         )
     out = Path("data/scout-references.json")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(
-        [{"config_id": m.config_id, "trades": m.trades,
-          "avg_pnl_pct": m.avg_pnl_pct} for m in alive],
-        indent=2,
-    ))
-    print(f"[saved] {out}")
+    existing = load_scout_references(out)
+    merged = merge_scout_references(existing, alive)
+    out.write_text(json.dumps(merged, indent=2))
+    print(
+        f"[saved] {out} run_id={run_id} "
+        f"(prev={len(existing)} new={len(alive)} total={len(merged)})"
+    )
 
 
 def cmd_expand(args):
