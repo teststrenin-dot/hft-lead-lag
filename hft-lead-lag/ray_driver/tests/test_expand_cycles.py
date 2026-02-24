@@ -48,3 +48,33 @@ def test_cmd_expand_runs_requested_cycles(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "[expand] cycle 3/3" in out
     assert "[expand] completed cycles=3" in out
+
+
+def test_cmd_expand_cumulates_alive_refs_between_cycles(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "data" / "scout-references.json").write_text(
+        json.dumps([{"config_id": 1, "trades": 2, "avg_pnl_pct": 0.25}])
+    )
+
+    seen_refs: list[list[int]] = []
+
+    def fake_run_expand(ipc, refs, duration_s):
+        seen_refs.append([r.config_id for r in refs])
+        if len(seen_refs) == 1:
+            return [metric(config_id=2)]
+        return []
+
+    monkeypatch.setattr(cli, "run_expand", fake_run_expand)
+
+    args = SimpleNamespace(
+        config_dir="config",
+        db_path="data/optimizer.db",
+        duration=60,
+        cycles=2,
+    )
+    cli.cmd_expand(args)
+
+    assert seen_refs == [[1], [1, 2]]

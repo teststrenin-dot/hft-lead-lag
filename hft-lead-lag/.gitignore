@@ -36,3 +36,8 @@ venv/
 
 # Ray
 ray_results/
+
+# Runtime IPC state
+config/.trial-ack
+config/trial-batch.json
+config/trial-control.json

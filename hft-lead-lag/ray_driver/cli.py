@@ -75,6 +75,33 @@ def merge_scout_references(
     return merged
 
 
+def rows_to_metrics(rows: list[dict]) -> list[RunMetrics]:
+    """Convert persisted reference rows to RunMetrics records."""
+    return [
+        RunMetrics(
+            config_id=r["config_id"],
+            trades=r["trades"],
+            avg_pnl_pct=r["avg_pnl_pct"],
+            win_rate_pct=0,
+            total_pnl_pct=0,
+            stop_loss_share_pct=0,
+        )
+        for r in rows
+    ]
+
+
+def metrics_to_rows(metrics: list[RunMetrics]) -> list[dict]:
+    """Convert RunMetrics to persisted reference row format."""
+    return [
+        {
+            "config_id": m.config_id,
+            "trades": m.trades,
+            "avg_pnl_pct": m.avg_pnl_pct,
+        }
+        for m in metrics
+    ]
+
+
 def cmd_scout(args):
     ipc = FleetIPC(Path(args.config_dir), Path(args.db_path))
     cycles = max(1, int(args.cycles))
@@ -113,18 +140,16 @@ def cmd_expand(args):
         print("[error] run scout first — no data/scout-references.json")
         sys.exit(1)
 
-    refs = [
-        RunMetrics(config_id=r["config_id"], trades=r["trades"],
-                   avg_pnl_pct=r["avg_pnl_pct"], win_rate_pct=0,
-                   total_pnl_pct=0, stop_loss_share_pct=0)
-        for r in json.loads(refs_path.read_text())
-    ]
+    refs = rows_to_metrics(json.loads(refs_path.read_text()))
     cycles = max(1, int(args.cycles))
     total_alive = 0
     for idx in range(cycles):
         print(f"\n[expand] cycle {idx + 1}/{cycles}")
         alive = run_expand(ipc, refs, duration_s=args.duration)
         total_alive += len(alive)
+        refs = rows_to_metrics(
+            merge_scout_references(metrics_to_rows(refs), alive)
+        )
         print(f"[result] cycle {idx + 1}/{cycles}: {len(alive)} expanded configs alive")
 
     print(
@@ -144,12 +169,7 @@ def cmd_forward(args):
         sys.exit(1)
 
     ipc = FleetIPC(Path(args.config_dir), Path(args.db_path))
-    refs = [
-        RunMetrics(config_id=r["config_id"], trades=r["trades"],
-                   avg_pnl_pct=r["avg_pnl_pct"], win_rate_pct=0,
-                   total_pnl_pct=0, stop_loss_share_pct=0)
-        for r in json.loads(refs_path.read_text())
-    ]
+    refs = rows_to_metrics(json.loads(refs_path.read_text()))
     from .expand import expand_around_references
     configs = expand_around_references(refs, ipc.db_path, n_steps=1)
 

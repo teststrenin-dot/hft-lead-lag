@@ -212,7 +212,7 @@ cd /root/turbo/hft-lead-lag
 # terminal B: ray driver
 python3 -m pip install -r ray_driver/requirements.txt
 python3 -m ray_driver scout --duration 600
-python3 -m ray_driver expand --duration 600
+python3 -m ray_driver expand --duration 600 --cycles 1
 python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interval 30
 ```
 

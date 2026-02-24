@@ -142,7 +142,7 @@ python3 -m pip install -r ray_driver/requirements.txt
 
 # 3) ray pipeline
 python3 -m ray_driver scout --duration 600
-python3 -m ray_driver expand --duration 600
+python3 -m ray_driver expand --duration 600 --cycles 1
 python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interval 30
 
 # 4) inspect runs
@@ -226,7 +226,7 @@ PY
 
 ```bash
 cd /root/turbo/hft-lead-lag
-python3 -m ray_driver expand --duration 900
+python3 -m ray_driver expand --duration 900 --cycles 1
 python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interval 30
 ```
 
