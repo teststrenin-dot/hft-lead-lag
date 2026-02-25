@@ -1419,7 +1419,7 @@ struct EventLoopState {
     metrics: EventLoopMetrics,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExchangeSide {
     Binance,
     Gate,
@@ -1430,6 +1430,13 @@ impl ExchangeSide {
         match self {
             Self::Binance => "binance",
             Self::Gate => "gate",
+        }
+    }
+
+    fn from_config_exchange(exchange: hft_lead_lag::config::ExchangeId) -> Self {
+        match exchange {
+            hft_lead_lag::config::ExchangeId::Binance => Self::Binance,
+            hft_lead_lag::config::ExchangeId::Gate => Self::Gate,
         }
     }
 
@@ -1475,6 +1482,57 @@ impl ExchangeSide {
                 health.gate_connected.store(false, Ordering::Relaxed);
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StrategyBookRole {
+    Primary,
+    Hedge,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StrategyExchangeRouting {
+    primary: ExchangeSide,
+    hedge: ExchangeSide,
+}
+
+impl Default for StrategyExchangeRouting {
+    fn default() -> Self {
+        Self {
+            primary: ExchangeSide::Binance,
+            hedge: ExchangeSide::Gate,
+        }
+    }
+}
+
+impl StrategyExchangeRouting {
+    fn role_for_side(self, side: ExchangeSide) -> StrategyBookRole {
+        if side == self.primary {
+            StrategyBookRole::Primary
+        } else {
+            StrategyBookRole::Hedge
+        }
+    }
+}
+
+fn resolve_strategy_exchange_routing(config_manager: &ConfigManager) -> StrategyExchangeRouting {
+    let default = StrategyExchangeRouting::default();
+    let Some(lead_lag_config) = config_manager.lead_lag_config() else {
+        return default;
+    };
+    let routing = StrategyExchangeRouting {
+        primary: ExchangeSide::from_config_exchange(lead_lag_config.primary_exchange),
+        hedge: ExchangeSide::from_config_exchange(lead_lag_config.hedge_exchange),
+    };
+    if routing.primary == routing.hedge {
+        warn!(
+            "lead_lag config primary and hedge exchanges match ({}); falling back to default routing",
+            routing.primary.exchange_name()
+        );
+        default
+    } else {
+        routing
     }
 }
 
@@ -1535,6 +1593,7 @@ impl EventLoopState {
         strategy: &dyn RuntimeStrategy,
         updated_symbols: &[String],
         strategy_symbol_set: &std::collections::HashSet<&str>,
+        strategy_exchange_routing: StrategyExchangeRouting,
     ) {
         let symbols_for_side: Vec<&str> = updated_symbols
             .iter()
@@ -1542,15 +1601,24 @@ impl EventLoopState {
             .filter(|symbol| strategy_symbol_set.contains(*symbol))
             .collect();
 
-        match side {
-            ExchangeSide::Binance => {
-                for ticker in strategy_ticks_in_order(&symbols_for_side, &self.latest_bn) {
-                    strategy.on_primary_book(ticker.clone()).await;
+        let ticks: Vec<_> = match side {
+            ExchangeSide::Binance => strategy_ticks_in_order(&symbols_for_side, &self.latest_bn)
+                .cloned()
+                .collect(),
+            ExchangeSide::Gate => strategy_ticks_in_order(&symbols_for_side, &self.latest_gt)
+                .cloned()
+                .collect(),
+        };
+
+        match strategy_exchange_routing.role_for_side(side) {
+            StrategyBookRole::Primary => {
+                for ticker in ticks {
+                    strategy.on_primary_book(ticker).await;
                 }
             }
-            ExchangeSide::Gate => {
-                for ticker in strategy_ticks_in_order(&symbols_for_side, &self.latest_gt) {
-                    strategy.on_hedge_book(ticker.clone()).await;
+            StrategyBookRole::Hedge => {
+                for ticker in ticks {
+                    strategy.on_hedge_book(ticker).await;
                 }
             }
         }
@@ -1606,6 +1674,7 @@ async fn handle_exchange_tick(
                     context.strategy,
                     &updated_symbols,
                     context.strategy_symbol_set,
+                    context.strategy_exchange_routing,
                 )
                 .await;
         }
@@ -1619,6 +1688,14 @@ async fn handle_exchange_tick(
 struct ExchangeTickContext<'a, 's> {
     strategy: &'a dyn RuntimeStrategy,
     strategy_symbol_set: &'a std::collections::HashSet<&'s str>,
+    strategy_exchange_routing: StrategyExchangeRouting,
+    screener: &'a ScreenerStore,
+    health_state: &'a HealthState,
+    ws_tx: &'a tokio::sync::broadcast::Sender<MarketDataEvent>,
+}
+
+struct EventLoopRuntimeContext<'a> {
+    strategy_exchange_routing: StrategyExchangeRouting,
     screener: &'a ScreenerStore,
     health_state: &'a HealthState,
     ws_tx: &'a tokio::sync::broadcast::Sender<MarketDataEvent>,
@@ -1936,9 +2013,7 @@ async fn run_event_loop(
     gate: &mut GateMarketData,
     strategy: &dyn RuntimeStrategy,
     strategy_symbols: &[String],
-    screener: &ScreenerStore,
-    health_state: &HealthState,
-    ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+    runtime_context: EventLoopRuntimeContext<'_>,
 ) -> ! {
     let mut state = EventLoopState::new();
     let strategy_symbol_set: std::collections::HashSet<&str> =
@@ -1946,9 +2021,10 @@ async fn run_event_loop(
     let tick_context = ExchangeTickContext {
         strategy,
         strategy_symbol_set: &strategy_symbol_set,
-        screener,
-        health_state,
-        ws_tx,
+        strategy_exchange_routing: runtime_context.strategy_exchange_routing,
+        screener: runtime_context.screener,
+        health_state: runtime_context.health_state,
+        ws_tx: runtime_context.ws_tx,
     };
 
     loop {
@@ -2094,6 +2170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
         }
     };
+    let strategy_exchange_routing = resolve_strategy_exchange_routing(&config_manager);
 
     info!(
         "System initialized; strategy={} symbols={}",
@@ -2110,9 +2187,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &mut gate,
         strategy.as_ref(),
         &strategy_symbols,
-        &screener,
-        health_state.as_ref(),
-        &ws_tx,
+        EventLoopRuntimeContext {
+            strategy_exchange_routing,
+            screener: &screener,
+            health_state: health_state.as_ref(),
+            ws_tx: &ws_tx,
+        },
     )
     .await
 }

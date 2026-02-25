@@ -982,3 +982,144 @@ active = "dislocation_reversion"
 
     fs::remove_file(path).expect("cleanup temp config");
 }
+
+#[test]
+fn strategy_exchange_routing_defaults_when_lead_lag_config_missing() {
+    let path = write_temp_config(
+        "strategy-routing-default",
+        r#"
+[binance]
+enabled = true
+blacklist = []
+
+[gate]
+enabled = true
+blacklist = []
+"#,
+    );
+    let manager =
+        ConfigManager::from_file(path.to_str().expect("utf-8 path")).expect("load config");
+
+    let routing = resolve_strategy_exchange_routing(&manager);
+    assert_eq!(routing.primary, ExchangeSide::Binance);
+    assert_eq!(routing.hedge, ExchangeSide::Gate);
+
+    fs::remove_file(path).expect("cleanup temp config");
+}
+
+#[test]
+fn strategy_exchange_routing_respects_swapped_lead_lag_config() {
+    let path = write_temp_config(
+        "strategy-routing-swapped",
+        r#"
+[binance]
+enabled = true
+blacklist = []
+
+[gate]
+enabled = true
+blacklist = []
+
+[lead_lag]
+primary_exchange = "gate"
+hedge_exchange = "binance"
+trigger_spread_bps = 35.0
+max_position_age_ms = 5000
+symbols = ["BTCUSDT"]
+"#,
+    );
+    let manager =
+        ConfigManager::from_file(path.to_str().expect("utf-8 path")).expect("load config");
+
+    let routing = resolve_strategy_exchange_routing(&manager);
+    assert_eq!(routing.primary, ExchangeSide::Gate);
+    assert_eq!(routing.hedge, ExchangeSide::Binance);
+
+    fs::remove_file(path).expect("cleanup temp config");
+}
+
+#[derive(Default)]
+struct RecordingRuntimeStrategy {
+    primary_symbols: std::sync::Mutex<Vec<String>>,
+    hedge_symbols: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeStrategy for RecordingRuntimeStrategy {
+    fn strategy_name(&self) -> &'static str {
+        "recording"
+    }
+
+    async fn on_primary_book(&self, ticker: hft_lead_lag::domain::BookTicker) {
+        self.primary_symbols
+            .lock()
+            .expect("primary lock")
+            .push(String::from_utf8_lossy(&ticker.symbol).to_string());
+    }
+
+    async fn on_hedge_book(&self, ticker: hft_lead_lag::domain::BookTicker) {
+        self.hedge_symbols
+            .lock()
+            .expect("hedge lock")
+            .push(String::from_utf8_lossy(&ticker.symbol).to_string());
+    }
+
+    async fn check_signal(&self, _symbol: &str) -> Option<hft_lead_lag::StrategySignal> {
+        None
+    }
+}
+
+#[tokio::test]
+async fn update_strategy_books_routes_by_configured_exchange_roles() {
+    let mut state = EventLoopState::new();
+    state
+        .latest_bn
+        .insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 100_000_000));
+    state
+        .latest_gt
+        .insert("ETHUSDT".to_string(), test_ticker("ETHUSDT", 100_000_000));
+
+    let strategy = RecordingRuntimeStrategy::default();
+    let strategy_symbol_set: std::collections::HashSet<&str> =
+        ["BTCUSDT", "ETHUSDT"].into_iter().collect();
+    let updated_binance = vec!["BTCUSDT".to_string()];
+    let updated_gate = vec!["ETHUSDT".to_string()];
+
+    state
+        .update_strategy_books(
+            ExchangeSide::Binance,
+            &strategy,
+            &updated_binance,
+            &strategy_symbol_set,
+            StrategyExchangeRouting {
+                primary: ExchangeSide::Gate,
+                hedge: ExchangeSide::Binance,
+            },
+        )
+        .await;
+    state
+        .update_strategy_books(
+            ExchangeSide::Gate,
+            &strategy,
+            &updated_gate,
+            &strategy_symbol_set,
+            StrategyExchangeRouting {
+                primary: ExchangeSide::Gate,
+                hedge: ExchangeSide::Binance,
+            },
+        )
+        .await;
+
+    let primary = strategy
+        .primary_symbols
+        .lock()
+        .expect("primary symbols")
+        .clone();
+    let hedge = strategy
+        .hedge_symbols
+        .lock()
+        .expect("hedge symbols")
+        .clone();
+    assert_eq!(primary, vec!["ETHUSDT".to_string()]);
+    assert_eq!(hedge, vec!["BTCUSDT".to_string()]);
+}
