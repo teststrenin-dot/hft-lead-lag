@@ -210,7 +210,7 @@ struct RuntimeGridGeneration {
     config: RuntimeGridConfig,
     configs: Vec<TraderConfig>,
     signature: u64,
-    modified: SystemTime,
+    modified: FileFingerprint,
 }
 
 // ---------------------------------------------------------------------------
@@ -330,14 +330,140 @@ impl TrialAck {
 struct FileFingerprint {
     modified: SystemTime,
     len: u64,
+    content_hash: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TrialBatchIdentity {
+    run_id: Option<String>,
+    submission_id: Option<String>,
+}
+
+const UNKNOWN_TRIAL_RUN_ID: &str = "unknown";
+
+fn hash_content_deterministic(bytes: &[u8]) -> u64 {
+    // FNV-1a 64-bit hash keeps fingerprinting deterministic and dependency-free.
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn parse_ascii_u128(raw: &str) -> Option<u128> {
+    if raw.is_empty() || !raw.as_bytes().iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    raw.parse::<u128>().ok()
+}
+
+fn queue_submission_id_from_path(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty())
+        .map(|stem| stem.to_string())
+}
+
+fn queue_submission_timestamp(path: &Path) -> Option<u128> {
+    let submission_id = queue_submission_id_from_path(path)?;
+    submission_timestamp_from_id(&submission_id)
+}
+
+fn submission_timestamp_from_id(submission_id: &str) -> Option<u128> {
+    if let Some((run_or_prefix, suffix)) = submission_id.rsplit_once('-') {
+        if !run_or_prefix.trim().is_empty() {
+            if let Some(ts) = parse_ascii_u128(suffix.trim()) {
+                return Some(ts);
+            }
+        }
+    }
+    if let Some((prefix, run_or_suffix)) = submission_id.split_once('-') {
+        if !run_or_suffix.trim().is_empty() {
+            if let Some(ts) = parse_ascii_u128(prefix.trim()) {
+                return Some(ts);
+            }
+        }
+    }
+    parse_ascii_u128(submission_id.trim())
+}
+
+fn run_id_from_submission_id(submission_id: &str) -> Option<String> {
+    if let Some((run_id, suffix)) = submission_id.rsplit_once('-') {
+        let run_id = run_id.trim();
+        if !run_id.is_empty() && parse_ascii_u128(suffix.trim()).is_some() {
+            return Some(run_id.to_string());
+        }
+    }
+    if let Some((prefix, run_id)) = submission_id.split_once('-') {
+        let run_id = run_id.trim();
+        if !run_id.is_empty() && parse_ascii_u128(prefix.trim()).is_some() {
+            return Some(run_id.to_string());
+        }
+    }
+    None
+}
+
+fn extract_trial_batch_identity_from_payload(path: &Path) -> TrialBatchIdentity {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return TrialBatchIdentity::default(),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(json) => json,
+        Err(_) => return TrialBatchIdentity::default(),
+    };
+    let run_id = json
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let submission_id = json
+        .get("submission_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    TrialBatchIdentity {
+        run_id,
+        submission_id,
+    }
+}
+
+fn build_trial_batch_error_ack(path: &Path, is_queue_mode: bool, error: String) -> TrialAck {
+    let mut identity = extract_trial_batch_identity_from_payload(path);
+    if is_queue_mode {
+        if identity.submission_id.is_none() {
+            identity.submission_id = queue_submission_id_from_path(path);
+        }
+        if identity.run_id.is_none() {
+            identity.run_id = identity
+                .submission_id
+                .as_deref()
+                .and_then(run_id_from_submission_id);
+        }
+    }
+    TrialAck::error(
+        identity
+            .run_id
+            .unwrap_or_else(|| UNKNOWN_TRIAL_RUN_ID.to_string()),
+        error,
+        identity.submission_id,
+    )
 }
 
 fn read_file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     let metadata = std::fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
+    let content = std::fs::read(path).ok()?;
     Some(FileFingerprint {
         modified,
         len: metadata.len(),
+        content_hash: hash_content_deterministic(&content),
     })
 }
 
@@ -430,7 +556,17 @@ fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
             files.push(path);
         }
     }
-    files.sort_unstable();
+    files.sort_by(|left, right| {
+        match (
+            queue_submission_timestamp(left),
+            queue_submission_timestamp(right),
+        ) {
+            (Some(left_ts), Some(right_ts)) => left_ts.cmp(&right_ts).then_with(|| left.cmp(right)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.cmp(right),
+        }
+    });
     files
 }
 
@@ -614,9 +750,14 @@ fn load_runtime_grid_generation(path: &Path) -> Result<RuntimeGridGeneration, St
         .map_err(|e| format!("read runtime grid {}: {e}", path.display()))?;
     let config: RuntimeGridConfig = toml::from_str(&content)
         .map_err(|e| format!("parse runtime grid {}: {e}", path.display()))?;
-    let modified = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("runtime grid metadata {}: {e}", path.display()))?;
+    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let modified = FileFingerprint {
+        modified,
+        len: metadata.len(),
+        content_hash: hash_content_deterministic(content.as_bytes()),
+    };
     let configs = if config.enabled {
         build_runtime_grid(&config)?
     } else {
@@ -631,7 +772,9 @@ fn load_runtime_grid_generation(path: &Path) -> Result<RuntimeGridGeneration, St
     })
 }
 
-async fn load_runtime_grid_generation_async(path: PathBuf) -> Result<RuntimeGridGeneration, String> {
+async fn load_runtime_grid_generation_async(
+    path: PathBuf,
+) -> Result<RuntimeGridGeneration, String> {
     tokio::task::spawn_blocking(move || load_runtime_grid_generation(&path))
         .await
         .map_err(|e| format!("runtime-grid task join error: {e}"))?
@@ -820,7 +963,7 @@ fn spawn_runtime_grid_hot_reload(
     config_path: PathBuf,
     trial_batch_path: PathBuf,
     trial_control_path: PathBuf,
-    initial_modified: Option<SystemTime>,
+    initial_modified: Option<FileFingerprint>,
     initial_signature: Option<u64>,
 ) {
     async fn maybe_handle_trial_control(
@@ -899,6 +1042,9 @@ fn spawn_runtime_grid_hot_reload(
             }
             Err(e) => {
                 warn!("trial-batch: {e}");
+                let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
+                let ack = build_trial_batch_error_ack(trial_batch_path, false, e);
+                write_trial_ack(ack_dir, &ack);
                 false
             }
         }
@@ -925,6 +1071,8 @@ fn spawn_runtime_grid_hot_reload(
                     "trial-batch queue: invalid payload {}: {e}",
                     queued_batch_path.display()
                 );
+                let ack = build_trial_batch_error_ack(&queued_batch_path, true, e);
+                write_trial_ack(config_dir, &ack);
                 false
             }
         };
@@ -939,20 +1087,15 @@ fn spawn_runtime_grid_hot_reload(
 
     async fn maybe_refresh_pending_runtime_grid(
         config_path: &Path,
-        last_modified: &mut Option<SystemTime>,
+        last_modified: &mut Option<FileFingerprint>,
         pending: &mut Option<RuntimeGridGeneration>,
     ) {
-        let modified = std::fs::metadata(config_path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        let changed = match *last_modified {
-            Some(prev) => modified > prev,
-            None => true,
-        };
+        let modified = read_file_fingerprint(config_path);
+        let changed = file_fingerprint_changed(*last_modified, modified);
         if !changed {
             return;
         }
-        *last_modified = Some(modified);
+        *last_modified = modified;
         match load_runtime_grid_generation_async(config_path.to_path_buf()).await {
             Ok(generation) => {
                 if generation.config.enabled {
@@ -1046,7 +1189,8 @@ fn spawn_runtime_grid_hot_reload(
                 pending = None;
             }
 
-            maybe_refresh_pending_runtime_grid(&config_path, &mut last_modified, &mut pending).await;
+            maybe_refresh_pending_runtime_grid(&config_path, &mut last_modified, &mut pending)
+                .await;
             maybe_apply_pending_runtime_grid(
                 &screener,
                 &db_path,
@@ -1882,7 +2026,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut screener = ScreenerStore::default();
     let runtime_grid_path = Path::new(RUNTIME_GRID_CONFIG_PATH);
     ensure_runtime_grid_config_file(runtime_grid_path)?;
-    let mut runtime_grid_last_modified: Option<SystemTime> = None;
+    let mut runtime_grid_last_modified: Option<FileFingerprint> = None;
     let mut runtime_grid_last_signature: Option<u64> = None;
     match load_runtime_grid_generation_async(runtime_grid_path.to_path_buf()).await {
         Ok(generation) => {

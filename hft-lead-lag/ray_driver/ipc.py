@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import fcntl
@@ -20,6 +20,15 @@ class TrialAck:
     drained_trades: int
     status: str = "ok"
     error: str | None = None
+    submission_id: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "TrialAck":
+        allowed_fields = {field.name for field in fields(cls)}
+        filtered_payload = {
+            key: value for key, value in payload.items() if key in allowed_fields
+        }
+        return cls(**filtered_payload)
 
 
 @dataclass
@@ -91,21 +100,41 @@ class FleetIPC:
     ) -> TrialAck:
         deadline = time.monotonic() + timeout_s
         target_ack = ack_path or self.ack_path
+        submission_scoped = ack_path is not None
         while time.monotonic() < deadline:
             if target_ack.exists():
                 try:
                     ack = json.loads(target_ack.read_text())
-                    if ack.get("run_id") == run_id:
-                        if ack.get("status") == "error":
+                    if ack.get("run_id") != run_id:
+                        if submission_scoped:
+                            self._consume_ack_file(target_ack)
                             raise RuntimeError(
-                                f"Batch rejected for run_id={run_id}: "
-                                f"{ack.get('error', 'unknown error')}"
+                                f"Ack run_id mismatch for {target_ack.name}: "
+                                f"expected {run_id}, got {ack.get('run_id')!r}"
                             )
-                        return TrialAck(**ack)
-                except (json.JSONDecodeError, KeyError):
+                        continue
+
+                    if ack.get("status") == "error":
+                        self._consume_ack_file(target_ack)
+                        raise RuntimeError(
+                            f"Batch rejected for run_id={run_id}: "
+                            f"{ack.get('error', 'unknown error')}"
+                        )
+
+                    parsed_ack = TrialAck.from_payload(ack)
+                    self._consume_ack_file(target_ack)
+                    return parsed_ack
+                except (json.JSONDecodeError, KeyError, TypeError):
                     pass
             time.sleep(0.5)
         raise TimeoutError(f"No ack for run_id={run_id} within {timeout_s}s")
+
+    @staticmethod
+    def _consume_ack_file(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def query_run_metrics(self, run_id: str) -> list[RunMetrics]:
         """Read per-config metrics for a run from optimizer.db."""
@@ -155,8 +184,13 @@ class FleetIPC:
             conn.close()
 
     def clear_ack(self):
-        """Remove stale ack file."""
+        """Remove stale legacy and queued ack files."""
         self.ack_path.unlink(missing_ok=True)
+        try:
+            for queued_ack in self.ack_queue_dir.glob("*.json"):
+                queued_ack.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def clear_active_run(self, run_id: str | None = None):
         """Request runtime to clear current run_id (best effort)."""

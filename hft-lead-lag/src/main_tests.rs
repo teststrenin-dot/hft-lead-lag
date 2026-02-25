@@ -1,4 +1,3 @@
-
 use super::*;
 use std::fs;
 use std::path::PathBuf;
@@ -84,10 +83,28 @@ fn file_fingerprint_change_detects_same_mtime_different_size() {
     let prev = Some(FileFingerprint {
         modified: ts,
         len: 100,
+        content_hash: 1,
     });
     let current = Some(FileFingerprint {
         modified: ts,
         len: 101,
+        content_hash: 1,
+    });
+    assert!(file_fingerprint_changed(prev, current));
+}
+
+#[test]
+fn file_fingerprint_change_detects_same_size_same_mtime_different_content() {
+    let ts = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+    let prev = Some(FileFingerprint {
+        modified: ts,
+        len: 100,
+        content_hash: 1,
+    });
+    let current = Some(FileFingerprint {
+        modified: ts,
+        len: 100,
+        content_hash: 2,
     });
     assert!(file_fingerprint_changed(prev, current));
 }
@@ -98,21 +115,19 @@ fn file_fingerprint_change_skips_when_fingerprint_same() {
     let prev = Some(FileFingerprint {
         modified: ts,
         len: 100,
+        content_hash: 1,
     });
     let current = Some(FileFingerprint {
         modified: ts,
         len: 100,
+        content_hash: 1,
     });
     assert!(!file_fingerprint_changed(prev, current));
 }
 
 #[test]
 fn trial_ack_failure_serialization_includes_status_and_error() {
-    let ack = TrialAck::error(
-        "run-err".to_string(),
-        "invalid payload".to_string(),
-        None,
-    );
+    let ack = TrialAck::error("run-err".to_string(), "invalid payload".to_string(), None);
     let json = serde_json::to_value(&ack).expect("serialize");
     assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("error"));
     assert_eq!(
@@ -129,13 +144,7 @@ fn write_trial_ack_uses_submission_scoped_ack_file_when_present() {
         EventLoopState::now_ms()
     ));
     fs::create_dir_all(&dir).expect("create temp dir");
-    let ack = TrialAck::success(
-        "run-1".to_string(),
-        1_000,
-        3,
-        0,
-        Some("sub-1".to_string()),
-    );
+    let ack = TrialAck::success("run-1".to_string(), 1_000, 3, 0, Some("sub-1".to_string()));
 
     write_trial_ack(&dir, &ack);
 
@@ -153,8 +162,10 @@ fn list_trial_batch_queue_files_returns_sorted_json_files() {
     ));
     let queue_dir = trial_batch_queue_dir(&dir);
     fs::create_dir_all(&queue_dir).expect("create queue dir");
-    fs::write(queue_dir.join("z.json"), "{}").expect("write z");
-    fs::write(queue_dir.join("a.json"), "{}").expect("write a");
+    fs::write(queue_dir.join("run-z-10.json"), "{}").expect("write run-z");
+    fs::write(queue_dir.join("run-a-20.json"), "{}").expect("write run-a");
+    fs::write(queue_dir.join("zzz.json"), "{}").expect("write zzz");
+    fs::write(queue_dir.join("aaa.json"), "{}").expect("write aaa");
     fs::write(queue_dir.join("ignore.txt"), "{}").expect("write txt");
 
     let files = list_trial_batch_queue_files(&dir);
@@ -163,7 +174,71 @@ fn list_trial_batch_queue_files_returns_sorted_json_files() {
         .filter_map(|path| path.file_name().and_then(|n| n.to_str()))
         .map(ToString::to_string)
         .collect();
-    assert_eq!(names, vec!["a.json".to_string(), "z.json".to_string()]);
+    assert_eq!(
+        names,
+        vec![
+            "run-z-10.json".to_string(),
+            "run-a-20.json".to_string(),
+            "aaa.json".to_string(),
+            "zzz.json".to_string(),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn build_trial_batch_error_ack_uses_payload_identity_when_available() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-batch-ack-id-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let payload_path = dir.join(".trial-batch");
+    fs::write(
+        &payload_path,
+        r#"{"run_id":"run-42","submission_id":"sub-42","configs":[]}"#,
+    )
+    .expect("write payload");
+
+    let ack = build_trial_batch_error_ack(
+        &payload_path,
+        false,
+        "trial batch has no configs".to_string(),
+    );
+
+    assert_eq!(ack.run_id, "run-42".to_string());
+    assert_eq!(ack.submission_id, Some("sub-42".to_string()));
+    assert_eq!(ack.status, "error");
+    assert_eq!(ack.error, Some("trial batch has no configs".to_string()));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn build_trial_batch_error_ack_uses_queue_filename_identity_when_payload_malformed() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-batch-ack-fallback-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    let queue_dir = trial_batch_queue_dir(&dir);
+    fs::create_dir_all(&queue_dir).expect("create queue dir");
+    let payload_path = queue_dir.join("run-x-12345.json");
+    fs::write(&payload_path, "{").expect("write malformed payload");
+
+    let ack = build_trial_batch_error_ack(&payload_path, true, "parse error".to_string());
+
+    assert_eq!(ack.run_id, "run-x".to_string());
+    assert_eq!(ack.submission_id, Some("run-x-12345".to_string()));
+    assert_eq!(ack.status, "error");
+
+    let weird_path = queue_dir.join("???bad-name???.json");
+    fs::write(&weird_path, "{").expect("write malformed payload");
+    let weird_ack = build_trial_batch_error_ack(&weird_path, true, "parse error".to_string());
+    assert_eq!(weird_ack.run_id, "unknown".to_string());
+    assert_eq!(weird_ack.submission_id, Some("???bad-name???".to_string()));
 
     let _ = fs::remove_dir_all(dir);
 }

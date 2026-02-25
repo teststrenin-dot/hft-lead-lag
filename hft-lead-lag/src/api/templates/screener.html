@@ -58,6 +58,9 @@
       <tr>
         <th data-key="symbol" onclick="sortBy('symbol')">Coin</th>
         <th data-key="leader_exchange" onclick="sortBy('leader_exchange')">Leader</th>
+        <th data-key="data_source" onclick="sortBy('data_source')">Source</th>
+        <th data-key="is_fallback" onclick="sortBy('is_fallback')">Fallback</th>
+        <th class="num" data-key="last_update_ms" onclick="sortBy('last_update_ms')">Fresh ms</th>
         <th class="num" data-key="lag_ms" onclick="sortBy('lag_ms')">Lag</th>
         <th class="num" data-key="ws_drift_ingress_binance_ms" onclick="sortBy('ws_drift_ingress_binance_ms')">Drift BN</th>
         <th class="num" data-key="ws_drift_ingress_gate_ms" onclick="sortBy('ws_drift_ingress_gate_ms')">Drift GT</th>
@@ -91,6 +94,7 @@
   function sortRows(rows) {
     return rows.sort((a, b) => {
       let va = a[sortKey], vb = b[sortKey];
+      if (typeof va === 'boolean') { va = va ? 1 : 0; vb = vb ? 1 : 0; }
       if (typeof va === 'string') { const c = va.localeCompare(vb); return sortAsc ? c : -c; }
       return sortAsc ? va - vb : vb - va;
     });
@@ -108,6 +112,9 @@
         <tr class="${r.symbol===selectedSym?'active':''}" onclick="selectSym('${r.symbol}')">
           <td><b>${r.symbol}</b></td>
           <td>${r.leader_exchange}</td>
+          <td>${r.data_source || 'unknown'}</td>
+          <td>${r.is_fallback ? 'yes' : 'no'}</td>
+          <td class="num">${Math.max(0, Date.now() - Number(r.last_update_ms || 0)).toFixed(0)}</td>
           <td class="num">${Number(r.lag_ms).toFixed(0)}</td>
           <td class="num">${Number(r.ws_drift_ingress_binance_ms).toFixed(0)}</td>
           <td class="num">${Number(r.ws_drift_ingress_gate_ms).toFixed(0)}</td>
