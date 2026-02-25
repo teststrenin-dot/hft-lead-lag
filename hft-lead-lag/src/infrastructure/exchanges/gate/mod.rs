@@ -5,6 +5,7 @@
 
 use bytes::Bytes;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
@@ -41,6 +42,32 @@ fn resolve_msg_channel_capacity(raw: Option<&str>) -> usize {
 fn configured_msg_channel_capacity() -> usize {
     let raw = std::env::var(MSG_CHANNEL_CAPACITY_ENV).ok();
     resolve_msg_channel_capacity(raw.as_deref())
+}
+
+fn record_subscription(subs: &Arc<Mutex<Vec<String>>>, text: &str) {
+    if !text.contains("subscribe") {
+        return;
+    }
+    let mut guard = match subs.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("Gate subscription registry lock poisoned; recovering");
+            poisoned.into_inner()
+        }
+    };
+    if !guard.iter().any(|msg| msg == text) {
+        guard.push(text.to_string());
+    }
+}
+
+fn snapshot_subscriptions(subs: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    match subs.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => {
+            warn!("Gate subscription registry lock poisoned during snapshot; recovering");
+            poisoned.into_inner().clone()
+        }
+    }
 }
 
 /// Gate.io Futures market data connector
@@ -322,9 +349,7 @@ impl MarketDataStream for GateMarketData {
                             match msg {
                                 Some(msg) => {
                                     if let Message::Text(ref text) = msg {
-                                        if text.contains("subscribe") {
-                                            subs.lock().unwrap().push(text.clone());
-                                        }
+                                        record_subscription(&subs, text);
                                     }
                                     if write.send(msg).await.is_err() {
                                         error!("Gate.io WebSocket write error");
@@ -370,7 +395,7 @@ impl MarketDataStream for GateMarketData {
                 }
 
                 // Replay subscriptions on the new write half
-                let sub_msgs = subs.lock().unwrap().clone();
+                let sub_msgs = snapshot_subscriptions(&subs);
                 info!(
                     "Gate.io WS reconnected, replaying {} subscriptions",
                     sub_msgs.len()
@@ -621,6 +646,7 @@ impl GateMarketData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_build_auth_payload() {
@@ -697,5 +723,27 @@ mod tests {
             MIN_MSG_CHANNEL_CAPACITY
         );
         assert_eq!(resolve_msg_channel_capacity(Some("25000")), 25_000);
+    }
+
+    #[test]
+    fn subscription_registry_deduplicates_subscribe_messages() {
+        let subs = Arc::new(Mutex::new(Vec::new()));
+        let subscribe =
+            r#"{"event":"subscribe","channel":"futures.book_ticker","payload":["BTC_USDT"]}"#;
+
+        record_subscription(&subs, subscribe);
+        record_subscription(&subs, subscribe);
+
+        assert_eq!(snapshot_subscriptions(&subs).len(), 1);
+    }
+
+    #[test]
+    fn subscription_registry_ignores_non_subscribe_messages() {
+        let subs = Arc::new(Mutex::new(Vec::new()));
+        let non_subscribe = r#"{"event":"pong"}"#;
+
+        record_subscription(&subs, non_subscribe);
+
+        assert!(snapshot_subscriptions(&subs).is_empty());
     }
 }

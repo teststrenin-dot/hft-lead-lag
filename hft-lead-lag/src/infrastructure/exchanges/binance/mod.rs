@@ -41,6 +41,32 @@ fn configured_msg_channel_capacity() -> usize {
     resolve_msg_channel_capacity(raw.as_deref())
 }
 
+fn record_subscription(subs: &Arc<Mutex<Vec<String>>>, text: &str) {
+    if !text.contains("SUBSCRIBE") {
+        return;
+    }
+    let mut guard = match subs.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("Binance subscription registry lock poisoned; recovering");
+            poisoned.into_inner()
+        }
+    };
+    if !guard.iter().any(|msg| msg == text) {
+        guard.push(text.to_string());
+    }
+}
+
+fn snapshot_subscriptions(subs: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    match subs.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => {
+            warn!("Binance subscription registry lock poisoned during snapshot; recovering");
+            poisoned.into_inner().clone()
+        }
+    }
+}
+
 pub struct BinanceMarketData {
     /// WebSocket sender channels (2 symbols per socket in batch mode)
     ws_txs: Vec<mpsc::UnboundedSender<Message>>,
@@ -245,9 +271,7 @@ impl BinanceMarketData {
                             match msg {
                                 Some(msg) => {
                                     if let Message::Text(ref text) = msg {
-                                        if text.contains("SUBSCRIBE") {
-                                            subs.lock().unwrap().push(text.clone());
-                                        }
+                                        record_subscription(&subs, text);
                                     }
                                     if write.send(msg).await.is_err() {
                                         error!("Binance WS write error - connection lost");
@@ -287,7 +311,7 @@ impl BinanceMarketData {
                 write = new_write;
 
                 // Replay subscriptions on the new write half
-                let sub_msgs = subs.lock().unwrap().clone();
+                let sub_msgs = snapshot_subscriptions(&subs);
                 info!(
                     "Binance WS reconnected, replaying {} subscriptions",
                     sub_msgs.len()
@@ -491,6 +515,7 @@ impl MarketDataStream for BinanceMarketData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn parse_agg_trade_bool_and_id() {
@@ -544,5 +569,26 @@ mod tests {
             MIN_MSG_CHANNEL_CAPACITY
         );
         assert_eq!(resolve_msg_channel_capacity(Some("25000")), 25_000);
+    }
+
+    #[test]
+    fn subscription_registry_deduplicates_subscribe_messages() {
+        let subs = Arc::new(Mutex::new(Vec::new()));
+        let subscribe = r#"{"method":"SUBSCRIBE","params":["btcusdt@bookTicker"],"id":1}"#;
+
+        record_subscription(&subs, subscribe);
+        record_subscription(&subs, subscribe);
+
+        assert_eq!(snapshot_subscriptions(&subs).len(), 1);
+    }
+
+    #[test]
+    fn subscription_registry_ignores_non_subscribe_messages() {
+        let subs = Arc::new(Mutex::new(Vec::new()));
+        let non_subscribe = r#"{"method":"PING"}"#;
+
+        record_subscription(&subs, non_subscribe);
+
+        assert!(snapshot_subscriptions(&subs).is_empty());
     }
 }

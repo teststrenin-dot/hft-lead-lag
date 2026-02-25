@@ -7,14 +7,14 @@ use hft_lead_lag::api::{
     HealthState, HttpServer, HttpServerConfig, MarketDataEvent, MarketDataServer, ScreenerStore,
     WsServerConfig,
 };
+use hft_lead_lag::domain::screener::fleet_patch::{FleetPatchMode, FleetPatchPlan};
+use hft_lead_lag::domain::screener::TraderConfig;
 use hft_lead_lag::infrastructure::logging::init_centralized_logging;
 use hft_lead_lag::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 use hft_lead_lag::{
     build_runtime_strategy, BinanceMarketData, ConfigManager, GateMarketData, MarketDataStream,
     RuntimeStrategy,
 };
-use hft_lead_lag::domain::screener::fleet_patch::{FleetPatchMode, FleetPatchPlan};
-use hft_lead_lag::domain::screener::TraderConfig;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -245,10 +245,11 @@ impl TrialBatchMode {
         } else if raw.eq_ignore_ascii_case("incremental") {
             Ok(Self::Incremental)
         } else {
-            Err(format!("trial batch mode must be full_replace|incremental, got {raw}"))
+            Err(format!(
+                "trial batch mode must be full_replace|incremental, got {raw}"
+            ))
         }
     }
-
 }
 
 impl TrialBatch {
@@ -270,6 +271,63 @@ struct TrialAck {
     applied_at_ms: i64,
     config_count: usize,
     drained_trades: usize,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl TrialAck {
+    fn success(
+        run_id: String,
+        applied_at_ms: i64,
+        config_count: usize,
+        drained_trades: usize,
+    ) -> Self {
+        Self {
+            run_id,
+            applied_at_ms,
+            config_count,
+            drained_trades,
+            status: "ok".to_string(),
+            error: None,
+        }
+    }
+
+    fn error(run_id: String, error: String) -> Self {
+        Self {
+            run_id,
+            applied_at_ms: EventLoopState::now_ms(),
+            config_count: 0,
+            drained_trades: 0,
+            status: "error".to_string(),
+            error: Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileFingerprint {
+    modified: SystemTime,
+    len: u64,
+}
+
+fn read_file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    Some(FileFingerprint {
+        modified,
+        len: metadata.len(),
+    })
+}
+
+fn file_fingerprint_changed(
+    previous: Option<FileFingerprint>,
+    current: Option<FileFingerprint>,
+) -> bool {
+    match current {
+        Some(current) => previous != Some(current),
+        None => false,
+    }
 }
 
 fn load_trial_batch(path: &Path) -> Result<TrialBatch, String> {
@@ -561,155 +619,151 @@ fn spawn_runtime_grid_hot_reload(
         let mut last_applied_signature = initial_signature;
         let mut pending: Option<RuntimeGridGeneration> = None;
         let mut last_apply_ms = EventLoopState::now_ms();
-        let mut last_trial_modified: Option<SystemTime> = None;
-        let mut last_trial_control_modified: Option<SystemTime> = None;
+        let mut last_trial_modified: Option<FileFingerprint> = None;
+        let mut last_trial_control_modified: Option<FileFingerprint> = None;
 
         loop {
             // --- Trial control: clear current run_id ---
-            let trial_control_modified = std::fs::metadata(&trial_control_path)
-                .and_then(|m| m.modified())
-                .ok();
-            if let Some(mod_time) = trial_control_modified {
-                let control_changed =
-                    last_trial_control_modified.map_or(true, |prev| mod_time > prev);
-                if control_changed {
-                    last_trial_control_modified = Some(mod_time);
-                    match load_trial_control(&trial_control_path) {
-                        Ok(control) => {
-                            if control.clear_run_id {
-                                let active_run_id = screener.current_run_id();
-                                match active_run_id {
-                                    Some(active) => {
-                                        let request_matches = control
-                                            .run_id
-                                            .as_ref()
-                                            .map_or(true, |requested| requested == &active);
-                                        if request_matches {
-                                            let closed_at_ms = EventLoopState::now_ms();
-                                            if let Err(e) =
-                                                close_trial_run_meta(&db_path, &active, closed_at_ms)
-                                            {
-                                                warn!("trial-control: failed to close run {active}: {e}");
-                                            }
-                                            screener.set_run_id(None);
-                                            info!(
-                                                "trial-control: cleared run_id={active} closed_at_ms={closed_at_ms}"
-                                            );
-                                        } else if let Some(requested) = control.run_id {
+            let trial_control_modified = read_file_fingerprint(&trial_control_path);
+            let control_changed =
+                file_fingerprint_changed(last_trial_control_modified, trial_control_modified);
+            if control_changed {
+                last_trial_control_modified = trial_control_modified;
+                match load_trial_control(&trial_control_path) {
+                    Ok(control) => {
+                        if control.clear_run_id {
+                            let active_run_id = screener.current_run_id();
+                            match active_run_id {
+                                Some(active) => {
+                                    let request_matches = control
+                                        .run_id
+                                        .as_ref()
+                                        .map_or(true, |requested| requested == &active);
+                                    if request_matches {
+                                        let closed_at_ms = EventLoopState::now_ms();
+                                        if let Err(e) =
+                                            close_trial_run_meta(&db_path, &active, closed_at_ms)
+                                        {
                                             warn!(
-                                                "trial-control: requested run_id={} does not match active run_id={}",
-                                                requested, active
+                                                "trial-control: failed to close run {active}: {e}"
                                             );
                                         }
+                                        screener.set_run_id(None);
+                                        info!(
+                                            "trial-control: cleared run_id={active} closed_at_ms={closed_at_ms}"
+                                        );
+                                    } else if let Some(requested) = control.run_id {
+                                        warn!(
+                                            "trial-control: requested run_id={} does not match active run_id={}",
+                                            requested, active
+                                        );
                                     }
-                                    None => info!("trial-control: no active run_id to clear"),
                                 }
+                                None => info!("trial-control: no active run_id to clear"),
                             }
                         }
-                        Err(e) => warn!("trial-control: {e}"),
                     }
+                    Err(e) => warn!("trial-control: {e}"),
                 }
             }
             // --- End trial control ---
 
             // --- Trial batch: immediate apply, no debounce ---
-            let trial_modified = std::fs::metadata(&trial_batch_path)
-                .and_then(|m| m.modified())
-                .ok();
-            if let Some(mod_time) = trial_modified {
-                let trial_changed = last_trial_modified.map_or(true, |prev| mod_time > prev);
-                if trial_changed {
-                    last_trial_modified = Some(mod_time);
-                    match load_trial_batch(&trial_batch_path) {
-                        Ok(batch) => {
-                            let run_id = batch.run_id.clone();
-                            let config_count = batch.configs.len();
-                            let patch_plan = match build_trial_batch_patch_plan(&batch) {
-                                Ok(plan) => plan,
-                                Err(e) => {
-                                    warn!("trial-batch: invalid payload: {e}");
-                                    continue;
-                                }
-                            };
-                            let mode = patch_plan.mode;
-                            if let Err(e) = upsert_runtime_configs(&db_path, &batch.configs) {
-                                warn!("trial-batch: db upsert failed: {e}");
-                            } else {
-                                let report =
-                                    match screener.try_apply_fleet_patch(batch.configs, patch_plan) {
-                                        Ok(report) => report,
-                                        Err(e) => {
-                                            warn!("trial-batch: patch rejected: {e}");
-                                            continue;
-                                        }
-                                    };
-                                let applied_at_ms = EventLoopState::now_ms();
-                                let previous_run_id = screener.current_run_id();
-                                if let Some(previous_run_id) = previous_run_id.as_ref() {
-                                    if previous_run_id != &run_id {
-                                        if let Err(e) =
-                                            close_trial_run_meta(&db_path, previous_run_id, applied_at_ms)
-                                        {
-                                            warn!(
-                                                "trial-batch: failed to close previous run_id={previous_run_id}: {e}"
-                                            );
-                                        }
-                                    }
-                                }
-                                screener.set_run_id(Some(run_id.clone()));
-                                screener.flush_db_writer().await;
-                                if let Err(e) = upsert_trial_run_meta(
-                                    &db_path,
-                                    &run_id,
-                                    config_count,
-                                    applied_at_ms,
-                                    report.drained_trades,
-                                ) {
-                                    warn!("trial-batch: meta upsert failed: {e}");
-                                }
-                                info!(
-                                    "trial-batch: applied run_id={run_id} mode={} configs={config_count} \
-                                     symbols_reset={} drained_trades={} \
-                                     changed_ids_requested={} matched_old={} matched_new={} unmatched_changed_ids={} \
-                                     scope_symbols={}/{}",
-                                    mode.as_str(),
-                                    report.symbols_reset,
-                                    report.drained_trades,
-                                    report.changed_ids_requested,
-                                    report.matched_changed_ids_old,
-                                    report.matched_changed_ids_new,
-                                    report.unmatched_changed_ids,
-                                    report.scope_symbols_matched,
-                                    report.scope_symbols_requested
-                                );
-                                if report.unmatched_changed_ids > 0 {
-                                    warn!(
-                                        "trial-batch: changed_config_ids include {} unknown ids (run_id={run_id})",
-                                        report.unmatched_changed_ids
-                                    );
-                                }
-                                if report.scope_symbols_requested > 0
-                                    && report.scope_symbols_matched == 0
+            let trial_modified = read_file_fingerprint(&trial_batch_path);
+            let trial_changed = file_fingerprint_changed(last_trial_modified, trial_modified);
+            if trial_changed {
+                last_trial_modified = trial_modified;
+                match load_trial_batch(&trial_batch_path) {
+                    Ok(batch) => {
+                        let run_id = batch.run_id.clone();
+                        let config_count = batch.configs.len();
+                        let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
+                        let patch_plan = match build_trial_batch_patch_plan(&batch) {
+                            Ok(plan) => plan,
+                            Err(e) => {
+                                warn!("trial-batch: invalid payload: {e}");
+                                write_trial_ack(ack_dir, &TrialAck::error(run_id, e));
+                                continue;
+                            }
+                        };
+                        let mode = patch_plan.mode;
+                        if let Err(e) = upsert_runtime_configs(&db_path, &batch.configs) {
+                            warn!("trial-batch: db upsert failed: {e}");
+                            write_trial_ack(ack_dir, &TrialAck::error(run_id, e));
+                            continue;
+                        }
+                        let report = match screener.try_apply_fleet_patch(batch.configs, patch_plan)
+                        {
+                            Ok(report) => report,
+                            Err(e) => {
+                                warn!("trial-batch: patch rejected: {e}");
+                                write_trial_ack(ack_dir, &TrialAck::error(run_id, e.to_string()));
+                                continue;
+                            }
+                        };
+                        let applied_at_ms = EventLoopState::now_ms();
+                        let previous_run_id = screener.current_run_id();
+                        if let Some(previous_run_id) = previous_run_id.as_ref() {
+                            if previous_run_id != &run_id {
+                                if let Err(e) =
+                                    close_trial_run_meta(&db_path, previous_run_id, applied_at_ms)
                                 {
                                     warn!(
-                                        "trial-batch: symbol scope matched nothing run_id={run_id} requested_scope_symbols={}",
-                                        report.scope_symbols_requested
+                                        "trial-batch: failed to close previous run_id={previous_run_id}: {e}"
                                     );
                                 }
-                                write_trial_ack(
-                                    trial_batch_path.parent().unwrap_or(Path::new(".")),
-                                    &TrialAck {
-                                        run_id,
-                                        applied_at_ms,
-                                        config_count,
-                                        drained_trades: report.drained_trades,
-                                    },
-                                );
-                                pending = None;
                             }
                         }
-                        Err(e) => warn!("trial-batch: {e}"),
+                        screener.set_run_id(Some(run_id.clone()));
+                        screener.flush_db_writer().await;
+                        if let Err(e) = upsert_trial_run_meta(
+                            &db_path,
+                            &run_id,
+                            config_count,
+                            applied_at_ms,
+                            report.drained_trades,
+                        ) {
+                            warn!("trial-batch: meta upsert failed: {e}");
+                        }
+                        info!(
+                            "trial-batch: applied run_id={run_id} mode={} configs={config_count} \
+                             symbols_reset={} drained_trades={} \
+                             changed_ids_requested={} matched_old={} matched_new={} unmatched_changed_ids={} \
+                             scope_symbols={}/{}",
+                            mode.as_str(),
+                            report.symbols_reset,
+                            report.drained_trades,
+                            report.changed_ids_requested,
+                            report.matched_changed_ids_old,
+                            report.matched_changed_ids_new,
+                            report.unmatched_changed_ids,
+                            report.scope_symbols_matched,
+                            report.scope_symbols_requested
+                        );
+                        if report.unmatched_changed_ids > 0 {
+                            warn!(
+                                "trial-batch: changed_config_ids include {} unknown ids (run_id={run_id})",
+                                report.unmatched_changed_ids
+                            );
+                        }
+                        if report.scope_symbols_requested > 0 && report.scope_symbols_matched == 0 {
+                            warn!(
+                                "trial-batch: symbol scope matched nothing run_id={run_id} requested_scope_symbols={}",
+                                report.scope_symbols_requested
+                            );
+                        }
+                        write_trial_ack(
+                            ack_dir,
+                            &TrialAck::success(
+                                run_id,
+                                applied_at_ms,
+                                config_count,
+                                report.drained_trades,
+                            ),
+                        );
+                        pending = None;
                     }
+                    Err(e) => warn!("trial-batch: {e}"),
                 }
             }
             // --- End trial batch ---

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .bounds import AXES, FIXED_DEFAULTS
 from .ipc import FleetIPC, RunMetrics
+from .run_id import generate_run_id
 
 
 def _config_from_db(db_path: Path, config_id: int) -> dict | None:
@@ -78,7 +79,7 @@ def run_expand(
         stride = len(configs) / max_configs
         configs = [configs[int(i * stride)] for i in range(max_configs)]
 
-    run_id = f"expand-{int(time.time())}"
+    run_id = generate_run_id("expand")
     print(f"[expand] submitting {len(configs)} configs, run_id={run_id}")
     ipc.clear_ack()
     ack = ipc.submit_batch(run_id, configs)

@@ -3,12 +3,12 @@
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
 from .ipc import FleetIPC, RunMetrics
 from .scout import run_scout
 from .expand import run_expand
+from .run_id import generate_run_id
 
 
 def load_scout_references(path: Path) -> list[dict]:
@@ -188,7 +188,7 @@ def cmd_forward(args):
         FleetTrial,
         config={
             "configs": configs,
-            "run_id": f"forward-{int(time.time())}",
+            "run_id": generate_run_id("forward"),
             "report_interval_s": args.report_interval,
         },
         scheduler=scheduler,

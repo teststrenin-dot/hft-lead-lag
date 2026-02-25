@@ -6,6 +6,7 @@ import time
 
 from .bounds import AXES, FIXED_DEFAULTS
 from .ipc import FleetIPC, RunMetrics
+from .run_id import generate_run_id
 
 MAX_SCOUT_CONFIGS = 5000
 
@@ -54,7 +55,7 @@ def run_scout(
 ) -> tuple[str, list[RunMetrics]]:
     """Submit scout grid, wait, return configs that produced trades."""
     configs = generate_scout_configs()
-    run_id = f"scout-{int(time.time())}"
+    run_id = generate_run_id("scout")
 
     print(f"[scout] submitting {len(configs)} configs, run_id={run_id}")
     ipc.clear_ack()

@@ -16,6 +16,8 @@ class TrialAck:
     applied_at_ms: int
     config_count: int
     drained_trades: int
+    status: str = "ok"
+    error: str | None = None
 
 
 @dataclass
@@ -77,6 +79,11 @@ class FleetIPC:
                 try:
                     ack = json.loads(self.ack_path.read_text())
                     if ack.get("run_id") == run_id:
+                        if ack.get("status") == "error":
+                            raise RuntimeError(
+                                f"Batch rejected for run_id={run_id}: "
+                                f"{ack.get('error', 'unknown error')}"
+                            )
                         return TrialAck(**ack)
                 except (json.JSONDecodeError, KeyError):
                     pass
