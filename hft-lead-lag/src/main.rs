@@ -8,7 +8,7 @@ use hft_lead_lag::api::{
     WsServerConfig,
 };
 use hft_lead_lag::domain::screener::fleet_patch::{FleetPatchMode, FleetPatchPlan};
-use hft_lead_lag::domain::screener::TraderConfig;
+use hft_lead_lag::domain::screener::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
 use hft_lead_lag::infrastructure::logging::init_centralized_logging;
 use hft_lead_lag::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 use hft_lead_lag::{
@@ -227,6 +227,10 @@ struct TrialBatch {
     changed_config_ids: Option<Vec<u64>>,
     #[serde(default)]
     symbols: Option<Vec<String>>,
+    #[serde(default)]
+    config_id_contract_version: Option<u16>,
+    #[serde(default)]
+    submission_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +260,18 @@ impl TrialBatch {
     fn parse_mode_strict(&self) -> Result<TrialBatchMode, String> {
         TrialBatchMode::from_strict(self.mode.as_deref())
     }
+
+    fn validate_contract_version(&self) -> Result<(), String> {
+        let requested = self
+            .config_id_contract_version
+            .unwrap_or(CONFIG_ID_CONTRACT_VERSION);
+        if requested != CONFIG_ID_CONTRACT_VERSION {
+            return Err(format!(
+                "config_id contract version mismatch: got {requested}, expected {CONFIG_ID_CONTRACT_VERSION}"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -274,6 +290,8 @@ struct TrialAck {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submission_id: Option<String>,
 }
 
 impl TrialAck {
@@ -282,6 +300,7 @@ impl TrialAck {
         applied_at_ms: i64,
         config_count: usize,
         drained_trades: usize,
+        submission_id: Option<String>,
     ) -> Self {
         Self {
             run_id,
@@ -290,10 +309,11 @@ impl TrialAck {
             drained_trades,
             status: "ok".to_string(),
             error: None,
+            submission_id,
         }
     }
 
-    fn error(run_id: String, error: String) -> Self {
+    fn error(run_id: String, error: String, submission_id: Option<String>) -> Self {
         Self {
             run_id,
             applied_at_ms: EventLoopState::now_ms(),
@@ -301,6 +321,7 @@ impl TrialAck {
             drained_trades: 0,
             status: "error".to_string(),
             error: Some(error),
+            submission_id,
         }
     }
 }
@@ -345,6 +366,7 @@ fn load_trial_batch(path: &Path) -> Result<TrialBatch, String> {
 }
 
 fn build_trial_batch_patch_plan(batch: &TrialBatch) -> Result<FleetPatchPlan, String> {
+    batch.validate_contract_version()?;
     let mode = batch.parse_mode_strict()?;
     match mode {
         TrialBatchMode::FullReplace => Ok(FleetPatchPlan::new(
@@ -383,8 +405,48 @@ fn load_trial_control(path: &Path) -> Result<TrialControl, String> {
         .map_err(|e| format!("parse trial control {}: {e}", path.display()))
 }
 
+fn trial_batch_queue_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("trial-batches")
+}
+
+fn trial_ack_queue_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("trial-acks")
+}
+
+fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
+    let queue_dir = trial_batch_queue_dir(config_dir);
+    let mut files = Vec::new();
+    let entries = match std::fs::read_dir(queue_dir) {
+        Ok(entries) => entries,
+        Err(_) => return files,
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        {
+            files.push(path);
+        }
+    }
+    files.sort_unstable();
+    files
+}
+
 fn write_trial_ack(dir: &Path, ack: &TrialAck) {
-    let path = dir.join(".trial-ack");
+    let path = if let Some(submission_id) = ack.submission_id.as_deref() {
+        let ack_dir = trial_ack_queue_dir(dir);
+        if let Err(e) = std::fs::create_dir_all(&ack_dir) {
+            warn!(
+                "trial-ack: failed to create queue dir {}: {e}",
+                ack_dir.display()
+            );
+        }
+        ack_dir.join(format!("{submission_id}.json"))
+    } else {
+        dir.join(".trial-ack")
+    };
     match serde_json::to_string_pretty(ack) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&path, json) {
@@ -569,6 +631,12 @@ fn load_runtime_grid_generation(path: &Path) -> Result<RuntimeGridGeneration, St
     })
 }
 
+async fn load_runtime_grid_generation_async(path: PathBuf) -> Result<RuntimeGridGeneration, String> {
+    tokio::task::spawn_blocking(move || load_runtime_grid_generation(&path))
+        .await
+        .map_err(|e| format!("runtime-grid task join error: {e}"))?
+}
+
 fn upsert_runtime_configs(db_path: &Path, configs: &[TraderConfig]) -> Result<(), String> {
     let conn = hft_lead_lag::infrastructure::db::open_db(db_path)
         .map_err(|e| format!("open db {}: {e}", db_path.display()))?;
@@ -577,12 +645,22 @@ fn upsert_runtime_configs(db_path: &Path, configs: &[TraderConfig]) -> Result<()
     Ok(())
 }
 
+async fn upsert_runtime_configs_async(
+    db_path: PathBuf,
+    configs: Vec<TraderConfig>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || upsert_runtime_configs(&db_path, &configs))
+        .await
+        .map_err(|e| format!("runtime-config upsert task join error: {e}"))?
+}
+
 fn upsert_trial_run_meta(
     db_path: &Path,
     run_id: &str,
     submitted_config_count: usize,
     applied_at_ms: i64,
     drained_trades: usize,
+    patch: hft_lead_lag::infrastructure::db::TrialPatchMeta<'_>,
 ) -> Result<(), String> {
     let conn = hft_lead_lag::infrastructure::db::open_db(db_path)
         .map_err(|e| format!("open db {}: {e}", db_path.display()))?;
@@ -592,9 +670,32 @@ fn upsert_trial_run_meta(
         submitted_config_count,
         applied_at_ms,
         drained_trades,
+        patch,
     )
     .map_err(|e| format!("upsert trial run meta: {e}"))?;
     Ok(())
+}
+
+async fn upsert_trial_run_meta_async(
+    db_path: PathBuf,
+    run_id: String,
+    submitted_config_count: usize,
+    applied_at_ms: i64,
+    drained_trades: usize,
+    patch: hft_lead_lag::infrastructure::db::TrialPatchMeta<'static>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        upsert_trial_run_meta(
+            &db_path,
+            &run_id,
+            submitted_config_count,
+            applied_at_ms,
+            drained_trades,
+            patch,
+        )
+    })
+    .await
+    .map_err(|e| format!("trial-run meta upsert task join error: {e}"))?
 }
 
 fn close_trial_run_meta(db_path: &Path, run_id: &str, closed_at_ms: i64) -> Result<(), String> {
@@ -603,6 +704,114 @@ fn close_trial_run_meta(db_path: &Path, run_id: &str, closed_at_ms: i64) -> Resu
     hft_lead_lag::infrastructure::db::close_trial_run_meta(&conn, run_id, closed_at_ms)
         .map_err(|e| format!("close trial run meta: {e}"))?;
     Ok(())
+}
+
+async fn close_trial_run_meta_async(
+    db_path: PathBuf,
+    run_id: String,
+    closed_at_ms: i64,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || close_trial_run_meta(&db_path, &run_id, closed_at_ms))
+        .await
+        .map_err(|e| format!("trial-run close task join error: {e}"))?
+}
+
+async fn apply_trial_batch(
+    screener: &ScreenerStore,
+    db_path: PathBuf,
+    batch: TrialBatch,
+) -> TrialAck {
+    let run_id = batch.run_id.clone();
+    let submission_id = batch.submission_id.clone();
+    let config_count = batch.configs.len();
+    let patch_plan = match build_trial_batch_patch_plan(&batch) {
+        Ok(plan) => plan,
+        Err(e) => {
+            warn!("trial-batch: invalid payload: {e}");
+            return TrialAck::error(run_id, e, submission_id);
+        }
+    };
+    let mode = patch_plan.mode;
+    if let Err(e) = upsert_runtime_configs_async(db_path.clone(), batch.configs.clone()).await {
+        warn!("trial-batch: db upsert failed: {e}");
+        return TrialAck::error(run_id, e, submission_id);
+    }
+    let report = match screener.try_apply_fleet_patch(batch.configs, patch_plan) {
+        Ok(report) => report,
+        Err(e) => {
+            warn!("trial-batch: patch rejected: {e}");
+            return TrialAck::error(run_id, e.to_string(), submission_id);
+        }
+    };
+    let applied_at_ms = EventLoopState::now_ms();
+    let previous_run_id = screener.current_run_id();
+    if let Some(previous_run_id) = previous_run_id.as_ref() {
+        if previous_run_id != &run_id {
+            if let Err(e) =
+                close_trial_run_meta_async(db_path.clone(), previous_run_id.clone(), applied_at_ms)
+                    .await
+            {
+                warn!("trial-batch: failed to close previous run_id={previous_run_id}: {e}");
+            }
+        }
+    }
+    screener.set_run_id(Some(run_id.clone()));
+    screener.flush_db_writer().await;
+    if let Err(e) = upsert_trial_run_meta_async(
+        db_path,
+        run_id.clone(),
+        config_count,
+        applied_at_ms,
+        report.drained_trades,
+        hft_lead_lag::infrastructure::db::TrialPatchMeta {
+            apply_mode: mode.as_str(),
+            symbols_reset: report.symbols_reset,
+            changed_ids_requested: report.changed_ids_requested,
+            matched_changed_ids_old: report.matched_changed_ids_old,
+            matched_changed_ids_new: report.matched_changed_ids_new,
+            unmatched_changed_ids: report.unmatched_changed_ids,
+            scope_symbols_requested: report.scope_symbols_requested,
+            scope_symbols_matched: report.scope_symbols_matched,
+        },
+    )
+    .await
+    {
+        warn!("trial-batch: meta upsert failed: {e}");
+    }
+    info!(
+        "trial-batch: applied run_id={run_id} mode={} configs={config_count} \
+         symbols_reset={} drained_trades={} \
+         changed_ids_requested={} matched_old={} matched_new={} unmatched_changed_ids={} \
+         scope_symbols={}/{}",
+        mode.as_str(),
+        report.symbols_reset,
+        report.drained_trades,
+        report.changed_ids_requested,
+        report.matched_changed_ids_old,
+        report.matched_changed_ids_new,
+        report.unmatched_changed_ids,
+        report.scope_symbols_matched,
+        report.scope_symbols_requested
+    );
+    if report.unmatched_changed_ids > 0 {
+        warn!(
+            "trial-batch: changed_config_ids include {} unknown ids (run_id={run_id})",
+            report.unmatched_changed_ids
+        );
+    }
+    if report.scope_symbols_requested > 0 && report.scope_symbols_matched == 0 {
+        warn!(
+            "trial-batch: symbol scope matched nothing run_id={run_id} requested_scope_symbols={}",
+            report.scope_symbols_requested
+        );
+    }
+    TrialAck::success(
+        run_id,
+        applied_at_ms,
+        config_count,
+        report.drained_trades,
+        submission_id,
+    )
 }
 
 fn spawn_runtime_grid_hot_reload(
@@ -614,6 +823,196 @@ fn spawn_runtime_grid_hot_reload(
     initial_modified: Option<SystemTime>,
     initial_signature: Option<u64>,
 ) {
+    async fn maybe_handle_trial_control(
+        screener: &ScreenerStore,
+        db_path: &Path,
+        trial_control_path: &Path,
+        last_trial_control_modified: &mut Option<FileFingerprint>,
+    ) {
+        let trial_control_modified = read_file_fingerprint(trial_control_path);
+        let control_changed =
+            file_fingerprint_changed(*last_trial_control_modified, trial_control_modified);
+        if !control_changed {
+            return;
+        }
+        *last_trial_control_modified = trial_control_modified;
+        match load_trial_control(trial_control_path) {
+            Ok(control) => {
+                if !control.clear_run_id {
+                    return;
+                }
+                let active_run_id = screener.current_run_id();
+                match active_run_id {
+                    Some(active) => {
+                        let request_matches = control
+                            .run_id
+                            .as_ref()
+                            .map_or(true, |requested| requested == &active);
+                        if request_matches {
+                            let closed_at_ms = EventLoopState::now_ms();
+                            if let Err(e) = close_trial_run_meta_async(
+                                db_path.to_path_buf(),
+                                active.clone(),
+                                closed_at_ms,
+                            )
+                            .await
+                            {
+                                warn!("trial-control: failed to close run {active}: {e}");
+                            }
+                            screener.set_run_id(None);
+                            info!(
+                                "trial-control: cleared run_id={active} closed_at_ms={closed_at_ms}"
+                            );
+                        } else if let Some(requested) = control.run_id {
+                            warn!(
+                                "trial-control: requested run_id={} does not match active run_id={}",
+                                requested, active
+                            );
+                        }
+                    }
+                    None => info!("trial-control: no active run_id to clear"),
+                }
+            }
+            Err(e) => warn!("trial-control: {e}"),
+        }
+    }
+
+    async fn maybe_handle_trial_batch_file(
+        screener: &ScreenerStore,
+        db_path: &Path,
+        trial_batch_path: &Path,
+        last_trial_modified: &mut Option<FileFingerprint>,
+    ) -> bool {
+        let trial_modified = read_file_fingerprint(trial_batch_path);
+        let trial_changed = file_fingerprint_changed(*last_trial_modified, trial_modified);
+        if !trial_changed {
+            return false;
+        }
+        *last_trial_modified = trial_modified;
+        match load_trial_batch(trial_batch_path) {
+            Ok(batch) => {
+                let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
+                let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
+                let is_ok = ack.status == "ok";
+                write_trial_ack(ack_dir, &ack);
+                is_ok
+            }
+            Err(e) => {
+                warn!("trial-batch: {e}");
+                false
+            }
+        }
+    }
+
+    async fn maybe_handle_trial_batch_queue(
+        screener: &ScreenerStore,
+        db_path: &Path,
+        config_dir: &Path,
+    ) -> bool {
+        let Some(queued_batch_path) = list_trial_batch_queue_files(config_dir).into_iter().next()
+        else {
+            return false;
+        };
+        let is_ok = match load_trial_batch(&queued_batch_path) {
+            Ok(batch) => {
+                let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
+                let ok = ack.status == "ok";
+                write_trial_ack(config_dir, &ack);
+                ok
+            }
+            Err(e) => {
+                warn!(
+                    "trial-batch queue: invalid payload {}: {e}",
+                    queued_batch_path.display()
+                );
+                false
+            }
+        };
+        if let Err(e) = std::fs::remove_file(&queued_batch_path) {
+            warn!(
+                "trial-batch queue: failed to remove {}: {e}",
+                queued_batch_path.display()
+            );
+        }
+        is_ok
+    }
+
+    async fn maybe_refresh_pending_runtime_grid(
+        config_path: &Path,
+        last_modified: &mut Option<SystemTime>,
+        pending: &mut Option<RuntimeGridGeneration>,
+    ) {
+        let modified = std::fs::metadata(config_path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let changed = match *last_modified {
+            Some(prev) => modified > prev,
+            None => true,
+        };
+        if !changed {
+            return;
+        }
+        *last_modified = Some(modified);
+        match load_runtime_grid_generation_async(config_path.to_path_buf()).await {
+            Ok(generation) => {
+                if generation.config.enabled {
+                    info!(
+                        "runtime-grid: detected update, pending apply configs={} max_configs={} apply_interval_ms={}",
+                        generation.configs.len(),
+                        generation.config.max_configs,
+                        generation.config.apply_interval_ms
+                    );
+                    *pending = Some(generation);
+                } else {
+                    info!("runtime-grid: disabled in {}", config_path.display());
+                    *pending = None;
+                }
+            }
+            Err(e) => {
+                warn!("runtime-grid: invalid update ignored: {e}");
+            }
+        }
+    }
+
+    async fn maybe_apply_pending_runtime_grid(
+        screener: &ScreenerStore,
+        db_path: &Path,
+        pending: &mut Option<RuntimeGridGeneration>,
+        last_apply_ms: &mut i64,
+        last_applied_signature: &mut Option<u64>,
+    ) {
+        let Some(generation) = pending.as_ref() else {
+            return;
+        };
+        let now_ms = EventLoopState::now_ms();
+        let apply_interval_ms = generation.config.apply_interval_ms.max(1_000) as i64;
+        if now_ms.saturating_sub(*last_apply_ms) < apply_interval_ms {
+            return;
+        }
+        if Some(generation.signature) == *last_applied_signature {
+            *pending = None;
+            return;
+        }
+        if let Err(e) =
+            upsert_runtime_configs_async(db_path.to_path_buf(), generation.configs.clone()).await
+        {
+            warn!("runtime-grid: apply postponed, db upsert failed: {e}");
+            return;
+        }
+        let report = screener.replace_fleet_configs(generation.configs.clone());
+        screener.flush_db_writer().await;
+        *last_apply_ms = now_ms;
+        *last_applied_signature = Some(generation.signature);
+        info!(
+            "runtime-grid: applied configs old={} new={} symbols_reset={} drained_trades={} (flushed)",
+            report.old_config_count,
+            report.new_config_count,
+            report.symbols_reset,
+            report.drained_trades
+        );
+        *pending = None;
+    }
+
     tokio::spawn(async move {
         let mut last_modified = initial_modified;
         let mut last_applied_signature = initial_signature;
@@ -623,205 +1022,39 @@ fn spawn_runtime_grid_hot_reload(
         let mut last_trial_control_modified: Option<FileFingerprint> = None;
 
         loop {
-            // --- Trial control: clear current run_id ---
-            let trial_control_modified = read_file_fingerprint(&trial_control_path);
-            let control_changed =
-                file_fingerprint_changed(last_trial_control_modified, trial_control_modified);
-            if control_changed {
-                last_trial_control_modified = trial_control_modified;
-                match load_trial_control(&trial_control_path) {
-                    Ok(control) => {
-                        if control.clear_run_id {
-                            let active_run_id = screener.current_run_id();
-                            match active_run_id {
-                                Some(active) => {
-                                    let request_matches = control
-                                        .run_id
-                                        .as_ref()
-                                        .map_or(true, |requested| requested == &active);
-                                    if request_matches {
-                                        let closed_at_ms = EventLoopState::now_ms();
-                                        if let Err(e) =
-                                            close_trial_run_meta(&db_path, &active, closed_at_ms)
-                                        {
-                                            warn!(
-                                                "trial-control: failed to close run {active}: {e}"
-                                            );
-                                        }
-                                        screener.set_run_id(None);
-                                        info!(
-                                            "trial-control: cleared run_id={active} closed_at_ms={closed_at_ms}"
-                                        );
-                                    } else if let Some(requested) = control.run_id {
-                                        warn!(
-                                            "trial-control: requested run_id={} does not match active run_id={}",
-                                            requested, active
-                                        );
-                                    }
-                                }
-                                None => info!("trial-control: no active run_id to clear"),
-                            }
-                        }
-                    }
-                    Err(e) => warn!("trial-control: {e}"),
-                }
-            }
-            // --- End trial control ---
+            maybe_handle_trial_control(
+                &screener,
+                &db_path,
+                &trial_control_path,
+                &mut last_trial_control_modified,
+            )
+            .await;
 
-            // --- Trial batch: immediate apply, no debounce ---
-            let trial_modified = read_file_fingerprint(&trial_batch_path);
-            let trial_changed = file_fingerprint_changed(last_trial_modified, trial_modified);
-            if trial_changed {
-                last_trial_modified = trial_modified;
-                match load_trial_batch(&trial_batch_path) {
-                    Ok(batch) => {
-                        let run_id = batch.run_id.clone();
-                        let config_count = batch.configs.len();
-                        let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
-                        let patch_plan = match build_trial_batch_patch_plan(&batch) {
-                            Ok(plan) => plan,
-                            Err(e) => {
-                                warn!("trial-batch: invalid payload: {e}");
-                                write_trial_ack(ack_dir, &TrialAck::error(run_id, e));
-                                continue;
-                            }
-                        };
-                        let mode = patch_plan.mode;
-                        if let Err(e) = upsert_runtime_configs(&db_path, &batch.configs) {
-                            warn!("trial-batch: db upsert failed: {e}");
-                            write_trial_ack(ack_dir, &TrialAck::error(run_id, e));
-                            continue;
-                        }
-                        let report = match screener.try_apply_fleet_patch(batch.configs, patch_plan)
-                        {
-                            Ok(report) => report,
-                            Err(e) => {
-                                warn!("trial-batch: patch rejected: {e}");
-                                write_trial_ack(ack_dir, &TrialAck::error(run_id, e.to_string()));
-                                continue;
-                            }
-                        };
-                        let applied_at_ms = EventLoopState::now_ms();
-                        let previous_run_id = screener.current_run_id();
-                        if let Some(previous_run_id) = previous_run_id.as_ref() {
-                            if previous_run_id != &run_id {
-                                if let Err(e) =
-                                    close_trial_run_meta(&db_path, previous_run_id, applied_at_ms)
-                                {
-                                    warn!(
-                                        "trial-batch: failed to close previous run_id={previous_run_id}: {e}"
-                                    );
-                                }
-                            }
-                        }
-                        screener.set_run_id(Some(run_id.clone()));
-                        screener.flush_db_writer().await;
-                        if let Err(e) = upsert_trial_run_meta(
-                            &db_path,
-                            &run_id,
-                            config_count,
-                            applied_at_ms,
-                            report.drained_trades,
-                        ) {
-                            warn!("trial-batch: meta upsert failed: {e}");
-                        }
-                        info!(
-                            "trial-batch: applied run_id={run_id} mode={} configs={config_count} \
-                             symbols_reset={} drained_trades={} \
-                             changed_ids_requested={} matched_old={} matched_new={} unmatched_changed_ids={} \
-                             scope_symbols={}/{}",
-                            mode.as_str(),
-                            report.symbols_reset,
-                            report.drained_trades,
-                            report.changed_ids_requested,
-                            report.matched_changed_ids_old,
-                            report.matched_changed_ids_new,
-                            report.unmatched_changed_ids,
-                            report.scope_symbols_matched,
-                            report.scope_symbols_requested
-                        );
-                        if report.unmatched_changed_ids > 0 {
-                            warn!(
-                                "trial-batch: changed_config_ids include {} unknown ids (run_id={run_id})",
-                                report.unmatched_changed_ids
-                            );
-                        }
-                        if report.scope_symbols_requested > 0 && report.scope_symbols_matched == 0 {
-                            warn!(
-                                "trial-batch: symbol scope matched nothing run_id={run_id} requested_scope_symbols={}",
-                                report.scope_symbols_requested
-                            );
-                        }
-                        write_trial_ack(
-                            ack_dir,
-                            &TrialAck::success(
-                                run_id,
-                                applied_at_ms,
-                                config_count,
-                                report.drained_trades,
-                            ),
-                        );
-                        pending = None;
-                    }
-                    Err(e) => warn!("trial-batch: {e}"),
-                }
-            }
-            // --- End trial batch ---
-
-            let modified = std::fs::metadata(&config_path)
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            let changed = match last_modified {
-                Some(prev) => modified > prev,
-                None => true,
-            };
-            if changed {
-                last_modified = Some(modified);
-                match load_runtime_grid_generation(&config_path) {
-                    Ok(generation) => {
-                        if generation.config.enabled {
-                            info!(
-                                "runtime-grid: detected update, pending apply configs={} max_configs={} apply_interval_ms={}",
-                                generation.configs.len(),
-                                generation.config.max_configs,
-                                generation.config.apply_interval_ms
-                            );
-                            pending = Some(generation);
-                        } else {
-                            info!("runtime-grid: disabled in {}", config_path.display());
-                            pending = None;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("runtime-grid: invalid update ignored: {e}");
-                    }
-                }
+            if maybe_handle_trial_batch_file(
+                &screener,
+                &db_path,
+                &trial_batch_path,
+                &mut last_trial_modified,
+            )
+            .await
+            {
+                pending = None;
             }
 
-            if let Some(generation) = pending.as_ref() {
-                let now_ms = EventLoopState::now_ms();
-                let apply_interval_ms = generation.config.apply_interval_ms.max(1_000) as i64;
-                if now_ms.saturating_sub(last_apply_ms) >= apply_interval_ms {
-                    if Some(generation.signature) == last_applied_signature {
-                        pending = None;
-                    } else if let Err(e) = upsert_runtime_configs(&db_path, &generation.configs) {
-                        warn!("runtime-grid: apply postponed, db upsert failed: {e}");
-                    } else {
-                        let report = screener.replace_fleet_configs(generation.configs.clone());
-                        screener.flush_db_writer().await;
-                        last_apply_ms = now_ms;
-                        last_applied_signature = Some(generation.signature);
-                        info!(
-                            "runtime-grid: applied configs old={} new={} symbols_reset={} drained_trades={} (flushed)",
-                            report.old_config_count,
-                            report.new_config_count,
-                            report.symbols_reset,
-                            report.drained_trades
-                        );
-                        pending = None;
-                    }
-                }
+            let config_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
+            if maybe_handle_trial_batch_queue(&screener, &db_path, config_dir).await {
+                pending = None;
             }
+
+            maybe_refresh_pending_runtime_grid(&config_path, &mut last_modified, &mut pending).await;
+            maybe_apply_pending_runtime_grid(
+                &screener,
+                &db_path,
+                &mut pending,
+                &mut last_apply_ms,
+                &mut last_applied_signature,
+            )
+            .await;
 
             let sleep_ms = pending
                 .as_ref()
@@ -1205,6 +1438,31 @@ impl EventLoopState {
     }
 }
 
+async fn handle_exchange_tick(
+    state: &mut EventLoopState,
+    side: ExchangeSide,
+    result: Result<hft_lead_lag::domain::BookTicker, hft_lead_lag::domain::ExchangeError>,
+    drained: Vec<hft_lead_lag::domain::BookTicker>,
+    strategy: &dyn RuntimeStrategy,
+    strategy_symbol_set: &std::collections::HashSet<&str>,
+    screener: &ScreenerStore,
+    health_state: &HealthState,
+    ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+) {
+    match state.process_exchange_result(side, result, drained, screener, ws_tx) {
+        Ok(updated_symbols) => {
+            side.mark_alive(health_state, EventLoopState::now_ms());
+            state
+                .update_strategy_books(side, strategy, &updated_symbols, strategy_symbol_set)
+                .await;
+        }
+        Err(e) => {
+            side.maybe_mark_disconnected(health_state, &e);
+            side.log_data_error(&e);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum GateSubscribeAttempt {
     Success,
@@ -1548,55 +1806,31 @@ async fn run_event_loop(
     loop {
         tokio::select! {
             result = binance.recv_book_ticker() => {
-                match state.process_exchange_result(
+                handle_exchange_tick(
+                    &mut state,
                     ExchangeSide::Binance,
                     result,
                     binance.drain_book_tickers(),
+                    strategy,
+                    &strategy_symbol_set,
                     screener,
+                    health_state,
                     ws_tx,
-                ) {
-                    Ok(updated_symbols) => {
-                        ExchangeSide::Binance.mark_alive(health_state, EventLoopState::now_ms());
-                        state
-                            .update_strategy_books(
-                                ExchangeSide::Binance,
-                                strategy,
-                                &updated_symbols,
-                                &strategy_symbol_set,
-                            )
-                            .await;
-                    }
-                    Err(e) => {
-                        ExchangeSide::Binance.maybe_mark_disconnected(health_state, &e);
-                        ExchangeSide::Binance.log_data_error(&e);
-                    }
-                }
+                ).await;
             }
 
             result = gate.recv_book_ticker() => {
-                match state.process_exchange_result(
+                handle_exchange_tick(
+                    &mut state,
                     ExchangeSide::Gate,
                     result,
                     gate.drain_book_tickers(),
+                    strategy,
+                    &strategy_symbol_set,
                     screener,
+                    health_state,
                     ws_tx,
-                ) {
-                    Ok(updated_symbols) => {
-                        ExchangeSide::Gate.mark_alive(health_state, EventLoopState::now_ms());
-                        state
-                            .update_strategy_books(
-                                ExchangeSide::Gate,
-                                strategy,
-                                &updated_symbols,
-                                &strategy_symbol_set,
-                            )
-                        .await;
-                    }
-                    Err(e) => {
-                        ExchangeSide::Gate.maybe_mark_disconnected(health_state, &e);
-                        ExchangeSide::Gate.log_data_error(&e);
-                    }
-                }
+                ).await;
             }
 
             _ = state.signal_interval.tick() => {
@@ -1650,7 +1884,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ensure_runtime_grid_config_file(runtime_grid_path)?;
     let mut runtime_grid_last_modified: Option<SystemTime> = None;
     let mut runtime_grid_last_signature: Option<u64> = None;
-    match load_runtime_grid_generation(runtime_grid_path) {
+    match load_runtime_grid_generation_async(runtime_grid_path.to_path_buf()).await {
         Ok(generation) => {
             runtime_grid_last_modified = Some(generation.modified);
             if generation.config.enabled {

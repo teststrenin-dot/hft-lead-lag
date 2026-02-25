@@ -428,24 +428,34 @@ impl ShadowTrader {
         let cutoff = ts_ms - self.config.baseline_window_ms;
 
         // Compute baseline gap over window (not all samples)
-        let (mut ask_gap_sum, mut bid_gap_sum, mut count) = (0.0_f64, 0.0_f64, 0_u32);
+        let (mut ask_gap_sum, mut bid_gap_sum) = (0.0_f64, 0.0_f64);
+        let (mut ask_count, mut bid_count) = (0_u32, 0_u32);
         for s in samples.iter() {
             if s.ts_ms < cutoff {
                 continue;
             }
             if s.gate_ask > 0.0 && s.binance_ask > 0.0 {
                 ask_gap_sum += ((s.binance_ask - s.gate_ask) / s.gate_ask) * 10_000.0;
+                ask_count += 1;
             }
             if s.gate_bid > 0.0 && s.binance_bid > 0.0 {
                 bid_gap_sum += ((s.gate_bid - s.binance_bid) / s.gate_bid) * 10_000.0;
+                bid_count += 1;
             }
-            count += 1;
         }
-        if count == 0 {
+        if ask_count == 0 && bid_count == 0 {
             return None;
         }
-        let baseline_ask_gap = ask_gap_sum / count as f64;
-        let baseline_bid_gap = bid_gap_sum / count as f64;
+        let baseline_ask_gap = if ask_count > 0 {
+            ask_gap_sum / ask_count as f64
+        } else {
+            0.0
+        };
+        let baseline_bid_gap = if bid_count > 0 {
+            bid_gap_sum / bid_count as f64
+        } else {
+            0.0
+        };
 
         let threshold = self.config.spike_threshold_bps;
 
@@ -758,6 +768,40 @@ mod tests {
         // 30 bps gap — below 50 bps threshold
         let bn = quote(100.30, 100.30, 50_000);
         let gt = quote(100.0, 100.0, 50_000);
+        assert!(trader.detect_gap(50_100, &bn, &gt, &samples).is_none());
+    }
+
+    #[test]
+    fn baseline_ask_uses_only_valid_ask_samples() {
+        let trader = make_trader(|c| {
+            c.spike_threshold_bps = 9.0;
+            c.min_baseline_samples = 2;
+            c.baseline_window_ms = 10_000;
+        });
+
+        let mut samples = PriceSamples::default();
+        // Valid ask gap sample: 20 bps.
+        samples.push(PriceSample {
+            ts_ms: 50_000,
+            gate_bid: 0.0,
+            gate_ask: 100.0,
+            binance_bid: 0.0,
+            binance_ask: 100.20,
+        });
+        // Invalid ask sample (gate ask missing): should not affect ask baseline denominator.
+        samples.push(PriceSample {
+            ts_ms: 50_050,
+            gate_bid: 100.0,
+            gate_ask: 0.0,
+            binance_bid: 100.0,
+            binance_ask: 100.20,
+        });
+
+        let bn = quote(100.20, 100.20, 50_100);
+        let gt = quote(100.0, 100.0, 50_100);
+
+        // If denominator incorrectly uses all samples (2), signal=10 bps and test fails.
+        // Correct denominator for ask baseline is 1 valid ask sample => signal=0 bps.
         assert!(trader.detect_gap(50_100, &bn, &gt, &samples).is_none());
     }
 

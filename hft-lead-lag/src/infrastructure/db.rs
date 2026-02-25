@@ -12,12 +12,16 @@ use tracing::{info, warn};
 
 /// Cumulative count of dropped trade batches (for monitoring/alerting).
 static DROPPED_BATCHES: AtomicU64 = AtomicU64::new(0);
+/// Cumulative count of batches deferred to overflow queue under backpressure.
+static OVERFLOWED_BATCHES: AtomicU64 = AtomicU64::new(0);
 
 use crate::domain::screener::shadow_fleet::FleetTrade;
 use crate::domain::screener::trader_config::TraderConfig;
 
 const FLUSH_INTERVAL_SECS: u64 = 5;
 const CHANNEL_CAPACITY: usize = 100_000;
+/// Secondary bounded queue used only when primary queue is temporarily full.
+const OVERFLOW_CHANNEL_CAPACITY: usize = 8_192;
 const DEFAULT_STRATEGY_KIND: &str = "baseline_gap";
 
 // ---------------------------------------------------------------------------
@@ -67,6 +71,14 @@ CREATE TABLE IF NOT EXISTS trial_runs_meta (
     submitted_config_count INTEGER NOT NULL,
     applied_at_ms INTEGER NOT NULL,
     drained_trades INTEGER NOT NULL DEFAULT 0,
+    apply_mode TEXT NOT NULL DEFAULT 'full_replace',
+    symbols_reset INTEGER NOT NULL DEFAULT 0,
+    changed_ids_requested INTEGER NOT NULL DEFAULT 0,
+    matched_changed_ids_old INTEGER NOT NULL DEFAULT 0,
+    matched_changed_ids_new INTEGER NOT NULL DEFAULT 0,
+    unmatched_changed_ids INTEGER NOT NULL DEFAULT 0,
+    scope_symbols_requested INTEGER NOT NULL DEFAULT 0,
+    scope_symbols_matched INTEGER NOT NULL DEFAULT 0,
     closed_at_ms INTEGER
 );
 
@@ -169,6 +181,30 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);");
     let _ = conn.execute_batch("ALTER TABLE trial_runs_meta ADD COLUMN closed_at_ms INTEGER;");
     let _ = conn.execute_batch(
+        "ALTER TABLE trial_runs_meta ADD COLUMN apply_mode TEXT NOT NULL DEFAULT 'full_replace';",
+    );
+    let _ = conn.execute_batch(
+        "ALTER TABLE trial_runs_meta ADD COLUMN symbols_reset INTEGER NOT NULL DEFAULT 0;",
+    );
+    let _ = conn.execute_batch(
+        "ALTER TABLE trial_runs_meta ADD COLUMN changed_ids_requested INTEGER NOT NULL DEFAULT 0;",
+    );
+    let _ = conn.execute_batch(
+        "ALTER TABLE trial_runs_meta ADD COLUMN matched_changed_ids_old INTEGER NOT NULL DEFAULT 0;",
+    );
+    let _ = conn.execute_batch(
+        "ALTER TABLE trial_runs_meta ADD COLUMN matched_changed_ids_new INTEGER NOT NULL DEFAULT 0;",
+    );
+    let _ = conn.execute_batch(
+        "ALTER TABLE trial_runs_meta ADD COLUMN unmatched_changed_ids INTEGER NOT NULL DEFAULT 0;",
+    );
+    let _ = conn.execute_batch(
+        "ALTER TABLE trial_runs_meta ADD COLUMN scope_symbols_requested INTEGER NOT NULL DEFAULT 0;",
+    );
+    let _ = conn.execute_batch(
+        "ALTER TABLE trial_runs_meta ADD COLUMN scope_symbols_matched INTEGER NOT NULL DEFAULT 0;",
+    );
+    let _ = conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_trial_runs_meta_closed_at ON trial_runs_meta(closed_at_ms);",
     );
     Ok(conn)
@@ -214,27 +250,76 @@ pub fn upsert_configs(conn: &Connection, configs: &[TraderConfig]) -> rusqlite::
 }
 
 /// Persist submitted config metadata for a trial run.
+#[derive(Debug, Clone, Copy)]
+pub struct TrialPatchMeta<'a> {
+    pub apply_mode: &'a str,
+    pub symbols_reset: usize,
+    pub changed_ids_requested: usize,
+    pub matched_changed_ids_old: usize,
+    pub matched_changed_ids_new: usize,
+    pub unmatched_changed_ids: usize,
+    pub scope_symbols_requested: usize,
+    pub scope_symbols_matched: usize,
+}
+
+impl Default for TrialPatchMeta<'_> {
+    fn default() -> Self {
+        Self {
+            apply_mode: "full_replace",
+            symbols_reset: 0,
+            changed_ids_requested: 0,
+            matched_changed_ids_old: 0,
+            matched_changed_ids_new: 0,
+            unmatched_changed_ids: 0,
+            scope_symbols_requested: 0,
+            scope_symbols_matched: 0,
+        }
+    }
+}
+
+/// Persist submitted config metadata for a trial run.
 pub fn upsert_trial_run_meta(
     conn: &Connection,
     run_id: &str,
     submitted_config_count: usize,
     applied_at_ms: i64,
     drained_trades: usize,
+    patch: TrialPatchMeta<'_>,
 ) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO trial_runs_meta (
-            run_id, submitted_config_count, applied_at_ms, drained_trades, closed_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, NULL)
+            run_id, submitted_config_count, applied_at_ms, drained_trades,
+            apply_mode, symbols_reset,
+            changed_ids_requested, matched_changed_ids_old, matched_changed_ids_new,
+            unmatched_changed_ids, scope_symbols_requested, scope_symbols_matched,
+            closed_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL)
          ON CONFLICT(run_id) DO UPDATE SET
             submitted_config_count = excluded.submitted_config_count,
             applied_at_ms = excluded.applied_at_ms,
             drained_trades = excluded.drained_trades,
+            apply_mode = excluded.apply_mode,
+            symbols_reset = excluded.symbols_reset,
+            changed_ids_requested = excluded.changed_ids_requested,
+            matched_changed_ids_old = excluded.matched_changed_ids_old,
+            matched_changed_ids_new = excluded.matched_changed_ids_new,
+            unmatched_changed_ids = excluded.unmatched_changed_ids,
+            scope_symbols_requested = excluded.scope_symbols_requested,
+            scope_symbols_matched = excluded.scope_symbols_matched,
             closed_at_ms = NULL",
         params![
             run_id,
             submitted_config_count as i64,
             applied_at_ms,
             drained_trades as i64,
+            patch.apply_mode,
+            patch.symbols_reset as i64,
+            patch.changed_ids_requested as i64,
+            patch.matched_changed_ids_old as i64,
+            patch.matched_changed_ids_new as i64,
+            patch.unmatched_changed_ids as i64,
+            patch.scope_symbols_requested as i64,
+            patch.scope_symbols_matched as i64,
         ],
     )?;
     Ok(())
@@ -262,12 +347,43 @@ pub fn close_trial_run_meta(conn: &Connection, run_id: &str, closed_at_ms: i64) 
 #[derive(Clone, Debug)]
 pub struct DbWriter {
     tx: mpsc::Sender<DbCommand>,
+    overflow_tx: mpsc::Sender<DbCommand>,
 }
 
 #[derive(Debug)]
 enum DbCommand {
     Trades(Vec<FleetTrade>),
     Flush(tokio::sync::oneshot::Sender<()>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnqueueOutcome {
+    QueuedPrimary,
+    QueuedOverflow,
+    DroppedOverflowFull,
+    DroppedClosed,
+}
+
+fn try_enqueue_command(
+    tx: &mpsc::Sender<DbCommand>,
+    overflow_tx: &mpsc::Sender<DbCommand>,
+    command: DbCommand,
+) -> EnqueueOutcome {
+    match tx.try_send(command) {
+        Ok(()) => EnqueueOutcome::QueuedPrimary,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(command)) => {
+            match overflow_tx.try_send(command) {
+                Ok(()) => EnqueueOutcome::QueuedOverflow,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    EnqueueOutcome::DroppedOverflowFull
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    EnqueueOutcome::DroppedClosed
+                }
+            }
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => EnqueueOutcome::DroppedClosed,
+    }
 }
 
 impl DbWriter {
@@ -277,27 +393,19 @@ impl DbWriter {
             return;
         }
         let command = DbCommand::Trades(trades);
-        match self.tx.try_send(command) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(command)) => {
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    let tx = self.tx.clone();
-                    handle.spawn(async move {
-                        if tx.send(command).await.is_err() {
-                            let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                            warn!("db writer closed during retry send (total dropped: {n})");
-                        }
-                    });
-                } else {
-                    if self.tx.blocking_send(command).is_err() {
-                        let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                        warn!(
-                            "db writer channel full and blocking retry failed, dropping batch (total dropped: {n})"
-                        );
-                    }
+        match try_enqueue_command(&self.tx, &self.overflow_tx, command) {
+            EnqueueOutcome::QueuedPrimary => {}
+            EnqueueOutcome::QueuedOverflow => {
+                let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                if n.is_power_of_two() || n.is_multiple_of(1000) {
+                    warn!("db writer primary queue full, deferred batches total: {n}");
                 }
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            EnqueueOutcome::DroppedOverflowFull => {
+                let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!("db writer queues saturated, dropping batch (total dropped: {n})");
+            }
+            EnqueueOutcome::DroppedClosed => {
                 let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
                 warn!("db writer channel closed, dropping batch (total dropped: {n})");
             }
@@ -323,7 +431,19 @@ impl DbWriter {
 /// Spawn the background writer task. Returns a handle for sending trades.
 pub fn spawn_writer(db_path: &Path) -> DbWriter {
     let (tx, mut rx) = mpsc::channel::<DbCommand>(CHANNEL_CAPACITY);
+    let (overflow_tx, mut overflow_rx) = mpsc::channel::<DbCommand>(OVERFLOW_CHANNEL_CAPACITY);
     let path = db_path.to_path_buf();
+    let primary_tx = tx.clone();
+
+    tokio::spawn(async move {
+        while let Some(command) = overflow_rx.recv().await {
+            if primary_tx.send(command).await.is_err() {
+                let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!("db writer closed while draining overflow queue (total dropped: {n})");
+                break;
+            }
+        }
+    });
 
     tokio::spawn(async move {
         let conn = match open_db(&path) {
@@ -373,7 +493,7 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
         info!("db writer stopped");
     });
 
-    DbWriter { tx }
+    DbWriter { tx, overflow_tx }
 }
 
 fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()> {
@@ -414,6 +534,7 @@ fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::screener::shadow_trader::{ClosedTrade, Direction};
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -427,6 +548,30 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    fn sample_trade(symbol: &str) -> FleetTrade {
+        FleetTrade {
+            config_id: 1,
+            symbol: symbol.to_string(),
+            run_id: None,
+            trade: ClosedTrade {
+                pnl_pct: 0.1,
+                ts_ms: 2,
+                direction: Direction::Long,
+                entry_ts_ms: 1,
+                entry_price: 100.0,
+                exit_price: 101.0,
+                exit_reason: "target",
+                spike_bps: 35.0,
+                catchup_pct: 0.5,
+                catchup_ms: 5,
+                gate_spread_at_entry_bps: 1.0,
+                gate_natr_30m_pct_at_entry: 0.2,
+                hold_ms: 4,
+                early_stop_churn: false,
+            },
+        }
     }
 
     #[test]
@@ -508,6 +653,22 @@ mod tests {
             .and_then(|mut stmt| stmt.exists([]))
             .expect("trial_runs_meta.closed_at_ms exists query");
         assert!(has_closed_at_col, "trial_runs_meta.closed_at_ms column must exist");
+        for column in [
+            "apply_mode",
+            "symbols_reset",
+            "changed_ids_requested",
+            "matched_changed_ids_old",
+            "matched_changed_ids_new",
+            "unmatched_changed_ids",
+            "scope_symbols_requested",
+            "scope_symbols_matched",
+        ] {
+            let has_col: bool = conn
+                .prepare("SELECT 1 FROM pragma_table_info('trial_runs_meta') WHERE name=?1")
+                .and_then(|mut stmt| stmt.exists([column]))
+                .expect("trial_runs_meta metadata column exists query");
+            assert!(has_col, "trial_runs_meta.{column} column must exist");
+        }
 
         drop(conn);
         cleanup_temp_db(&path);
@@ -518,21 +679,102 @@ mod tests {
         let path = temp_db_path("trial-runs-meta-upsert");
         let conn = open_db(&path).expect("open db");
 
-        upsert_trial_run_meta(&conn, "scout-1", 100, 1_000, 5).expect("first upsert");
-        upsert_trial_run_meta(&conn, "scout-1", 250, 2_000, 12).expect("second upsert");
+        upsert_trial_run_meta(
+            &conn,
+            "scout-1",
+            100,
+            1_000,
+            5,
+            TrialPatchMeta {
+                apply_mode: "full_replace",
+                symbols_reset: 4,
+                ..TrialPatchMeta::default()
+            },
+        )
+        .expect("first upsert");
+        upsert_trial_run_meta(
+            &conn,
+            "scout-1",
+            250,
+            2_000,
+            12,
+            TrialPatchMeta {
+                apply_mode: "incremental",
+                symbols_reset: 2,
+                changed_ids_requested: 3,
+                matched_changed_ids_old: 2,
+                matched_changed_ids_new: 2,
+                unmatched_changed_ids: 1,
+                scope_symbols_requested: 2,
+                scope_symbols_matched: 1,
+            },
+        )
+        .expect("second upsert");
 
-        let (submitted, applied_at, drained, closed_at): (i64, i64, i64, Option<i64>) = conn
+        let (
+            submitted,
+            applied_at,
+            drained,
+            apply_mode,
+            symbols_reset,
+            changed_ids_requested,
+            matched_changed_ids_old,
+            matched_changed_ids_new,
+            unmatched_changed_ids,
+            scope_symbols_requested,
+            scope_symbols_matched,
+            closed_at,
+        ): (
+            i64,
+            i64,
+            i64,
+            String,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<i64>,
+        ) = conn
             .query_row(
-                "SELECT submitted_config_count, applied_at_ms, drained_trades, closed_at_ms
+                "SELECT submitted_config_count, applied_at_ms, drained_trades,
+                        apply_mode, symbols_reset, changed_ids_requested,
+                        matched_changed_ids_old, matched_changed_ids_new, unmatched_changed_ids,
+                        scope_symbols_requested, scope_symbols_matched, closed_at_ms
                  FROM trial_runs_meta
                  WHERE run_id = ?1",
                 ["scout-1"],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                    ))
+                },
             )
             .expect("fetch trial_runs_meta");
         assert_eq!(submitted, 250);
         assert_eq!(applied_at, 2_000);
         assert_eq!(drained, 12);
+        assert_eq!(apply_mode, "incremental");
+        assert_eq!(symbols_reset, 2);
+        assert_eq!(changed_ids_requested, 3);
+        assert_eq!(matched_changed_ids_old, 2);
+        assert_eq!(matched_changed_ids_new, 2);
+        assert_eq!(unmatched_changed_ids, 1);
+        assert_eq!(scope_symbols_requested, 2);
+        assert_eq!(scope_symbols_matched, 1);
         assert_eq!(closed_at, None);
 
         close_trial_run_meta(&conn, "scout-1", 3_000).expect("close run");
@@ -585,5 +827,49 @@ mod tests {
 
         drop(ro);
         cleanup_temp_db(&path);
+    }
+
+    #[test]
+    fn try_enqueue_command_uses_overflow_when_primary_full() {
+        DROPPED_BATCHES.store(0, Ordering::Relaxed);
+        let (tx, mut rx) = mpsc::channel::<DbCommand>(1);
+        let (overflow_tx, mut overflow_rx) = mpsc::channel::<DbCommand>(2);
+        tx.try_send(DbCommand::Trades(vec![sample_trade("BTCUSDT")]))
+            .expect("pre-fill primary channel");
+
+        let outcome = try_enqueue_command(
+            &tx,
+            &overflow_tx,
+            DbCommand::Trades(vec![sample_trade("ETHUSDT")]),
+        );
+
+        assert_eq!(outcome, EnqueueOutcome::QueuedOverflow);
+        assert!(
+            matches!(overflow_rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "ETHUSDT")
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "BTCUSDT")
+        );
+        assert_eq!(DROPPED_BATCHES.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn try_enqueue_command_drops_when_primary_and_overflow_full() {
+        DROPPED_BATCHES.store(0, Ordering::Relaxed);
+        let (tx, _rx) = mpsc::channel::<DbCommand>(1);
+        let (overflow_tx, _overflow_rx) = mpsc::channel::<DbCommand>(1);
+        tx.try_send(DbCommand::Trades(vec![sample_trade("BTCUSDT")]))
+            .expect("pre-fill primary channel");
+        overflow_tx
+            .try_send(DbCommand::Trades(vec![sample_trade("ETHUSDT")]))
+            .expect("pre-fill overflow channel");
+
+        let outcome = try_enqueue_command(
+            &tx,
+            &overflow_tx,
+            DbCommand::Trades(vec![sample_trade("SOLUSDT")]),
+        );
+
+        assert_eq!(outcome, EnqueueOutcome::DroppedOverflowFull);
     }
 }

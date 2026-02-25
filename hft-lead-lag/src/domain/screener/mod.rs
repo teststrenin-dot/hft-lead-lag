@@ -31,7 +31,7 @@ use self::utils::{now_ms, TimeDomainSample};
 use crate::infrastructure::db::DbWriter;
 
 pub use self::shadow_trader::{ChartTrade, ShadowStats};
-pub use self::trader_config::TraderConfig;
+pub use self::trader_config::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -44,6 +44,9 @@ const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
 pub struct ScreenerRow {
     pub symbol: String,
     pub leader_exchange: &'static str,
+    pub data_source: &'static str,
+    pub is_fallback: bool,
+    pub last_update_ms: i64,
     pub lag_ms: f64,
     pub ws_drift_ms: f64,
     pub ws_drift_binance_ms: f64,
@@ -448,6 +451,9 @@ impl ScreenerStore {
                 ScreenerRow {
                     symbol: item.key().clone(),
                     leader_exchange: item.value().leader_exchange,
+                    data_source: "ws_live",
+                    is_fallback: false,
+                    last_update_ms: item.value().updated_at_ms,
                     lag_ms: item.value().lag_ms,
                     ws_drift_ms: item.value().drifts.combined,
                     ws_drift_binance_ms: item.value().drifts.binance.unwrap_or(0.0),
@@ -511,6 +517,22 @@ mod tests {
         let mut state = SymbolState::default();
         state.fleet = Some(ShadowFleet::new(configs));
         store.symbols.insert(symbol.to_string(), state);
+    }
+
+    #[test]
+    fn rows_sorted_marks_live_ws_source_and_update_time() {
+        let store = ScreenerStore::default();
+        let ts_ns = 1_700_000_000_000_000_000_i64;
+        store.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
+        store.update("BTCUSDT", "gate", 100.0, 100.1, ts_ns + 1_000_000, ts_ns + 1_000_000);
+
+        let rows = store.rows_sorted();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.symbol, "BTCUSDT");
+        assert_eq!(row.data_source, "ws_live");
+        assert!(!row.is_fallback);
+        assert!(row.last_update_ms > 0);
     }
 
     #[test]

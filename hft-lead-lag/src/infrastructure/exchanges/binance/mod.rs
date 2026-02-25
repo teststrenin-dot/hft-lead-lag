@@ -26,6 +26,7 @@ const BINANCE_WS_ENDPOINT: &str = "wss://fstream.binance.com/ws";
 const MSG_CHANNEL_CAPACITY: usize = 25_000;
 const MIN_MSG_CHANNEL_CAPACITY: usize = 1_024;
 const MSG_CHANNEL_CAPACITY_ENV: &str = "BINANCE_MSG_CHANNEL_CAPACITY";
+const SUBSCRIPTION_REGISTRY_MAX: usize = 4_096;
 
 /// Cumulative count of market-data messages dropped due to channel backpressure.
 static DROPPED_MESSAGES: AtomicU64 = AtomicU64::new(0);
@@ -52,8 +53,13 @@ fn record_subscription(subs: &Arc<Mutex<Vec<String>>>, text: &str) {
             poisoned.into_inner()
         }
     };
-    if !guard.iter().any(|msg| msg == text) {
-        guard.push(text.to_string());
+    if guard.iter().any(|msg| msg == text) {
+        return;
+    }
+    guard.push(text.to_string());
+    if guard.len() > SUBSCRIPTION_REGISTRY_MAX {
+        let overflow = guard.len() - SUBSCRIPTION_REGISTRY_MAX;
+        guard.drain(0..overflow);
     }
 }
 
@@ -590,5 +596,26 @@ mod tests {
         record_subscription(&subs, non_subscribe);
 
         assert!(snapshot_subscriptions(&subs).is_empty());
+    }
+
+    #[test]
+    fn subscription_registry_trims_old_entries() {
+        let subs = Arc::new(Mutex::new(Vec::new()));
+        for idx in 0..(SUBSCRIPTION_REGISTRY_MAX + 8) {
+            let msg = format!(
+                r#"{{"method":"SUBSCRIBE","params":["s{}@bookTicker"],"id":{}}}"#,
+                idx, idx
+            );
+            record_subscription(&subs, &msg);
+        }
+
+        let snapshot = snapshot_subscriptions(&subs);
+        assert_eq!(snapshot.len(), SUBSCRIPTION_REGISTRY_MAX);
+        assert!(
+            !snapshot
+                .iter()
+                .any(|msg| msg.contains(r#""id":0"#)),
+            "oldest entries should be trimmed"
+        );
     }
 }

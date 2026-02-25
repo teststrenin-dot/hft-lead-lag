@@ -518,6 +518,14 @@ pub(crate) struct TrialRunSummary {
     total_pnl_pct: f64,
     first_trade_ms: i64,
     last_trade_ms: i64,
+    apply_mode: String,
+    symbols_reset: i64,
+    changed_ids_requested: i64,
+    matched_changed_ids_old: i64,
+    matched_changed_ids_new: i64,
+    unmatched_changed_ids: i64,
+    scope_symbols_requested: i64,
+    scope_symbols_matched: i64,
 }
 
 pub(crate) async fn get_trial_runs(
@@ -555,7 +563,15 @@ pub(crate) async fn get_trial_runs(
                    COALESCE(s.wins, 0) as wins,
                    COALESCE(s.total_pnl, 0.0) as total_pnl,
                    COALESCE(s.first_trade, m.applied_at_ms, 0) as first_trade,
-                   COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) as last_trade
+                   COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) as last_trade,
+                   COALESCE(m.apply_mode, 'full_replace') as apply_mode,
+                   COALESCE(m.symbols_reset, 0) as symbols_reset,
+                   COALESCE(m.changed_ids_requested, 0) as changed_ids_requested,
+                   COALESCE(m.matched_changed_ids_old, 0) as matched_changed_ids_old,
+                   COALESCE(m.matched_changed_ids_new, 0) as matched_changed_ids_new,
+                   COALESCE(m.unmatched_changed_ids, 0) as unmatched_changed_ids,
+                   COALESCE(m.scope_symbols_requested, 0) as scope_symbols_requested,
+                   COALESCE(m.scope_symbols_matched, 0) as scope_symbols_matched
             FROM runs r
             LEFT JOIN trade_stats s ON s.run_id = r.run_id
             LEFT JOIN trial_runs_meta m ON m.run_id = r.run_id
@@ -592,6 +608,14 @@ pub(crate) async fn get_trial_runs(
                 total_pnl_pct: total_pnl,
                 first_trade_ms: row.get(6)?,
                 last_trade_ms: row.get(7)?,
+                apply_mode: row.get(8)?,
+                symbols_reset: row.get(9)?,
+                changed_ids_requested: row.get(10)?,
+                matched_changed_ids_old: row.get(11)?,
+                matched_changed_ids_new: row.get(12)?,
+                unmatched_changed_ids: row.get(13)?,
+                scope_symbols_requested: row.get(14)?,
+                scope_symbols_matched: row.get(15)?,
             })
         })
         .map_err(|e| {
@@ -636,7 +660,15 @@ pub(crate) async fn get_forward_runs(
                    COALESCE(s.wins, 0) as wins,
                    COALESCE(s.total_pnl, 0.0) as total_pnl,
                    COALESCE(s.first_trade, m.applied_at_ms, 0) as first_trade,
-                   COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) as last_trade
+                   COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) as last_trade,
+                   COALESCE(m.apply_mode, 'full_replace') as apply_mode,
+                   COALESCE(m.symbols_reset, 0) as symbols_reset,
+                   COALESCE(m.changed_ids_requested, 0) as changed_ids_requested,
+                   COALESCE(m.matched_changed_ids_old, 0) as matched_changed_ids_old,
+                   COALESCE(m.matched_changed_ids_new, 0) as matched_changed_ids_new,
+                   COALESCE(m.unmatched_changed_ids, 0) as unmatched_changed_ids,
+                   COALESCE(m.scope_symbols_requested, 0) as scope_symbols_requested,
+                   COALESCE(m.scope_symbols_matched, 0) as scope_symbols_matched
             FROM runs r
             LEFT JOIN trade_stats s ON s.run_id = r.run_id
             LEFT JOIN trial_runs_meta m ON m.run_id = r.run_id
@@ -673,6 +705,14 @@ pub(crate) async fn get_forward_runs(
                 total_pnl_pct: total_pnl,
                 first_trade_ms: row.get(6)?,
                 last_trade_ms: row.get(7)?,
+                apply_mode: row.get(8)?,
+                symbols_reset: row.get(9)?,
+                changed_ids_requested: row.get(10)?,
+                matched_changed_ids_old: row.get(11)?,
+                matched_changed_ids_new: row.get(12)?,
+                unmatched_changed_ids: row.get(13)?,
+                scope_symbols_requested: row.get(14)?,
+                scope_symbols_matched: row.get(15)?,
             })
         })
         .map_err(|e| {
@@ -1166,9 +1206,11 @@ mod tests {
     use super::*;
     use axum::extract::State;
     use dashmap::DashMap;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn compute_fleet_stats_handles_zero_trades() {
@@ -1241,5 +1283,54 @@ mod tests {
             resp.db_dropped_batches,
             crate::infrastructure::db::DbWriter::dropped_batches()
         );
+    }
+
+    #[tokio::test]
+    async fn trial_runs_expose_patch_level_metadata() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("trial-runs-meta-{unique}.db"));
+        let conn = crate::infrastructure::db::open_db(&db_path).expect("open db");
+        crate::infrastructure::db::upsert_trial_run_meta(
+            &conn,
+            "scout-1",
+            10,
+            1000,
+            2,
+            crate::infrastructure::db::TrialPatchMeta::default(),
+        )
+        .expect("upsert trial run");
+        drop(conn);
+
+        let state = Arc::new(HttpState {
+            min_volume_usd: 1_000_000.0,
+            screener: ScreenerStore::default(),
+            natr_cache: Arc::new(DashMap::new()),
+            health: Arc::new(HealthState::new()),
+            trial_runner: TrialRunnerManager::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
+            db_path: db_path.clone(),
+        });
+
+        let Json(runs) = get_trial_runs(State(state)).await.expect("trial runs");
+        let run = runs
+            .iter()
+            .find(|r| r.run_id == "scout-1")
+            .expect("run present");
+        assert_eq!(run.apply_mode, "full_replace");
+        assert_eq!(run.symbols_reset, 0);
+        assert_eq!(run.changed_ids_requested, 0);
+        assert_eq!(run.matched_changed_ids_old, 0);
+        assert_eq!(run.matched_changed_ids_new, 0);
+        assert_eq!(run.unmatched_changed_ids, 0);
+        assert_eq!(run.scope_symbols_requested, 0);
+        assert_eq!(run.scope_symbols_matched, 0);
+
+        let _ = fs::remove_file(&db_path);
+        let _ = fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", db_path.display()));
     }
 }

@@ -240,7 +240,7 @@ impl ConfigPolicyState {
         let metrics_6h = self.window_6h.metrics_at(now_ms);
         let metrics_24h = self.window_24h.metrics_at(now_ms);
 
-        let score = SCORE_W_AVG_PNL_6H * metrics_6h.avg_pnl_pct
+        let score = SCORE_W_AVG_PNL_6H * (metrics_6h.avg_pnl_pct / 100.0)
             + SCORE_W_WIN_RATE_6H * (metrics_6h.win_rate_pct / 100.0)
             - SCORE_W_STOP_LOSS_SHARE_6H * (metrics_6h.stop_loss_share_pct / 100.0);
 
@@ -621,7 +621,11 @@ mod tests {
         approx_eq(snapshot.metrics_6h.trades, 10.0, 1e-5);
         approx_eq(snapshot.metrics_6h.win_rate_pct, 70.0, 1e-9);
         approx_eq(snapshot.metrics_6h.stop_loss_share_pct, 20.0, 1e-9);
-        assert!(snapshot.score > 0.0);
+        // avg_pnl_pct is percent, win-rate and stop-loss share are percents too.
+        // Scoring should operate in one unit system (ratio for all components).
+        // avg_pnl=0.125% => 0.00125 ratio, win_rate=0.70, stop_loss_share=0.20.
+        // score = 1.0*0.00125 + 0.20*0.70 - 0.50*0.20 = 0.04125.
+        approx_eq(snapshot.score, 0.04125, 1e-9);
     }
 
     #[test]

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import fcntl
 
+CONFIG_ID_CONTRACT_VERSION = 1
+
 
 @dataclass
 class TrialAck:
@@ -41,8 +43,10 @@ class FleetIPC:
         self.config_dir = config_dir
         self.db_path = db_path
         self.batch_path = config_dir / "trial-batch.json"
+        self.batch_queue_dir = config_dir / "trial-batches"
         self.control_path = config_dir / "trial-control.json"
         self.ack_path = config_dir / ".trial-ack"
+        self.ack_queue_dir = config_dir / "trial-acks"
         self.lock_path = config_dir / ".trial-lock"
 
     def submit_batch(
@@ -53,12 +57,22 @@ class FleetIPC:
     ) -> TrialAck:
         """Write trial-batch.json and wait for .trial-ack from Rust."""
         with self._submission_lock():
-            batch = {"run_id": run_id, "configs": configs}
-            tmp = self.batch_path.with_suffix(".tmp")
+            self.batch_queue_dir.mkdir(parents=True, exist_ok=True)
+            self.ack_queue_dir.mkdir(parents=True, exist_ok=True)
+            submission_id = f"{run_id}-{time.time_ns()}"
+            batch = {
+                "run_id": run_id,
+                "configs": configs,
+                "config_id_contract_version": CONFIG_ID_CONTRACT_VERSION,
+                "submission_id": submission_id,
+            }
+            batch_path = self.batch_queue_dir / f"{submission_id}.json"
+            ack_path = self.ack_queue_dir / f"{submission_id}.json"
+            tmp = batch_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(batch, indent=2))
-            tmp.rename(self.batch_path)  # atomic on same FS
+            tmp.rename(batch_path)  # atomic on same FS
 
-            return self._wait_ack(run_id, timeout_s)
+            return self._wait_ack(run_id, timeout_s, ack_path=ack_path)
 
     @contextmanager
     def _submission_lock(self):
@@ -72,12 +86,15 @@ class FleetIPC:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             lock_file.close()
 
-    def _wait_ack(self, run_id: str, timeout_s: float) -> TrialAck:
+    def _wait_ack(
+        self, run_id: str, timeout_s: float, ack_path: Path | None = None
+    ) -> TrialAck:
         deadline = time.monotonic() + timeout_s
+        target_ack = ack_path or self.ack_path
         while time.monotonic() < deadline:
-            if self.ack_path.exists():
+            if target_ack.exists():
                 try:
-                    ack = json.loads(self.ack_path.read_text())
+                    ack = json.loads(target_ack.read_text())
                     if ack.get("run_id") == run_id:
                         if ack.get("status") == "error":
                             raise RuntimeError(

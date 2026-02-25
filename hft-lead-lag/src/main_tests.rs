@@ -108,13 +108,64 @@ fn file_fingerprint_change_skips_when_fingerprint_same() {
 
 #[test]
 fn trial_ack_failure_serialization_includes_status_and_error() {
-    let ack = TrialAck::error("run-err".to_string(), "invalid payload".to_string());
+    let ack = TrialAck::error(
+        "run-err".to_string(),
+        "invalid payload".to_string(),
+        None,
+    );
     let json = serde_json::to_value(&ack).expect("serialize");
     assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("error"));
     assert_eq!(
         json.get("error").and_then(|v| v.as_str()),
         Some("invalid payload")
     );
+}
+
+#[test]
+fn write_trial_ack_uses_submission_scoped_ack_file_when_present() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-ack-scope-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let ack = TrialAck::success(
+        "run-1".to_string(),
+        1_000,
+        3,
+        0,
+        Some("sub-1".to_string()),
+    );
+
+    write_trial_ack(&dir, &ack);
+
+    assert!(dir.join("trial-acks").join("sub-1.json").exists());
+    assert!(!dir.join(".trial-ack").exists());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn list_trial_batch_queue_files_returns_sorted_json_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-batch-queue-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    let queue_dir = trial_batch_queue_dir(&dir);
+    fs::create_dir_all(&queue_dir).expect("create queue dir");
+    fs::write(queue_dir.join("z.json"), "{}").expect("write z");
+    fs::write(queue_dir.join("a.json"), "{}").expect("write a");
+    fs::write(queue_dir.join("ignore.txt"), "{}").expect("write txt");
+
+    let files = list_trial_batch_queue_files(&dir);
+    let names: Vec<String> = files
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|n| n.to_str()))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(names, vec!["a.json".to_string(), "z.json".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -125,6 +176,8 @@ fn build_trial_batch_patch_plan_rejects_incremental_without_changed_ids() {
         mode: Some("incremental".to_string()),
         changed_config_ids: None,
         symbols: None,
+        config_id_contract_version: None,
+        submission_id: None,
     };
     let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
     assert!(
@@ -141,6 +194,8 @@ fn build_trial_batch_patch_plan_rejects_incremental_with_empty_changed_ids() {
         mode: Some("incremental".to_string()),
         changed_config_ids: Some(Vec::new()),
         symbols: None,
+        config_id_contract_version: None,
+        submission_id: None,
     };
     let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
     assert!(
@@ -158,10 +213,31 @@ fn build_trial_batch_patch_plan_rejects_incremental_with_empty_symbols_after_tri
         mode: Some("incremental".to_string()),
         changed_config_ids: Some(vec![cfg.config_id()]),
         symbols: Some(vec![" ".to_string(), "".to_string()]),
+        config_id_contract_version: None,
+        submission_id: None,
     };
     let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
     assert!(
         err.contains("symbols must contain"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn build_trial_batch_patch_plan_rejects_config_id_contract_version_mismatch() {
+    let cfg = TraderConfig::default();
+    let batch = TrialBatch {
+        run_id: "run-version-mismatch".to_string(),
+        configs: vec![cfg],
+        mode: Some("incremental".to_string()),
+        changed_config_ids: Some(vec![cfg.config_id()]),
+        symbols: None,
+        config_id_contract_version: Some(999),
+        submission_id: None,
+    };
+    let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
+    assert!(
+        err.contains("config_id contract version mismatch"),
         "unexpected error: {err}"
     );
 }
@@ -206,6 +282,8 @@ fn trial_batch_patch_plan_full_replace_resets_all_symbols() {
         mode: None,
         changed_config_ids: None,
         symbols: None,
+        config_id_contract_version: None,
+        submission_id: None,
     };
     let plan = build_trial_batch_patch_plan(&batch).expect("build patch plan");
     assert!(matches!(plan.mode, FleetPatchMode::FullReplace));
@@ -237,6 +315,8 @@ fn trial_batch_patch_plan_incremental_respects_symbol_scope() {
         mode: Some("incremental".to_string()),
         changed_config_ids: Some(vec![cfg_a.config_id()]),
         symbols: Some(vec!["btcusdt".to_string()]),
+        config_id_contract_version: None,
+        submission_id: None,
     };
     let plan = build_trial_batch_patch_plan(&batch).expect("build patch plan");
     assert!(matches!(plan.mode, FleetPatchMode::Incremental));

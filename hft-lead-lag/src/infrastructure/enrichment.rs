@@ -115,6 +115,9 @@ pub async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             ScreenerRow {
                 symbol,
                 leader_exchange: if binance_volume >= gate_volume { "binance" } else { "gate" },
+                data_source: "rest_fallback",
+                is_fallback: true,
+                last_update_ms: crate::domain::screener::utils::now_ms(),
                 lag_ms: 0.0,
                 ws_drift_ms: 0.0,
                 ws_drift_binance_ms: 0.0,
