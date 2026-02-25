@@ -364,7 +364,7 @@ enum DbCommand {
 enum EnqueueOutcome {
     QueuedPrimary,
     QueuedOverflow,
-    DeferredOverflow,
+    DroppedOverflowFull,
     DroppedClosed,
 }
 
@@ -372,44 +372,23 @@ fn try_enqueue_command(
     tx: &mpsc::Sender<DbCommand>,
     overflow_tx: &mpsc::Sender<DbCommand>,
     command: DbCommand,
-) -> (EnqueueOutcome, Option<DbCommand>) {
+) -> EnqueueOutcome {
     match tx.try_send(command) {
-        Ok(()) => (EnqueueOutcome::QueuedPrimary, None),
+        Ok(()) => EnqueueOutcome::QueuedPrimary,
         Err(tokio::sync::mpsc::error::TrySendError::Full(command)) => {
             match overflow_tx.try_send(command) {
-                Ok(()) => (EnqueueOutcome::QueuedOverflow, None),
+                Ok(()) => EnqueueOutcome::QueuedOverflow,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(command)) => {
-                    (EnqueueOutcome::DeferredOverflow, Some(command))
+                    let _ = command;
+                    EnqueueOutcome::DroppedOverflowFull
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    (EnqueueOutcome::DroppedClosed, None)
+                    EnqueueOutcome::DroppedClosed
                 }
             }
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            (EnqueueOutcome::DroppedClosed, None)
-        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => EnqueueOutcome::DroppedClosed,
     }
-}
-
-fn schedule_deferred_overflow_send(overflow_tx: mpsc::Sender<DbCommand>, command: DbCommand) {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            if overflow_tx.send(command).await.is_err() {
-                let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                warn!(
-                    "db writer overflow channel closed while deferring batch (total dropped: {dropped})"
-                );
-            }
-        });
-        return;
-    }
-    std::thread::spawn(move || {
-        if overflow_tx.blocking_send(command).is_err() {
-            let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-            warn!("db writer overflow channel closed while deferring batch (total dropped: {dropped})");
-        }
-    });
 }
 
 impl DbWriter {
@@ -419,7 +398,7 @@ impl DbWriter {
             return;
         }
         let command = DbCommand::Trades(trades);
-        let (outcome, deferred_command) = try_enqueue_command(&self.tx, &self.overflow_tx, command);
+        let outcome = try_enqueue_command(&self.tx, &self.overflow_tx, command);
         match outcome {
             EnqueueOutcome::QueuedPrimary => {}
             EnqueueOutcome::QueuedOverflow => {
@@ -428,17 +407,9 @@ impl DbWriter {
                     warn!("db writer primary queue full, deferred batches total: {n}");
                 }
             }
-            EnqueueOutcome::DeferredOverflow => {
-                let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                if n.is_power_of_two() || n.is_multiple_of(1000) {
-                    warn!("db writer queues saturated, waiting for overflow capacity (deferred total: {n})");
-                }
-                let Some(command) = deferred_command else {
-                    let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                    warn!("db writer deferred command missing, dropping batch (total dropped: {dropped})");
-                    return;
-                };
-                schedule_deferred_overflow_send(self.overflow_tx.clone(), command);
+            EnqueueOutcome::DroppedOverflowFull => {
+                let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!("db writer queues saturated, dropping batch (total dropped: {n})");
             }
             EnqueueOutcome::DroppedClosed => {
                 let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
@@ -457,7 +428,7 @@ impl DbWriter {
         let _ = rx.await;
     }
 
-    /// Number of trade batches lost because the writer channel is closed.
+    /// Number of trade batches lost because writer queues are saturated or closed.
     pub fn dropped_batches() -> u64 {
         DROPPED_BATCHES.load(Ordering::Relaxed)
     }
@@ -879,8 +850,7 @@ mod tests {
             DbCommand::Trades(vec![sample_trade("ETHUSDT")]),
         );
 
-        assert_eq!(outcome.0, EnqueueOutcome::QueuedOverflow);
-        assert!(outcome.1.is_none());
+        assert_eq!(outcome, EnqueueOutcome::QueuedOverflow);
         assert!(
             matches!(overflow_rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "ETHUSDT")
         );
@@ -891,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn try_enqueue_command_defers_when_primary_and_overflow_full() {
+    fn try_enqueue_command_drops_when_primary_and_overflow_full() {
         DROPPED_BATCHES.store(0, Ordering::Relaxed);
         let (tx, _rx) = mpsc::channel::<DbCommand>(1);
         let (overflow_tx, _overflow_rx) = mpsc::channel::<DbCommand>(1);
@@ -901,16 +871,13 @@ mod tests {
             .try_send(DbCommand::Trades(vec![sample_trade("ETHUSDT")]))
             .expect("pre-fill overflow channel");
 
-        let (outcome, deferred) = try_enqueue_command(
+        let outcome = try_enqueue_command(
             &tx,
             &overflow_tx,
             DbCommand::Trades(vec![sample_trade("SOLUSDT")]),
         );
 
-        assert_eq!(outcome, EnqueueOutcome::DeferredOverflow);
-        assert!(
-            matches!(deferred, Some(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "SOLUSDT")
-        );
+        assert_eq!(outcome, EnqueueOutcome::DroppedOverflowFull);
         assert_eq!(DROPPED_BATCHES.load(Ordering::Relaxed), 0);
     }
 }

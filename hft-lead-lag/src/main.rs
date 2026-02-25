@@ -373,6 +373,19 @@ fn queue_submission_timestamp(path: &Path) -> Option<u128> {
     submission_timestamp_from_id(&submission_id)
 }
 
+fn system_time_to_unix_ns(ts: SystemTime) -> Option<u128> {
+    ts.duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|delta| delta.as_nanos())
+}
+
+fn queue_order_timestamp(path: &Path) -> Option<u128> {
+    queue_submission_timestamp(path).or_else(|| {
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        system_time_to_unix_ns(modified)
+    })
+}
+
 fn submission_timestamp_from_id(submission_id: &str) -> Option<u128> {
     if let Some((run_or_prefix, suffix)) = submission_id.rsplit_once('-') {
         if !run_or_prefix.trim().is_empty() {
@@ -557,14 +570,9 @@ fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
         }
     }
     files.sort_by(|left, right| {
-        match (
-            queue_submission_timestamp(left),
-            queue_submission_timestamp(right),
-        ) {
+        match (queue_order_timestamp(left), queue_order_timestamp(right)) {
             (Some(left_ts), Some(right_ts)) => left_ts.cmp(&right_ts).then_with(|| left.cmp(right)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => left.cmp(right),
+            _ => left.cmp(right),
         }
     });
     files
@@ -990,7 +998,7 @@ fn spawn_runtime_grid_hot_reload(
                         let request_matches = control
                             .run_id
                             .as_ref()
-                            .map_or(true, |requested| requested == &active);
+                            .is_none_or(|requested| requested == &active);
                         if request_matches {
                             let closed_at_ms = EventLoopState::now_ms();
                             if let Err(e) = close_trial_run_meta_async(
@@ -1607,27 +1615,12 @@ async fn handle_exchange_tick(
     }
 }
 
-#[derive(Clone, Copy)]
-enum GateSubscribeAttempt {
-    Success,
-    Error,
-    Timeout,
-}
-
-fn should_delay_after_gate_subscribe_attempt(attempt: GateSubscribeAttempt) -> bool {
-    match attempt {
-        GateSubscribeAttempt::Success
-        | GateSubscribeAttempt::Error
-        | GateSubscribeAttempt::Timeout => true,
-    }
-}
-
 async fn subscribe_gate_symbols(gate: &mut GateMarketData, symbols: &[String]) {
     let mut ok = 0usize;
     let mut errs = 0usize;
     let mut timeouts = 0usize;
     for symbol in symbols {
-        let attempt = match tokio::time::timeout(
+        match tokio::time::timeout(
             tokio::time::Duration::from_millis(500),
             gate.subscribe_book_ticker(symbol),
         )
@@ -1635,12 +1628,10 @@ async fn subscribe_gate_symbols(gate: &mut GateMarketData, symbols: &[String]) {
         {
             Ok(Ok(_)) => {
                 ok += 1;
-                GateSubscribeAttempt::Success
             }
             Ok(Err(e)) => {
                 errs += 1;
                 error!("Gate subscribe error {}: {}", symbol, e);
-                GateSubscribeAttempt::Error
             }
             Err(_) => {
                 timeouts += 1;
@@ -1648,12 +1639,9 @@ async fn subscribe_gate_symbols(gate: &mut GateMarketData, symbols: &[String]) {
                     "Gate subscription timeout on {}; proceeding with available streams",
                     symbol
                 );
-                GateSubscribeAttempt::Timeout
             }
-        };
-        if should_delay_after_gate_subscribe_attempt(attempt) {
-            tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
         }
+        tokio::time::sleep(tokio::time::Duration::from_millis(SUBSCRIBE_DELAY_MS)).await;
     }
     info!(
         "Gate subscription summary: ok={} err={} timeout={}",

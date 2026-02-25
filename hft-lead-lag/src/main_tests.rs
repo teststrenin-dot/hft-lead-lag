@@ -188,6 +188,48 @@ fn list_trial_batch_queue_files_returns_sorted_json_files() {
 }
 
 #[test]
+fn list_trial_batch_queue_files_uses_mtime_fallback_for_non_timestamp_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-batch-queue-fallback-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    let queue_dir = trial_batch_queue_dir(&dir);
+    fs::create_dir_all(&queue_dir).expect("create queue dir");
+
+    let manual = queue_dir.join("manual.json");
+    fs::write(&manual, "{}").expect("write manual");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .expect("now after epoch")
+        .as_nanos();
+    let timed = queue_dir.join(format!("run-a-{}.json", now_ns + 1000));
+    fs::write(&timed, "{}").expect("write timed");
+
+    let files = list_trial_batch_queue_files(&dir);
+    let names: Vec<String> = files
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|n| n.to_str()))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "manual.json".to_string(),
+            timed
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("timed filename")
+                .to_string(),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn build_trial_batch_error_ack_uses_payload_identity_when_available() {
     let dir = std::env::temp_dir().join(format!(
         "hft-lead-lag-main-batch-ack-id-{}-{}",
@@ -859,23 +901,6 @@ fn process_exchange_batch_with_single_tick_updates_once() {
     let event = ws_rx.try_recv().expect("ws event");
     assert_eq!(event.symbol, "BTCUSDT");
     assert_eq!(event.exchange, "gate");
-}
-
-#[test]
-fn gate_subscribe_delay_applies_after_timeout() {
-    assert!(should_delay_after_gate_subscribe_attempt(
-        GateSubscribeAttempt::Timeout
-    ));
-}
-
-#[test]
-fn gate_subscribe_delay_applies_after_success_and_error() {
-    assert!(should_delay_after_gate_subscribe_attempt(
-        GateSubscribeAttempt::Success
-    ));
-    assert!(should_delay_after_gate_subscribe_attempt(
-        GateSubscribeAttempt::Error
-    ));
 }
 
 #[test]
