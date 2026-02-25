@@ -14,14 +14,14 @@
 2. Fleet торгует в paper-режиме; закрытые сделки пишутся в `data/optimizer.db` через async `DbWriter`.
 3. В фоне работает watcher `spawn_runtime_grid_hot_reload`:
    - следит за `config/runtime-grid.toml` (обычный grid hot-reload),
-   - и за `config/trial-batch.json` (внешние батчи от Ray driver).
-4. Когда Python driver пишет `config/trial-batch.json`, Rust:
+   - и за trial-batch входом (`config/trial-batch.json` + `config/trial-batches/*.json`).
+4. Когда Python driver пишет batch (обычно в `config/trial-batches/<submission_id>.json`), Rust:
    - парсит `{run_id, configs[]}` + patch-mode (`full_replace`/`incremental`),
    - валидирует incremental-контракт (`changed_config_ids`, optional `symbols`),
    - upsert-ит `configs` в SQLite,
    - применяет patch в fleet: полный reset или symbol-scoped reset,
    - flush-ит pending trades,
-   - пишет `config/.trial-ack` с `run_id`, `config_count`, `drained_trades`.
+   - пишет ack (`config/trial-acks/<submission_id>.json`, fallback: `config/.trial-ack`).
 5. После применения batch все новые fleet-сделки получают этот `run_id` и пишутся в `trades.run_id`.
 6. Python driver читает агрегаты из `optimizer.db` и на их основе делает `scout/expand/forward/promote`.
 7. Результаты смотришь в:
@@ -41,8 +41,8 @@
 
 1. Реальная интеграция driver-а: `ray_driver/*` (`scout`, `expand`, `forward`, `promote`).
 2. File IPC контракт Rust <-> Python:
-   - input: `config/trial-batch.json`,
-   - ack: `config/.trial-ack`.
+   - input: `config/trial-batches/<submission_id>.json` (legacy: `config/trial-batch.json`),
+   - ack: `config/trial-acks/<submission_id>.json` (legacy: `config/.trial-ack`).
 3. Трейды помечаются `run_id` и доступны для аналитики run-by-run:
    - `trades.run_id`,
    - API `/api/v1/trials*`,
@@ -52,7 +52,7 @@
 
 ### 2.1 Trial-Batch Contract Modes
 
-`config/trial-batch.json` поддерживает два режима:
+Trial-batch payload (`config/trial-batches/*.json` и legacy `config/trial-batch.json`) поддерживает два режима:
 
 1. `full_replace`:
    - default, если `mode` отсутствует;
@@ -178,7 +178,9 @@ python3 -m ray_driver promote <run_id> --top-k 50 --min-trades 5 --min-pnl 0.0
 Ключевые артефакты:
 
 - `config/trial-batch.json` — batch на применение в runtime (`full_replace` или `incremental`).
-- `config/.trial-ack` — подтверждение применения.
+- `config/trial-batches/*.json` — очередной batch на применение в runtime.
+- `config/trial-acks/*.json` — submission-scoped ack от runtime.
+- `config/.trial-ack` — legacy fallback ack.
 - `data/scout-references.json` — seed для expand/forward.
 - `data/promoted-<run_id>.json` — кандидаты на ручной promotion.
 
@@ -187,7 +189,7 @@ Rollback к safe-path:
 1. Убери `mode` из payload (или явно поставь `mode: "full_replace"`).
 2. Отправь batch повторно.
 3. Проверь статус runner-а: `GET /api/v1/trials/runner/status?tail=50`.
-4. Убедись, что `.trial-ack` обновился с нужным `run_id`.
+4. Убедись, что `trial-acks/<submission_id>.json` получен с нужным `run_id`.
 
 ---
 
@@ -221,8 +223,8 @@ python3 -m ray_driver scout --duration 900
 Что произойдет:
 
 1. Driver сгенерирует coarse сетку (до `MAX_SCOUT_CONFIGS=3000`).
-2. Отправит batch в runtime через `config/trial-batch.json`.
-3. Дождется `.trial-ack`.
+2. Отправит batch в runtime через `config/trial-batches/<submission_id>.json`.
+3. Дождется `config/trial-acks/<submission_id>.json`.
 4. Подождет `duration`.
 5. Сохранит references в `data/scout-references.json`.
 
@@ -266,7 +268,7 @@ python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interv
 1. Это paper execution (real order routing ещё не интегрирован).
 2. `forward` сейчас запускается как `num_samples=1` (один Ray trial на batch конфигов), поэтому ASHA не делает полноценный multi-trial отбор.
 3. `promote` сохраняет JSON и не применяет автоматически в `runtime-grid.toml`.
-4. File IPC single-path (`config/trial-batch.json`) не рассчитан на несколько параллельных driver-процессов.
+4. Trial-batch apply в runtime однопоточный (FIFO queue consumer), поэтому большие очереди увеличивают latency до ack.
 5. `dislocation_reversion` объявлен в config enum, но runtime-build пока поддерживает только `lead_lag_classic`.
 
 ---

@@ -56,21 +56,21 @@ def test_wait_ack_raises_runtime_error_on_failure_ack(tmp_path):
     assert not ack_path.exists()
 
 
-def test_clear_ack_removes_stale_queue_ack_json_files(tmp_path):
+def test_clear_ack_keeps_submission_scoped_queue_ack_files(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     ipc = FleetIPC(config_dir=config_dir, db_path=tmp_path / "optimizer.db")
     queue_dir = config_dir / "trial-acks"
     queue_dir.mkdir(parents=True, exist_ok=True)
-    stale_a = queue_dir / "a.json"
-    stale_b = queue_dir / "b.json"
+    queued_a = queue_dir / "a.json"
+    queued_b = queue_dir / "b.json"
     keep_txt = queue_dir / "keep.txt"
-    stale_a.write_text("{}")
-    stale_b.write_text("{}")
+    queued_a.write_text("{}")
+    queued_b.write_text("{}")
     keep_txt.write_text("keep")
 
     ipc.clear_ack()
 
-    assert not stale_a.exists()
-    assert not stale_b.exists()
+    assert queued_a.exists()
+    assert queued_b.exists()
     assert keep_txt.exists()

@@ -7,7 +7,7 @@ import time
 from ray_driver.ipc import CONFIG_ID_CONTRACT_VERSION, FleetIPC, TrialAck
 
 
-def test_submit_batch_serializes_parallel_calls(monkeypatch, tmp_path):
+def test_submit_batch_allows_parallel_calls(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
 
@@ -43,9 +43,9 @@ def test_submit_batch_serializes_parallel_calls(monkeypatch, tmp_path):
     t.join(timeout=2.0)
     assert not t.is_alive()
 
-    # With serialization lock, second call waits for first (~0.20s left)
-    # plus its own wait (~0.25s). Without lock this is ~0.25s.
-    assert elapsed >= 0.40
+    # Without global submission lock, second call should not wait for the first
+    # (allowing multi-driver submissions via queue files).
+    assert elapsed < 0.40
 
 
 def test_submit_batch_writes_config_contract_version(monkeypatch, tmp_path):

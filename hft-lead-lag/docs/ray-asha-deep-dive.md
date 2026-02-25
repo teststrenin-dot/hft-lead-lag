@@ -27,8 +27,8 @@ Ray driver управляет поиском гиперпараметров, а 
 ## 2) End-to-End поток
 
 ```text
-python ray_driver  --(trial-batch.json)-->  rust runtime
-rust runtime       --(.trial-ack)------->   python ray_driver
+python ray_driver  --(trial-batches/<submission_id>.json)-->  rust runtime
+rust runtime       --(trial-acks/<submission_id>.json)----->   python ray_driver
 rust runtime       --(trades+configs)-->    optimizer.db
 api/ui             <--(read-only)--------   optimizer.db
 ```
@@ -36,9 +36,9 @@ api/ui             <--(read-only)--------   optimizer.db
 Последовательность:
 
 1. Driver формирует `run_id` и набор конфигов.
-2. `FleetIPC.submit_batch()` пишет `config/trial-batch.json` и ждёт `.trial-ack`.
+2. `FleetIPC.submit_batch()` пишет `config/trial-batches/<submission_id>.json` и ждёт `config/trial-acks/<submission_id>.json`.
 3. Rust watcher замечает изменение файла, валидирует batch и применяет его.
-4. Rust пишет `.trial-ack` с итогом применения.
+4. Rust пишет submission-scoped ack в `trial-acks`.
 5. Fleet торгует с новым набором конфигов; трейды получают `run_id`.
 6. Driver читает агрегаты из SQLite для принятия решений.
 7. API `/api/v1/trials*` и `/trials` показывают run-level статистику.
@@ -47,7 +47,7 @@ api/ui             <--(read-only)--------   optimizer.db
 
 ## 3) IPC контракт
 
-### 3.1 Input: `config/trial-batch.json` (Python -> Rust)
+### 3.1 Input: `config/trial-batches/<submission_id>.json` (Python -> Rust)
 
 ```json
 {
@@ -90,7 +90,7 @@ api/ui             <--(read-only)--------   optimizer.db
 - invalid incremental payload не применяется частично (batch skip + `warn`).
 - если часть `changed_config_ids` неизвестна, runtime логирует `unmatched_changed_ids`.
 
-### 3.2 Ack: `config/.trial-ack` (Rust -> Python)
+### 3.2 Ack: `config/trial-acks/<submission_id>.json` (Rust -> Python)
 
 ```json
 {
@@ -113,7 +113,7 @@ api/ui             <--(read-only)--------   optimizer.db
 
 Ключевая логика:
 
-1. На каждом цикле watcher проверяет `mtime` у `config/trial-batch.json`.
+1. На каждом цикле watcher проверяет `mtime` у `config/trial-batch.json` и очередь `config/trial-batches/*.json`.
 2. Если batch изменился:
    - `load_trial_batch()`,
    - `build_trial_batch_patch_plan()` (strict validation),
@@ -133,7 +133,7 @@ Rollback / fallback path:
 
 1. Перейти на `full_replace` (удалить `mode` или поставить `mode: "full_replace"`).
 2. Переотправить batch.
-3. Проверить `/api/v1/trials/runner/status?tail=50` и `config/.trial-ack`.
+3. Проверить `/api/v1/trials/runner/status?tail=50` и `config/trial-acks/<submission_id>.json`.
 
 ---
 
@@ -287,7 +287,7 @@ python3 -m ray_driver promote <run_id> --top-k 50 --min-trades 5 --min-pnl 0.0
 
 1. `forward` работает с `num_samples=1`, то есть один Ray trial на весь batch конфигов.
 2. `promote` не применяет изменения в runtime автоматически, только экспортирует JSON.
-3. IPC через один файл `config/trial-batch.json` не безопасен для нескольких одновременных driver-процессов.
+3. Runtime применяет trial-batch queue последовательно (single consumer), поэтому большие очереди повышают ack latency.
 4. При слабом потоке сигналов возможно много конфигов с `0 trades`, тогда выборка noisy.
 
 ---

@@ -3,11 +3,8 @@
 import json
 import sqlite3
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from pathlib import Path
-
-import fcntl
 
 CONFIG_ID_CONTRACT_VERSION = 1
 
@@ -56,7 +53,6 @@ class FleetIPC:
         self.control_path = config_dir / "trial-control.json"
         self.ack_path = config_dir / ".trial-ack"
         self.ack_queue_dir = config_dir / "trial-acks"
-        self.lock_path = config_dir / ".trial-lock"
 
     def submit_batch(
         self,
@@ -65,35 +61,22 @@ class FleetIPC:
         timeout_s: float = 30.0,
     ) -> TrialAck:
         """Write trial-batch.json and wait for .trial-ack from Rust."""
-        with self._submission_lock():
-            self.batch_queue_dir.mkdir(parents=True, exist_ok=True)
-            self.ack_queue_dir.mkdir(parents=True, exist_ok=True)
-            submission_id = f"{run_id}-{time.time_ns()}"
-            batch = {
-                "run_id": run_id,
-                "configs": configs,
-                "config_id_contract_version": CONFIG_ID_CONTRACT_VERSION,
-                "submission_id": submission_id,
-            }
-            batch_path = self.batch_queue_dir / f"{submission_id}.json"
-            ack_path = self.ack_queue_dir / f"{submission_id}.json"
-            tmp = batch_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(batch, indent=2))
-            tmp.rename(batch_path)  # atomic on same FS
+        self.batch_queue_dir.mkdir(parents=True, exist_ok=True)
+        self.ack_queue_dir.mkdir(parents=True, exist_ok=True)
+        submission_id = f"{run_id}-{time.time_ns()}"
+        batch = {
+            "run_id": run_id,
+            "configs": configs,
+            "config_id_contract_version": CONFIG_ID_CONTRACT_VERSION,
+            "submission_id": submission_id,
+        }
+        batch_path = self.batch_queue_dir / f"{submission_id}.json"
+        ack_path = self.ack_queue_dir / f"{submission_id}.json"
+        tmp = batch_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(batch, indent=2))
+        tmp.rename(batch_path)  # atomic on same FS
 
-            return self._wait_ack(run_id, timeout_s, ack_path=ack_path)
-
-    @contextmanager
-    def _submission_lock(self):
-        """Serialize batch submissions across parallel driver processes."""
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        lock_file = self.lock_path.open("a+")
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            lock_file.close()
+        return self._wait_ack(run_id, timeout_s, ack_path=ack_path)
 
     def _wait_ack(
         self, run_id: str, timeout_s: float, ack_path: Path | None = None
@@ -184,13 +167,8 @@ class FleetIPC:
             conn.close()
 
     def clear_ack(self):
-        """Remove stale legacy and queued ack files."""
+        """Remove stale legacy ack file."""
         self.ack_path.unlink(missing_ok=True)
-        try:
-            for queued_ack in self.ack_queue_dir.glob("*.json"):
-                queued_ack.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     def clear_active_run(self, run_id: str | None = None):
         """Request runtime to clear current run_id (best effort)."""
