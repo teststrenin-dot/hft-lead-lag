@@ -230,6 +230,66 @@ fn list_trial_batch_queue_files_uses_mtime_fallback_for_non_timestamp_files() {
 }
 
 #[test]
+fn archive_trial_batch_queue_file_moves_file_into_archive_bucket() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-batch-archive-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    let queue_dir = trial_batch_queue_dir(&dir);
+    fs::create_dir_all(&queue_dir).expect("create queue dir");
+    let queued_file = queue_dir.join("run-a-1.json");
+    fs::write(&queued_file, r#"{"run_id":"run-a","configs":[]}"#).expect("write queued file");
+
+    archive_trial_batch_queue_file(&dir, &queued_file, true);
+
+    assert!(!queued_file.exists());
+    let archive_dir = trial_batch_archive_dir(&dir, true);
+    let archived_files: Vec<String> = fs::read_dir(&archive_dir)
+        .expect("read archive dir")
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToString::to_string)
+        })
+        .collect();
+    assert_eq!(archived_files.len(), 1);
+    assert!(archived_files[0].contains("run-a-1.json"));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn archive_trial_batch_queue_file_prunes_archive_to_max_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-batch-archive-prune-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    let queue_dir = trial_batch_queue_dir(&dir);
+    fs::create_dir_all(&queue_dir).expect("create queue dir");
+
+    let file_count = TRIAL_BATCH_ARCHIVE_MAX_FILES + 8;
+    for idx in 0..file_count {
+        let queued_file = queue_dir.join(format!("run-a-{idx}.json"));
+        fs::write(&queued_file, "{}").expect("write queued file");
+        archive_trial_batch_queue_file(&dir, &queued_file, true);
+    }
+
+    let archive_dir = trial_batch_archive_dir(&dir, true);
+    let archived_count = fs::read_dir(&archive_dir)
+        .expect("read archive dir")
+        .filter_map(Result::ok)
+        .count();
+    assert_eq!(archived_count, TRIAL_BATCH_ARCHIVE_MAX_FILES);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn build_trial_batch_error_ack_uses_payload_identity_when_available() {
     let dir = std::env::temp_dir().join(format!(
         "hft-lead-lag-main-batch-ack-id-{}-{}",

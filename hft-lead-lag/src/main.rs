@@ -548,6 +548,13 @@ fn trial_batch_queue_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("trial-batches")
 }
 
+const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = 256;
+
+fn trial_batch_archive_dir(config_dir: &Path, success: bool) -> PathBuf {
+    let bucket = if success { "ok" } else { "error" };
+    config_dir.join("trial-batches-archive").join(bucket)
+}
+
 fn trial_ack_queue_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("trial-acks")
 }
@@ -576,6 +583,82 @@ fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
         }
     });
     files
+}
+
+fn prune_trial_batch_archive_dir(archive_dir: &Path, max_files: usize) {
+    let entries = match std::fs::read_dir(archive_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    let mut files: Vec<(SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        })
+        .map(|path| {
+            let modified = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            (modified, path)
+        })
+        .collect();
+    if files.len() <= max_files {
+        return;
+    }
+    files.sort_by(|(left_ts, left_path), (right_ts, right_path)| {
+        left_ts
+            .cmp(right_ts)
+            .then_with(|| left_path.cmp(right_path))
+    });
+    let remove_count = files.len().saturating_sub(max_files);
+    for (_, path) in files.into_iter().take(remove_count) {
+        if let Err(e) = std::fs::remove_file(&path) {
+            warn!(
+                "trial-batch queue: failed to prune archived file {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn archive_trial_batch_queue_file(config_dir: &Path, queued_batch_path: &Path, success: bool) {
+    let archive_dir = trial_batch_archive_dir(config_dir, success);
+    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
+        warn!(
+            "trial-batch queue: failed to create archive dir {}: {e}",
+            archive_dir.display()
+        );
+        if let Err(remove_err) = std::fs::remove_file(queued_batch_path) {
+            warn!(
+                "trial-batch queue: failed to remove {} after archive error: {remove_err}",
+                queued_batch_path.display()
+            );
+        }
+        return;
+    }
+    let file_name = queued_batch_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("batch.json");
+    let archived_path = archive_dir.join(format!("{}-{file_name}", EventLoopState::now_ms()));
+    if let Err(e) = std::fs::rename(queued_batch_path, &archived_path) {
+        warn!(
+            "trial-batch queue: failed to archive {} -> {}: {e}",
+            queued_batch_path.display(),
+            archived_path.display()
+        );
+        if let Err(remove_err) = std::fs::remove_file(queued_batch_path) {
+            warn!(
+                "trial-batch queue: failed to remove {} after archive rename error: {remove_err}",
+                queued_batch_path.display()
+            );
+        }
+        return;
+    }
+    prune_trial_batch_archive_dir(&archive_dir, TRIAL_BATCH_ARCHIVE_MAX_FILES);
 }
 
 fn write_trial_ack(dir: &Path, ack: &TrialAck) {
@@ -1123,12 +1206,7 @@ async fn maybe_handle_trial_batch_queue(
         true,
     )
     .await;
-    if let Err(e) = std::fs::remove_file(&queued_batch_path) {
-        warn!(
-            "trial-batch queue: failed to remove {}: {e}",
-            queued_batch_path.display()
-        );
-    }
+    archive_trial_batch_queue_file(config_dir, &queued_batch_path, is_ok);
     is_ok
 }
 
