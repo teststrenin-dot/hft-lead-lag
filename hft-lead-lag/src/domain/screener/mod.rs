@@ -16,6 +16,7 @@ pub mod trader_config;
 pub mod utils;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::{collections::HashSet, fmt};
 
 use arc_swap::ArcSwap;
@@ -36,6 +37,9 @@ pub use self::trader_config::{CONFIG_ID_CONTRACT_VERSION, TraderConfig};
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
+const SYMBOL_STALE_TTL_MS: i64 = 30 * 60 * 1000;
+const SYMBOL_CATALOG_MAX_SIZE: usize = 2_000;
+const SYMBOL_CATALOG_PRUNE_INTERVAL_MS: i64 = 30_000;
 
 // ---------------------------------------------------------------------------
 // ScreenerRow — read-model DTO for API / UI consumption
@@ -79,6 +83,7 @@ pub struct ScreenerStore {
     fleet_configs: Arc<ArcSwap<Vec<TraderConfig>>>,
     db_writer: Option<DbWriter>,
     current_run_id: Arc<ArcSwap<Option<String>>>,
+    last_catalog_prune_ms: Arc<AtomicI64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -157,6 +162,7 @@ impl ScreenerStore {
             fleet_configs: Arc::new(ArcSwap::from_pointee(generate_grid())),
             db_writer: None,
             current_run_id: Arc::new(ArcSwap::from_pointee(None)),
+            last_catalog_prune_ms: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -359,6 +365,69 @@ impl ScreenerStore {
         }
     }
 
+    fn prune_symbol_catalog_if_needed(&self, now_ms: i64) {
+        let last_prune_ms = self.last_catalog_prune_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_prune_ms) < SYMBOL_CATALOG_PRUNE_INTERVAL_MS {
+            return;
+        }
+        if self
+            .last_catalog_prune_ms
+            .compare_exchange(last_prune_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        self.prune_symbol_catalog_with_limits(now_ms, SYMBOL_STALE_TTL_MS, SYMBOL_CATALOG_MAX_SIZE);
+    }
+
+    fn prune_symbol_catalog_with_limits(
+        &self,
+        now_ms: i64,
+        stale_ttl_ms: i64,
+        max_symbols: usize,
+    ) -> usize {
+        let max_symbols = max_symbols.max(1);
+        let stale_ttl_ms = stale_ttl_ms.max(1);
+        let stale_keys: Vec<String> = self
+            .symbols
+            .iter()
+            .filter_map(|entry| {
+                let updated_at_ms = entry.value().updated_at_ms;
+                if updated_at_ms > 0 && now_ms.saturating_sub(updated_at_ms) > stale_ttl_ms {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut removed = 0usize;
+        for key in stale_keys {
+            if self.symbols.remove(&key).is_some() {
+                removed += 1;
+            }
+        }
+
+        let overflow = self.symbols.len().saturating_sub(max_symbols);
+        if overflow == 0 {
+            return removed;
+        }
+        let mut oldest: Vec<(i64, String)> = self
+            .symbols
+            .iter()
+            .map(|entry| (entry.value().updated_at_ms, entry.key().clone()))
+            .collect();
+        oldest.sort_by(|(left_ts, left_key), (right_ts, right_key)| {
+            left_ts.cmp(right_ts).then_with(|| left_key.cmp(right_key))
+        });
+        for (_, key) in oldest.into_iter().take(overflow) {
+            if self.symbols.remove(&key).is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Force flush pending DB writer buffers (best effort).
     pub async fn flush_db_writer(&self) {
         if let Some(writer) = self.db_writer.clone() {
@@ -384,6 +453,7 @@ impl ScreenerStore {
         }
 
         let clocks = TimeDomainSample::from_raw(timestamp_ns, local_receive_ts_ns, now_ms());
+        self.prune_symbol_catalog_if_needed(clocks.decision_ts_ms);
 
         let mut state = self.symbols.entry(symbol.to_string()).or_default();
 
@@ -445,6 +515,7 @@ impl ScreenerStore {
     }
 
     pub fn rows_sorted(&self) -> Vec<ScreenerRow> {
+        self.prune_symbol_catalog_if_needed(now_ms());
         let mut rows: Vec<ScreenerRow> = self
             .symbols
             .iter()
@@ -616,6 +687,49 @@ mod tests {
     }
 
     #[test]
+    fn prune_symbol_catalog_with_limits_drops_stale_symbols() {
+        let store = ScreenerStore::default();
+        let stale = SymbolState {
+            updated_at_ms: 1_000,
+            ..SymbolState::default()
+        };
+        let fresh = SymbolState {
+            updated_at_ms: 9_950,
+            ..SymbolState::default()
+        };
+        store.symbols.insert("STALE".to_string(), stale);
+        store.symbols.insert("FRESH".to_string(), fresh);
+
+        let removed = store.prune_symbol_catalog_with_limits(10_000, 500, 10);
+
+        assert_eq!(removed, 1);
+        assert!(store.symbols.get("STALE").is_none());
+        assert!(store.symbols.get("FRESH").is_some());
+    }
+
+    #[test]
+    fn prune_symbol_catalog_with_limits_enforces_cardinality_cap() {
+        let store = ScreenerStore::default();
+        for idx in 0..5 {
+            let state = SymbolState {
+                updated_at_ms: 1_000 + idx,
+                ..SymbolState::default()
+            };
+            store.symbols.insert(format!("SYM{idx}"), state);
+        }
+
+        let removed = store.prune_symbol_catalog_with_limits(2_000, 10_000, 3);
+
+        assert_eq!(removed, 2);
+        assert_eq!(store.symbols.len(), 3);
+        assert!(store.symbols.get("SYM0").is_none());
+        assert!(store.symbols.get("SYM1").is_none());
+        assert!(store.symbols.get("SYM2").is_some());
+        assert!(store.symbols.get("SYM3").is_some());
+        assert!(store.symbols.get("SYM4").is_some());
+    }
+
+    #[test]
     fn update_drains_pending_fleet_trades_even_without_db_writer() {
         let store = ScreenerStore::default();
         let cfg = config_with_gap(55.0);
@@ -691,18 +805,22 @@ mod tests {
         assert_eq!(report.symbols_reset, 2);
         assert_eq!(report.drained_trades, 0);
         assert_eq!(report.changed_ids_requested, 0);
-        assert!(store
-            .symbols
-            .get("BTCUSDT")
-            .expect("BTCUSDT state")
-            .fleet
-            .is_none());
-        assert!(store
-            .symbols
-            .get("ETHUSDT")
-            .expect("ETHUSDT state")
-            .fleet
-            .is_none());
+        assert!(
+            store
+                .symbols
+                .get("BTCUSDT")
+                .expect("BTCUSDT state")
+                .fleet
+                .is_none()
+        );
+        assert!(
+            store
+                .symbols
+                .get("ETHUSDT")
+                .expect("ETHUSDT state")
+                .fleet
+                .is_none()
+        );
     }
 
     #[test]
@@ -726,18 +844,22 @@ mod tests {
         assert_eq!(report.matched_changed_ids_old, 1);
         assert_eq!(report.matched_changed_ids_new, 1);
         assert_eq!(report.unmatched_changed_ids, 0);
-        assert!(store
-            .symbols
-            .get("BTCUSDT")
-            .expect("BTCUSDT state")
-            .fleet
-            .is_none());
-        assert!(store
-            .symbols
-            .get("ETHUSDT")
-            .expect("ETHUSDT state")
-            .fleet
-            .is_some());
+        assert!(
+            store
+                .symbols
+                .get("BTCUSDT")
+                .expect("BTCUSDT state")
+                .fleet
+                .is_none()
+        );
+        assert!(
+            store
+                .symbols
+                .get("ETHUSDT")
+                .expect("ETHUSDT state")
+                .fleet
+                .is_some()
+        );
     }
 
     #[test]
@@ -815,12 +937,14 @@ mod tests {
                 ..
             }
         ));
-        assert!(store
-            .symbols
-            .get("BTCUSDT")
-            .expect("BTCUSDT state")
-            .fleet
-            .is_some());
+        assert!(
+            store
+                .symbols
+                .get("BTCUSDT")
+                .expect("BTCUSDT state")
+                .fleet
+                .is_some()
+        );
     }
 
     #[test]
