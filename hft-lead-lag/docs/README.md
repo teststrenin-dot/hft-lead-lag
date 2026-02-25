@@ -78,8 +78,8 @@ Safety behavior:
 - `docs/README.md` (этот файл): статус, архитектура, runbook.
 - `docs/ray-asha-deep-dive.md`: полный разбор Ray/ASHA контура (IPC, runtime, API, ограничения).
 - `docs/manifest/MANIFESTO.md`: принципы и текущий фокус.
-- `docs/plans/2026-02-23-ray-asha-forward-testing-context.md`: ранний контекст/требования (исторический).
-- `docs/plans/2026-02-23-ray-asha-fleet-integration.md`: детальный implementation plan (исторический).
+- `docs/archive/2026-02-25/2026-02-23-ray-asha-forward-testing-context.md`: ранний контекст/требования (исторический).
+- `docs/archive/2026-02-25/2026-02-23-ray-asha-fleet-integration.md`: детальный implementation plan (исторический).
 - `docs/studies/*.md`: исследовательские заметки, не source of truth.
 
 ---
