@@ -4,6 +4,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -126,6 +127,9 @@ impl HttpServer {
             min_volume_usd: self.min_volume_usd,
             screener: self.screener.clone(),
             natr_cache: Arc::new(DashMap::new()),
+            fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+            fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             health: self.health.clone(),
             trial_runner: super::runner::TrialRunnerManager::new(
                 super::runner::resolve_runner_workdir(),

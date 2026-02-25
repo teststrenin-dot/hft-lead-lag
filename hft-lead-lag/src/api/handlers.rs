@@ -1,12 +1,13 @@
 //! HTTP handler functions and response types.
 
 use axum::{extract::Query, extract::State, Json};
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
@@ -30,6 +31,9 @@ pub(crate) struct HttpState {
     pub min_volume_usd: f64,
     pub screener: ScreenerStore,
     pub natr_cache: Arc<DashMap<String, CachedNatr>>,
+    pub fallback_rows_cache: Arc<ArcSwap<Vec<ScreenerRow>>>,
+    pub fallback_rows_last_refresh_ms: Arc<AtomicI64>,
+    pub fallback_rows_refresh_in_flight: Arc<AtomicBool>,
     pub health: Arc<HealthState>,
     pub trial_runner: TrialRunnerManager,
     pub db_path: PathBuf,
@@ -72,6 +76,39 @@ fn evaluate_db_saturation_health(
         drop_budget_exhausted: db_dropped_batches > DbWriter::dropped_batch_budget(),
         overflow_warn: db_overflowed_batches >= DbWriter::overflow_warn_threshold(),
     }
+}
+
+const FALLBACK_ROWS_TTL_MS: i64 = 5_000;
+
+fn should_refresh_fallback_rows_cache(
+    now_ms: i64,
+    last_refresh_ms: i64,
+    cache_empty: bool,
+) -> bool {
+    if cache_empty || last_refresh_ms <= 0 {
+        return true;
+    }
+    now_ms.saturating_sub(last_refresh_ms) >= FALLBACK_ROWS_TTL_MS
+}
+
+fn maybe_spawn_fallback_rows_refresh(state: &Arc<HttpState>) {
+    if state
+        .fallback_rows_refresh_in_flight
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let min_volume_usd = state.min_volume_usd;
+    let cache = state.fallback_rows_cache.clone();
+    let last_refresh_ms = state.fallback_rows_last_refresh_ms.clone();
+    let refresh_in_flight = state.fallback_rows_refresh_in_flight.clone();
+    tokio::spawn(async move {
+        let rows = enrichment::fallback_screener_rows(min_volume_usd).await;
+        cache.store(Arc::new(rows));
+        last_refresh_ms.store(crate::domain::screener::utils::now_ms(), Ordering::Relaxed);
+        refresh_in_flight.store(false, Ordering::Relaxed);
+    });
 }
 
 #[derive(Debug, Serialize)]
@@ -258,7 +295,13 @@ pub(crate) async fn get_symbols(
 pub(crate) async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<ScreenerResponse> {
     let live_rows = state.screener.rows_sorted();
     let mut rows: Vec<ScreenerRow> = if live_rows.is_empty() {
-        enrichment::fallback_screener_rows(state.min_volume_usd).await
+        let now_ms = crate::domain::screener::utils::now_ms();
+        let cached_rows = state.fallback_rows_cache.load_full();
+        let last_refresh_ms = state.fallback_rows_last_refresh_ms.load(Ordering::Relaxed);
+        if should_refresh_fallback_rows_cache(now_ms, last_refresh_ms, cached_rows.is_empty()) {
+            maybe_spawn_fallback_rows_refresh(&state);
+        }
+        cached_rows.as_ref().clone()
     } else {
         live_rows
     };
@@ -1365,6 +1408,29 @@ mod tests {
         assert!(policy.overflow_warn);
     }
 
+    #[test]
+    fn fallback_cache_refresh_policy_refreshes_when_cache_empty() {
+        assert!(should_refresh_fallback_rows_cache(10_000, 9_000, true));
+    }
+
+    #[test]
+    fn fallback_cache_refresh_policy_refreshes_when_cache_stale() {
+        assert!(should_refresh_fallback_rows_cache(
+            20_000,
+            20_000 - FALLBACK_ROWS_TTL_MS - 1,
+            false
+        ));
+    }
+
+    #[test]
+    fn fallback_cache_refresh_policy_skips_when_cache_is_fresh() {
+        assert!(!should_refresh_fallback_rows_cache(
+            20_000,
+            20_000 - FALLBACK_ROWS_TTL_MS + 1,
+            false
+        ));
+    }
+
     #[tokio::test]
     async fn health_returns_degraded_when_feed_is_stale() {
         let health_state = Arc::new(HealthState::new());
@@ -1381,6 +1447,9 @@ mod tests {
             min_volume_usd: 1_000_000.0,
             screener: ScreenerStore::default(),
             natr_cache: Arc::new(DashMap::new()),
+            fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+            fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             health: health_state,
             trial_runner: TrialRunnerManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1402,6 +1471,9 @@ mod tests {
             min_volume_usd: 1_000_000.0,
             screener: ScreenerStore::default(),
             natr_cache: Arc::new(DashMap::new()),
+            fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+            fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             health: health_state,
             trial_runner: TrialRunnerManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1477,6 +1549,9 @@ mod tests {
             min_volume_usd: 1_000_000.0,
             screener,
             natr_cache: Arc::new(DashMap::new()),
+            fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+            fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             health: health_state,
             trial_runner: TrialRunnerManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1502,6 +1577,9 @@ mod tests {
             min_volume_usd: 1_000_000.0,
             screener: ScreenerStore::default(),
             natr_cache: Arc::new(DashMap::new()),
+            fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+            fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             health: health_state,
             trial_runner: TrialRunnerManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1525,6 +1603,9 @@ mod tests {
             min_volume_usd: 1_000_000.0,
             screener: ScreenerStore::default(),
             natr_cache: Arc::new(DashMap::new()),
+            fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+            fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             health: health_state,
             trial_runner: TrialRunnerManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1553,6 +1634,9 @@ mod tests {
             min_volume_usd: 1_000_000.0,
             screener,
             natr_cache: Arc::new(DashMap::new()),
+            fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+            fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             health: health_state,
             trial_runner: TrialRunnerManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1596,6 +1680,9 @@ mod tests {
             min_volume_usd: 1_000_000.0,
             screener: ScreenerStore::default(),
             natr_cache: Arc::new(DashMap::new()),
+            fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+            fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             health: Arc::new(HealthState::new()),
             trial_runner: TrialRunnerManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
