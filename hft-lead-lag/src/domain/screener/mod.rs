@@ -10,6 +10,7 @@ mod catalog_cache;
 pub mod cycle_tracker;
 pub mod fleet_patch;
 mod fleet_reload;
+mod policy_views;
 pub mod price_samples;
 pub mod shadow_fleet;
 pub mod shadow_trader;
@@ -394,20 +395,7 @@ impl ScreenerStore {
         symbol: &str,
         top_k: usize,
     ) -> Option<Vec<PolicyConfigSnapshot>> {
-        let top_k = top_k.max(1);
-        if let Some(state) = self.symbols.get(symbol) {
-            return state
-                .fleet
-                .as_ref()
-                .map(|fleet| fleet.top_policy_configs(top_k));
-        }
-        let normalized = symbol.trim().to_ascii_uppercase();
-        self.symbols.get(&normalized).and_then(|state| {
-            state
-                .fleet
-                .as_ref()
-                .map(|fleet| fleet.top_policy_configs(top_k))
-        })
+        policy_views::top_policy_configs(self, symbol, top_k)
     }
 
     pub fn fleet_policy_overview(
@@ -415,21 +403,7 @@ impl ScreenerStore {
         top_k: usize,
         max_symbols: usize,
     ) -> Vec<(String, Vec<PolicyConfigSnapshot>)> {
-        let top_k = top_k.max(1);
-        let max_symbols = max_symbols.max(1);
-        let mut rows: Vec<(String, Vec<PolicyConfigSnapshot>)> = self
-            .symbols
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .fleet
-                    .as_ref()
-                    .map(|fleet| (entry.key().clone(), fleet.top_policy_configs(top_k)))
-            })
-            .collect();
-        rows.sort_by(|(left, _), (right, _)| left.cmp(right));
-        rows.truncate(max_symbols);
-        rows
+        policy_views::fleet_policy_overview(self, top_k, max_symbols)
     }
 }
 
