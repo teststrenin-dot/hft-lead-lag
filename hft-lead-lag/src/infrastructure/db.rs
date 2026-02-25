@@ -802,6 +802,21 @@ mod tests {
         )
         .expect("second upsert");
 
+        type TrialRunMetaRow = (
+            i64,
+            i64,
+            i64,
+            String,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<i64>,
+        );
+
         let (
             submitted,
             applied_at,
@@ -815,20 +830,7 @@ mod tests {
             scope_symbols_requested,
             scope_symbols_matched,
             closed_at,
-        ): (
-            i64,
-            i64,
-            i64,
-            String,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-            Option<i64>,
-        ) = conn
+        ): TrialRunMetaRow = conn
             .query_row(
                 "SELECT submitted_config_count, applied_at_ms, drained_trades,
                         apply_mode, symbols_reset, changed_ids_requested,

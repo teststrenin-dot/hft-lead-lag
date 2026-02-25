@@ -1595,24 +1595,33 @@ async fn handle_exchange_tick(
     side: ExchangeSide,
     result: Result<hft_lead_lag::domain::BookTicker, hft_lead_lag::domain::ExchangeError>,
     drained: Vec<hft_lead_lag::domain::BookTicker>,
-    strategy: &dyn RuntimeStrategy,
-    strategy_symbol_set: &std::collections::HashSet<&str>,
-    screener: &ScreenerStore,
-    health_state: &HealthState,
-    ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+    context: &ExchangeTickContext<'_, '_>,
 ) {
-    match state.process_exchange_result(side, result, drained, screener, ws_tx) {
+    match state.process_exchange_result(side, result, drained, context.screener, context.ws_tx) {
         Ok(updated_symbols) => {
-            side.mark_alive(health_state, EventLoopState::now_ms());
+            side.mark_alive(context.health_state, EventLoopState::now_ms());
             state
-                .update_strategy_books(side, strategy, &updated_symbols, strategy_symbol_set)
+                .update_strategy_books(
+                    side,
+                    context.strategy,
+                    &updated_symbols,
+                    context.strategy_symbol_set,
+                )
                 .await;
         }
         Err(e) => {
-            side.maybe_mark_disconnected(health_state, &e);
+            side.maybe_mark_disconnected(context.health_state, &e);
             side.log_data_error(&e);
         }
     }
+}
+
+struct ExchangeTickContext<'a, 's> {
+    strategy: &'a dyn RuntimeStrategy,
+    strategy_symbol_set: &'a std::collections::HashSet<&'s str>,
+    screener: &'a ScreenerStore,
+    health_state: &'a HealthState,
+    ws_tx: &'a tokio::sync::broadcast::Sender<MarketDataEvent>,
 }
 
 async fn subscribe_gate_symbols(gate: &mut GateMarketData, symbols: &[String]) {
@@ -1934,6 +1943,13 @@ async fn run_event_loop(
     let mut state = EventLoopState::new();
     let strategy_symbol_set: std::collections::HashSet<&str> =
         strategy_symbols.iter().map(String::as_str).collect();
+    let tick_context = ExchangeTickContext {
+        strategy,
+        strategy_symbol_set: &strategy_symbol_set,
+        screener,
+        health_state,
+        ws_tx,
+    };
 
     loop {
         tokio::select! {
@@ -1943,11 +1959,7 @@ async fn run_event_loop(
                     ExchangeSide::Binance,
                     result,
                     binance.drain_book_tickers(),
-                    strategy,
-                    &strategy_symbol_set,
-                    screener,
-                    health_state,
-                    ws_tx,
+                    &tick_context,
                 ).await;
             }
 
@@ -1957,11 +1969,7 @@ async fn run_event_loop(
                     ExchangeSide::Gate,
                     result,
                     gate.drain_book_tickers(),
-                    strategy,
-                    &strategy_symbol_set,
-                    screener,
-                    health_state,
-                    ws_tx,
+                    &tick_context,
                 ).await;
             }
 
