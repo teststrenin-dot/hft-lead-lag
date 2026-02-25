@@ -1051,6 +1051,34 @@ async fn maybe_handle_trial_control(
     }
 }
 
+async fn load_apply_ack_trial_batch(
+    screener: &ScreenerStore,
+    db_path: &Path,
+    health_state: &HealthState,
+    batch_path: &Path,
+    ack_dir: &Path,
+    is_queue_mode: bool,
+) -> bool {
+    let ack = match load_trial_batch(batch_path) {
+        Ok(batch) => apply_trial_batch(screener, db_path.to_path_buf(), batch).await,
+        Err(e) => {
+            if is_queue_mode {
+                warn!(
+                    "trial-batch queue: invalid payload {}: {e}",
+                    batch_path.display()
+                );
+            } else {
+                warn!("trial-batch: {e}");
+            }
+            build_trial_batch_error_ack(batch_path, is_queue_mode, e)
+        }
+    };
+    record_trial_ack_health(health_state, &ack);
+    let is_ok = ack.status == "ok";
+    write_trial_ack(ack_dir, &ack);
+    is_ok
+}
+
 async fn maybe_handle_trial_batch_file(
     screener: &ScreenerStore,
     db_path: &Path,
@@ -1064,24 +1092,16 @@ async fn maybe_handle_trial_batch_file(
         return false;
     }
     *last_trial_modified = trial_modified;
-    match load_trial_batch(trial_batch_path) {
-        Ok(batch) => {
-            let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
-            let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
-            record_trial_ack_health(health_state, &ack);
-            let is_ok = ack.status == "ok";
-            write_trial_ack(ack_dir, &ack);
-            is_ok
-        }
-        Err(e) => {
-            warn!("trial-batch: {e}");
-            let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
-            let ack = build_trial_batch_error_ack(trial_batch_path, false, e);
-            record_trial_ack_health(health_state, &ack);
-            write_trial_ack(ack_dir, &ack);
-            false
-        }
-    }
+    let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
+    load_apply_ack_trial_batch(
+        screener,
+        db_path,
+        health_state,
+        trial_batch_path,
+        ack_dir,
+        false,
+    )
+    .await
 }
 
 async fn maybe_handle_trial_batch_queue(
@@ -1094,25 +1114,15 @@ async fn maybe_handle_trial_batch_queue(
     else {
         return false;
     };
-    let is_ok = match load_trial_batch(&queued_batch_path) {
-        Ok(batch) => {
-            let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
-            record_trial_ack_health(health_state, &ack);
-            let ok = ack.status == "ok";
-            write_trial_ack(config_dir, &ack);
-            ok
-        }
-        Err(e) => {
-            warn!(
-                "trial-batch queue: invalid payload {}: {e}",
-                queued_batch_path.display()
-            );
-            let ack = build_trial_batch_error_ack(&queued_batch_path, true, e);
-            record_trial_ack_health(health_state, &ack);
-            write_trial_ack(config_dir, &ack);
-            false
-        }
-    };
+    let is_ok = load_apply_ack_trial_batch(
+        screener,
+        db_path,
+        health_state,
+        &queued_batch_path,
+        config_dir,
+        true,
+    )
+    .await;
     if let Err(e) = std::fs::remove_file(&queued_batch_path) {
         warn!(
             "trial-batch queue: failed to remove {}: {e}",
