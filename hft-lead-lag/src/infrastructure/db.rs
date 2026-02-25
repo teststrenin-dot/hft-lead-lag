@@ -26,6 +26,8 @@ const OVERFLOW_CHANNEL_CAPACITY: usize = 8_192;
 const RETRY_CHANNEL_CAPACITY: usize = 2_048;
 /// Final bounded spillover queue used when primary/overflow/retry are all saturated.
 const SPILLOVER_CHANNEL_CAPACITY: usize = 8_192;
+/// Last-resort bounded queue: producers block here instead of dropping batches.
+const BACKPRESSURE_CHANNEL_CAPACITY: usize = 512;
 /// Maximum allowed dropped batches under saturation before health degrades.
 const DROPPED_BATCH_BUDGET: u64 = 0;
 /// Overflowed batch count above this threshold triggers a health warning.
@@ -410,6 +412,7 @@ pub struct DbWriter {
     overflow_tx: mpsc::Sender<DbCommand>,
     retry_tx: mpsc::Sender<DbCommand>,
     spillover_tx: mpsc::Sender<DbCommand>,
+    backpressure_tx: mpsc::Sender<DbCommand>,
 }
 
 #[derive(Debug)]
@@ -418,13 +421,13 @@ enum DbCommand {
     Flush(tokio::sync::oneshot::Sender<()>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum EnqueueOutcome {
     QueuedPrimary,
     QueuedOverflow,
     QueuedRetry,
     QueuedSpillover,
-    DroppedSpilloverFull,
+    NeedsBackpressure(DbCommand),
     DroppedClosed,
 }
 
@@ -447,8 +450,7 @@ fn try_enqueue_command(
                             match spillover_tx.try_send(command) {
                                 Ok(()) => EnqueueOutcome::QueuedSpillover,
                                 Err(tokio::sync::mpsc::error::TrySendError::Full(command)) => {
-                                    let _ = command;
-                                    EnqueueOutcome::DroppedSpilloverFull
+                                    EnqueueOutcome::NeedsBackpressure(command)
                                 }
                                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                                     EnqueueOutcome::DroppedClosed
@@ -507,11 +509,19 @@ impl DbWriter {
                     );
                 }
             }
-            EnqueueOutcome::DroppedSpilloverFull => {
-                let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                warn!(
-                    "db writer queues saturated (including spillover), dropping batch (total dropped: {n})"
-                );
+            EnqueueOutcome::NeedsBackpressure(command) => {
+                let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                if n.is_power_of_two() || n.is_multiple_of(1000) {
+                    warn!(
+                        "db writer all async queues saturated; applying producer backpressure (total deferred: {n})"
+                    );
+                }
+                if self.backpressure_tx.blocking_send(command).is_err() {
+                    let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                    warn!(
+                        "db writer backpressure queue closed, dropping batch (total dropped: {dropped})"
+                    );
+                }
             }
             EnqueueOutcome::DroppedClosed => {
                 let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
@@ -557,10 +567,13 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
     let (overflow_tx, mut overflow_rx) = mpsc::channel::<DbCommand>(OVERFLOW_CHANNEL_CAPACITY);
     let (retry_tx, mut retry_rx) = mpsc::channel::<DbCommand>(RETRY_CHANNEL_CAPACITY);
     let (spillover_tx, mut spillover_rx) = mpsc::channel::<DbCommand>(SPILLOVER_CHANNEL_CAPACITY);
+    let (backpressure_tx, mut backpressure_rx) =
+        mpsc::channel::<DbCommand>(BACKPRESSURE_CHANNEL_CAPACITY);
     let path = db_path.to_path_buf();
     let primary_tx = tx.clone();
     let overflow_retry_tx = overflow_tx.clone();
     let retry_spillover_tx = retry_tx.clone();
+    let spillover_backpressure_tx = spillover_tx.clone();
 
     tokio::spawn(async move {
         while let Some(command) = overflow_rx.recv().await {
@@ -587,6 +600,16 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
             if retry_spillover_tx.send(command).await.is_err() {
                 let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
                 warn!("db writer closed while draining spillover queue (total dropped: {n})");
+                break;
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        while let Some(command) = backpressure_rx.recv().await {
+            if spillover_backpressure_tx.send(command).await.is_err() {
+                let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!("db writer closed while draining backpressure queue (total dropped: {n})");
                 break;
             }
         }
@@ -645,6 +668,7 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
         overflow_tx,
         retry_tx,
         spillover_tx,
+        backpressure_tx,
     }
 }
 
@@ -1075,7 +1099,7 @@ mod tests {
             DbCommand::Trades(vec![sample_trade("ETHUSDT")]),
         );
 
-        assert_eq!(outcome, EnqueueOutcome::QueuedOverflow);
+        assert!(matches!(outcome, EnqueueOutcome::QueuedOverflow));
         assert!(
             matches!(overflow_rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "ETHUSDT")
         );
@@ -1106,7 +1130,7 @@ mod tests {
             DbCommand::Trades(vec![sample_trade("SOLUSDT")]),
         );
 
-        assert_eq!(outcome, EnqueueOutcome::QueuedRetry);
+        assert!(matches!(outcome, EnqueueOutcome::QueuedRetry));
         assert!(
             matches!(retry_rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "SOLUSDT")
         );
@@ -1137,7 +1161,7 @@ mod tests {
             DbCommand::Trades(vec![sample_trade("ADAUSDT")]),
         );
 
-        assert_eq!(outcome, EnqueueOutcome::QueuedSpillover);
+        assert!(matches!(outcome, EnqueueOutcome::QueuedSpillover));
         assert!(
             matches!(spillover_rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "ADAUSDT")
         );
@@ -1145,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn try_enqueue_command_drops_when_all_queues_including_spillover_full() {
+    fn try_enqueue_command_requires_backpressure_when_all_queues_including_spillover_full() {
         DROPPED_BATCHES.store(0, Ordering::Relaxed);
         let (tx, _rx) = mpsc::channel::<DbCommand>(1);
         let (overflow_tx, _overflow_rx) = mpsc::channel::<DbCommand>(1);
@@ -1171,7 +1195,9 @@ mod tests {
             DbCommand::Trades(vec![sample_trade("ADAUSDT")]),
         );
 
-        assert_eq!(outcome, EnqueueOutcome::DroppedSpilloverFull);
+        assert!(
+            matches!(outcome, EnqueueOutcome::NeedsBackpressure(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "ADAUSDT")
+        );
         assert_eq!(DROPPED_BATCHES.load(Ordering::Relaxed), 0);
     }
 }
