@@ -48,9 +48,13 @@ use runtime_grid::{
 #[cfg(test)]
 use runtime_grid::RuntimeGridConfig;
 use runtime_setup::{
-    build_runtime_universe, configure_and_connect_exchanges, drain_stale_ticks,
-    fetch_volume_tickers, init_screener_persistence, spawn_gate_natr_refresher,
-    start_api_servers, subscribe_gate_symbols,
+    RuntimeUniverse, build_runtime_universe, configure_and_connect_exchanges, drain_stale_ticks,
+    fetch_volume_tickers, init_screener_persistence, spawn_gate_natr_refresher, start_api_servers,
+    subscribe_gate_symbols,
+};
+#[cfg(test)]
+use runtime_setup::{
+    SymbolReconcileOutcome, compute_common_symbols, reconcile_volume_symbols, select_runtime_symbols,
 };
 use trial_batch_protocol::{
     TrialAck, TrialBatch, build_trial_batch_patch_plan, load_trial_batch, load_trial_control,
@@ -70,21 +74,6 @@ const STRATEGY_BLACKLIST: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "DYDXUSDT
 const SIGNAL_CHECK_BUDGET_PER_TICK: usize = 256;
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SymbolReconcileOutcome {
-    Ok,
-    BinanceMissing,
-    GateMissing,
-    BothMissing,
-}
-
-struct RuntimeUniverse {
-    common_symbols: Vec<String>,
-    strategy_symbols: Vec<String>,
-    screener_symbols: Vec<String>,
-    gate_vol_map: std::collections::HashMap<String, f64>,
-}
 
 fn build_trial_batch_error_ack(path: &Path, is_queue_mode: bool, error: String) -> TrialAck {
     trial_queue_io::build_trial_batch_error_ack(path, is_queue_mode, error)
@@ -125,35 +114,6 @@ fn validate_trial_batch_run_lease(
     )
 }
 
-fn fallback_symbols() -> Vec<String> {
-    vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
-}
-
-fn reconcile_volume_symbols(
-    mut binance_symbols: Vec<String>,
-    mut gate_symbols: Vec<String>,
-) -> (Vec<String>, Vec<String>, SymbolReconcileOutcome) {
-    let outcome = if binance_symbols.is_empty() && !gate_symbols.is_empty() {
-        let fallback = fallback_symbols();
-        binance_symbols = fallback.clone();
-        gate_symbols = fallback;
-        SymbolReconcileOutcome::BinanceMissing
-    } else if gate_symbols.is_empty() && !binance_symbols.is_empty() {
-        let fallback = fallback_symbols();
-        binance_symbols = fallback.clone();
-        gate_symbols = fallback;
-        SymbolReconcileOutcome::GateMissing
-    } else if binance_symbols.is_empty() && gate_symbols.is_empty() {
-        let fallback = fallback_symbols();
-        binance_symbols = fallback.clone();
-        gate_symbols = fallback;
-        SymbolReconcileOutcome::BothMissing
-    } else {
-        SymbolReconcileOutcome::Ok
-    };
-    (binance_symbols, gate_symbols, outcome)
-}
-
 fn rebuild_latest_map(
     latest: &mut std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
     first: hft_lead_lag::domain::BookTicker,
@@ -171,32 +131,6 @@ fn rebuild_latest_map(
         latest.insert(symbol.clone(), ticker.clone());
     }
     batch_latest
-}
-
-fn select_runtime_symbols(common_symbols: &[String]) -> (Vec<String>, Vec<String>, bool) {
-    if common_symbols.is_empty() {
-        let fallback = fallback_symbols();
-        (fallback.clone(), fallback, true)
-    } else {
-        let symbols = common_symbols.to_vec();
-        (symbols.clone(), symbols, false)
-    }
-}
-
-fn compute_common_symbols(
-    binance_symbols: &[String],
-    gate_symbols: &[String],
-    blacklist: &std::collections::HashSet<&str>,
-) -> Vec<String> {
-    let binance_set: std::collections::HashSet<String> = binance_symbols.iter().cloned().collect();
-    let gate_set: std::collections::HashSet<String> = gate_symbols.iter().cloned().collect();
-    let mut common_symbols: Vec<String> = binance_set
-        .intersection(&gate_set)
-        .filter(|s| !blacklist.contains(s.as_str()))
-        .cloned()
-        .collect();
-    common_symbols.sort_unstable();
-    common_symbols
 }
 
 #[cfg(test)]
