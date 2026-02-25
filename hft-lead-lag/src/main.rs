@@ -12,7 +12,6 @@ use hft_lead_lag::infrastructure::logging::init_centralized_logging;
 use hft_lead_lag::{
     build_runtime_strategy, BinanceMarketData, ConfigManager, GateMarketData, RuntimeStrategy,
 };
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -22,6 +21,7 @@ use tracing::{error, info, warn};
 mod runtime_hot_reload;
 mod runtime_grid;
 mod runtime_setup;
+mod trial_batch_protocol;
 mod trial_batch_apply;
 mod trial_queue_io;
 mod event_loop_ingest;
@@ -49,6 +49,11 @@ use runtime_setup::{
     fetch_volume_tickers, init_screener_persistence, spawn_gate_natr_refresher,
     start_api_servers, subscribe_gate_symbols,
 };
+use trial_batch_protocol::{
+    TrialAck, TrialBatch, build_trial_batch_patch_plan, load_trial_batch, load_trial_control,
+};
+#[cfg(test)]
+use trial_batch_protocol::TrialBatchMode;
 use trial_batch_apply::{
     apply_trial_batch, close_trial_run_meta_async, upsert_runtime_configs_async,
 };
@@ -76,121 +81,6 @@ struct RuntimeUniverse {
     strategy_symbols: Vec<String>,
     screener_symbols: Vec<String>,
     gate_vol_map: std::collections::HashMap<String, f64>,
-}
-
-// ---------------------------------------------------------------------------
-// Trial batch — programmatic config injection (Ray driver)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize)]
-struct TrialBatch {
-    run_id: String,
-    configs: Vec<TraderConfig>,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    changed_config_ids: Option<Vec<u64>>,
-    #[serde(default)]
-    symbols: Option<Vec<String>>,
-    #[serde(default)]
-    config_id_contract_version: Option<u16>,
-    #[serde(default)]
-    submission_id: Option<String>,
-    #[serde(default)]
-    allow_run_id_takeover: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrialBatchMode {
-    FullReplace,
-    Incremental,
-}
-
-impl TrialBatchMode {
-    fn from_strict(mode: Option<&str>) -> Result<Self, String> {
-        let Some(raw) = mode.map(str::trim) else {
-            return Ok(Self::FullReplace);
-        };
-        if raw.eq_ignore_ascii_case("full_replace") {
-            Ok(Self::FullReplace)
-        } else if raw.eq_ignore_ascii_case("incremental") {
-            Ok(Self::Incremental)
-        } else {
-            Err(format!(
-                "trial batch mode must be full_replace|incremental, got {raw}"
-            ))
-        }
-    }
-}
-
-impl TrialBatch {
-    fn parse_mode_strict(&self) -> Result<TrialBatchMode, String> {
-        TrialBatchMode::from_strict(self.mode.as_deref())
-    }
-
-    fn validate_contract_version(&self) -> Result<(), String> {
-        let requested = self
-            .config_id_contract_version
-            .unwrap_or(CONFIG_ID_CONTRACT_VERSION);
-        if requested != CONFIG_ID_CONTRACT_VERSION {
-            return Err(format!(
-                "config_id contract version mismatch: got {requested}, expected {CONFIG_ID_CONTRACT_VERSION}"
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
-struct TrialControl {
-    clear_run_id: bool,
-    run_id: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct TrialAck {
-    run_id: String,
-    applied_at_ms: i64,
-    config_count: usize,
-    drained_trades: usize,
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    submission_id: Option<String>,
-}
-
-impl TrialAck {
-    fn success(
-        run_id: String,
-        applied_at_ms: i64,
-        config_count: usize,
-        drained_trades: usize,
-        submission_id: Option<String>,
-    ) -> Self {
-        Self {
-            run_id,
-            applied_at_ms,
-            config_count,
-            drained_trades,
-            status: "ok".to_string(),
-            error: None,
-            submission_id,
-        }
-    }
-
-    fn error(run_id: String, error: String, submission_id: Option<String>) -> Self {
-        Self {
-            run_id,
-            applied_at_ms: EventLoopState::now_ms(),
-            config_count: 0,
-            drained_trades: 0,
-            status: "error".to_string(),
-            error: Some(error),
-            submission_id,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,60 +125,6 @@ fn file_fingerprint_changed(
         Some(current) => previous != Some(current),
         None => false,
     }
-}
-
-fn load_trial_batch(path: &Path) -> Result<TrialBatch, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("read trial batch {}: {e}", path.display()))?;
-    let batch: TrialBatch = serde_json::from_str(&content)
-        .map_err(|e| format!("parse trial batch {}: {e}", path.display()))?;
-    if batch.configs.is_empty() {
-        return Err("trial batch has no configs".to_string());
-    }
-    if batch.run_id.is_empty() {
-        return Err("trial batch run_id is empty".to_string());
-    }
-    Ok(batch)
-}
-
-fn build_trial_batch_patch_plan(batch: &TrialBatch) -> Result<FleetPatchPlan, String> {
-    batch.validate_contract_version()?;
-    let mode = batch.parse_mode_strict()?;
-    match mode {
-        TrialBatchMode::FullReplace => Ok(FleetPatchPlan::new(
-            FleetPatchMode::FullReplace,
-            Vec::<u64>::new(),
-            None::<Vec<String>>,
-        )),
-        TrialBatchMode::Incremental => {
-            let changed_config_ids = batch
-                .changed_config_ids
-                .as_ref()
-                .ok_or_else(|| "incremental mode requires changed_config_ids".to_string())?;
-            if changed_config_ids.is_empty() {
-                return Err("incremental mode requires non-empty changed_config_ids".to_string());
-            }
-            let plan = FleetPatchPlan::new(
-                FleetPatchMode::Incremental,
-                changed_config_ids.iter().copied(),
-                batch.symbols.clone(),
-            );
-            if batch.symbols.is_some() && !plan.has_symbol_scope() {
-                return Err(
-                    "incremental mode symbols must contain at least one non-empty symbol"
-                        .to_string(),
-                );
-            }
-            Ok(plan)
-        }
-    }
-}
-
-fn load_trial_control(path: &Path) -> Result<TrialControl, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("read trial control {}: {e}", path.display()))?;
-    serde_json::from_str::<TrialControl>(&content)
-        .map_err(|e| format!("parse trial control {}: {e}", path.display()))
 }
 
 #[cfg(test)]
