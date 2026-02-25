@@ -26,7 +26,8 @@ const DEFAULT_STRATEGY_KIND: &str = "baseline_gap";
 
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1");
-    conn.prepare(&sql).and_then(|mut stmt| stmt.exists([column]))
+    conn.prepare(&sql)
+        .and_then(|mut stmt| stmt.exists([column]))
 }
 
 fn add_column_if_missing(
@@ -224,7 +225,12 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
         "early_stop_churn",
         "ALTER TABLE trades ADD COLUMN early_stop_churn INTEGER NOT NULL DEFAULT 0;",
     )?;
-    add_column_if_missing(&conn, "trades", "run_id", "ALTER TABLE trades ADD COLUMN run_id TEXT;")?;
+    add_column_if_missing(
+        &conn,
+        "trades",
+        "run_id",
+        "ALTER TABLE trades ADD COLUMN run_id TEXT;",
+    )?;
     add_column_if_missing(
         &conn,
         "trial_runs_meta",

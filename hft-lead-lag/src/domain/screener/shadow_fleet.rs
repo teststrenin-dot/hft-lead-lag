@@ -500,6 +500,16 @@ impl ShadowFleet {
         self.pending_trades.drain(..).collect()
     }
 
+    #[inline]
+    pub fn pending_trades_len(&self) -> usize {
+        self.pending_trades.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_pending_trade_for_test(&mut self, trade: FleetTrade) {
+        self.pending_trades.push_back(trade);
+    }
+
     /// Policy diagnostics snapshot per config (shadow decision mode).
     pub fn policy_snapshots(&self) -> Vec<PolicyConfigSnapshot> {
         self.traders

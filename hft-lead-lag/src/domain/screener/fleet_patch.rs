@@ -55,7 +55,9 @@ impl FleetPatchPlan {
     }
 
     pub fn has_symbol_scope(&self) -> bool {
-        self.symbol_scope.as_ref().is_some_and(|scope| !scope.is_empty())
+        self.symbol_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.is_empty())
     }
 
     pub fn symbol_scope_len(&self) -> usize {
@@ -90,18 +92,22 @@ mod tests {
 
     #[test]
     fn full_replace_marks_all_symbols_for_reset() {
-        let plan = FleetPatchPlan::new(FleetPatchMode::FullReplace, Vec::<u64>::new(), None::<
-            Vec<String>,
-        >);
+        let plan = FleetPatchPlan::new(
+            FleetPatchMode::FullReplace,
+            Vec::<u64>::new(),
+            None::<Vec<String>>,
+        );
         assert!(should_reset_symbol(&plan, "BTCUSDT", false));
         assert!(should_reset_symbol(&plan, "ETHUSDT", true));
     }
 
     #[test]
     fn incremental_only_resets_symbols_with_touched_configs() {
-        let plan = FleetPatchPlan::new(FleetPatchMode::Incremental, [10_u64, 20_u64], None::<
-            Vec<String>,
-        >);
+        let plan = FleetPatchPlan::new(
+            FleetPatchMode::Incremental,
+            [10_u64, 20_u64],
+            None::<Vec<String>>,
+        );
         assert!(should_reset_symbol(&plan, "BTCUSDT", true));
         assert!(!should_reset_symbol(&plan, "BTCUSDT", false));
     }

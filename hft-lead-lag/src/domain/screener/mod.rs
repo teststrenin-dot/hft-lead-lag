@@ -30,8 +30,8 @@ use self::utils::{now_ms, TimeDomainSample};
 
 use crate::infrastructure::db::DbWriter;
 
-pub use self::shadow_trader::{ChartTrade, ShadowStats};
 pub use self::shadow_fleet::PolicyConfigSnapshot;
+pub use self::shadow_trader::{ChartTrade, ShadowStats};
 pub use self::trader_config::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
@@ -236,9 +236,11 @@ impl ScreenerStore {
                 });
             }
             if match_stats.has_new_only_changed_ids && !plan.has_symbol_scope() {
-                return Err(FleetPatchApplyError::IncrementalNewConfigIdsRequireSymbolScope {
-                    changed_ids_requested: match_stats.changed_ids_requested,
-                });
+                return Err(
+                    FleetPatchApplyError::IncrementalNewConfigIdsRequireSymbolScope {
+                        changed_ids_requested: match_stats.changed_ids_requested,
+                    },
+                );
             }
         }
         self.fleet_configs.store(Arc::new(new_configs));
@@ -433,11 +435,12 @@ impl ScreenerStore {
                 run_id: run_id_ref,
             },
         );
-        if let Some(ref writer) = self.db_writer {
-            let trades = fleet.drain_trades();
-            if !trades.is_empty() {
+        let trades = fleet.drain_trades();
+        if !trades.is_empty() {
+            if let Some(ref writer) = self.db_writer {
                 writer.send(trades);
             }
+            // Without a writer attached, drop drained trades to keep fleet queue bounded.
         }
     }
 
@@ -506,9 +509,12 @@ impl ScreenerStore {
                 .map(|fleet| fleet.top_policy_configs(top_k));
         }
         let normalized = symbol.trim().to_ascii_uppercase();
-        self.symbols
-            .get(&normalized)
-            .and_then(|state| state.fleet.as_ref().map(|fleet| fleet.top_policy_configs(top_k)))
+        self.symbols.get(&normalized).and_then(|state| {
+            state
+                .fleet
+                .as_ref()
+                .map(|fleet| fleet.top_policy_configs(top_k))
+        })
     }
 }
 
@@ -521,9 +527,10 @@ impl Default for ScreenerStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        FleetPatchApplyError, FleetPatchMode, FleetPatchPlan, ScreenerStore, ShadowFleet,
-        SymbolState, TraderConfig,
+        shadow_fleet::FleetTrade, FleetPatchApplyError, FleetPatchMode, FleetPatchPlan,
+        ScreenerStore, ShadowFleet, SymbolState, TraderConfig,
     };
+    use crate::domain::screener::shadow_trader::{ClosedTrade, Direction};
 
     fn config_with_gap(spike_threshold_bps: f64) -> TraderConfig {
         TraderConfig {
@@ -538,6 +545,25 @@ mod tests {
             ..SymbolState::default()
         };
         store.symbols.insert(symbol.to_string(), state);
+    }
+
+    fn sample_closed_trade(ts_ms: i64) -> ClosedTrade {
+        ClosedTrade {
+            direction: Direction::Long,
+            entry_ts_ms: ts_ms - 500,
+            ts_ms,
+            entry_price: 100.0,
+            exit_price: 100.2,
+            spike_bps: 50.0,
+            pnl_pct: 0.2,
+            exit_reason: "trailing_take",
+            catchup_pct: 0.2,
+            catchup_ms: 500,
+            gate_spread_at_entry_bps: 1.0,
+            gate_natr_30m_pct_at_entry: 0.0,
+            hold_ms: 500,
+            early_stop_churn: false,
+        }
     }
 
     #[test]
@@ -557,11 +583,51 @@ mod tests {
     }
 
     #[test]
+    fn update_drains_pending_fleet_trades_even_without_db_writer() {
+        let store = ScreenerStore::default();
+        let cfg = config_with_gap(55.0);
+        with_symbol_fleet(&store, "BTCUSDT", &[cfg]);
+        {
+            let mut state = store.symbols.get_mut("BTCUSDT").expect("BTCUSDT state");
+            let fleet = state.fleet.as_mut().expect("fleet");
+            fleet.push_pending_trade_for_test(FleetTrade {
+                config_id: cfg.config_id(),
+                symbol: "BTCUSDT".to_string(),
+                run_id: None,
+                trade: sample_closed_trade(2_000),
+            });
+            assert_eq!(fleet.pending_trades_len(), 1);
+        }
+
+        let ts_ns = 1_700_000_000_000_000_000_i64;
+        store.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
+        store.update(
+            "BTCUSDT",
+            "gate",
+            100.0,
+            100.1,
+            ts_ns + 1_000_000,
+            ts_ns + 1_000_000,
+        );
+
+        let state = store.symbols.get("BTCUSDT").expect("BTCUSDT state");
+        let fleet = state.fleet.as_ref().expect("fleet");
+        assert_eq!(fleet.pending_trades_len(), 0);
+    }
+
+    #[test]
     fn rows_sorted_marks_live_ws_source_and_update_time() {
         let store = ScreenerStore::default();
         let ts_ns = 1_700_000_000_000_000_000_i64;
         store.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
-        store.update("BTCUSDT", "gate", 100.0, 100.1, ts_ns + 1_000_000, ts_ns + 1_000_000);
+        store.update(
+            "BTCUSDT",
+            "gate",
+            100.0,
+            100.1,
+            ts_ns + 1_000_000,
+            ts_ns + 1_000_000,
+        );
 
         let rows = store.rows_sorted();
         assert_eq!(rows.len(), 1);
@@ -592,22 +658,18 @@ mod tests {
         assert_eq!(report.symbols_reset, 2);
         assert_eq!(report.drained_trades, 0);
         assert_eq!(report.changed_ids_requested, 0);
-        assert!(
-            store
-                .symbols
-                .get("BTCUSDT")
-                .expect("BTCUSDT state")
-                .fleet
-                .is_none()
-        );
-        assert!(
-            store
-                .symbols
-                .get("ETHUSDT")
-                .expect("ETHUSDT state")
-                .fleet
-                .is_none()
-        );
+        assert!(store
+            .symbols
+            .get("BTCUSDT")
+            .expect("BTCUSDT state")
+            .fleet
+            .is_none());
+        assert!(store
+            .symbols
+            .get("ETHUSDT")
+            .expect("ETHUSDT state")
+            .fleet
+            .is_none());
     }
 
     #[test]
@@ -631,22 +693,18 @@ mod tests {
         assert_eq!(report.matched_changed_ids_old, 1);
         assert_eq!(report.matched_changed_ids_new, 1);
         assert_eq!(report.unmatched_changed_ids, 0);
-        assert!(
-            store
-                .symbols
-                .get("BTCUSDT")
-                .expect("BTCUSDT state")
-                .fleet
-                .is_none()
-        );
-        assert!(
-            store
-                .symbols
-                .get("ETHUSDT")
-                .expect("ETHUSDT state")
-                .fleet
-                .is_some()
-        );
+        assert!(store
+            .symbols
+            .get("BTCUSDT")
+            .expect("BTCUSDT state")
+            .fleet
+            .is_none());
+        assert!(store
+            .symbols
+            .get("ETHUSDT")
+            .expect("ETHUSDT state")
+            .fleet
+            .is_some());
     }
 
     #[test]
@@ -724,14 +782,12 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            store
-                .symbols
-                .get("BTCUSDT")
-                .expect("BTCUSDT state")
-                .fleet
-                .is_some()
-        );
+        assert!(store
+            .symbols
+            .get("BTCUSDT")
+            .expect("BTCUSDT state")
+            .fleet
+            .is_some());
     }
 
     #[test]

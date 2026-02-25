@@ -1075,7 +1075,7 @@ pub(crate) async fn get_trial_runner_status(
     State(state): State<Arc<HttpState>>,
     axum::extract::Query(query): axum::extract::Query<RunnerStatusQuery>,
 ) -> Json<RunnerStatusResponse> {
-    let tail = query.tail.unwrap_or(200).max(1).min(500);
+    let tail = query.tail.unwrap_or(200).clamp(1, 500);
     Json(state.trial_runner.status(tail).await)
 }
 
@@ -1303,6 +1303,29 @@ mod tests {
             resp.db_dropped_batches,
             crate::infrastructure::db::DbWriter::dropped_batches()
         );
+    }
+
+    #[tokio::test]
+    async fn fleet_policy_endpoint_returns_empty_for_unknown_symbol() {
+        let health_state = Arc::new(HealthState::new());
+        let state = Arc::new(HttpState {
+            min_volume_usd: 1_000_000.0,
+            screener: ScreenerStore::default(),
+            natr_cache: Arc::new(DashMap::new()),
+            health: health_state,
+            trial_runner: TrialRunnerManager::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
+            db_path: PathBuf::from("data/optimizer.db"),
+        });
+
+        let Json(rows) = get_fleet_policy_for_symbol(
+            State(state),
+            axum::extract::Path("BTCUSDT".to_string()),
+            Query(FleetPolicyQuery { top_k: Some(5) }),
+        )
+        .await;
+        assert!(rows.is_empty());
     }
 
     #[tokio::test]

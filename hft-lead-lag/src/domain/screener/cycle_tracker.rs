@@ -1,7 +1,7 @@
 //! CycleTracker — measures divergence → convergence half-life and P90 zone durations.
 
-use std::collections::VecDeque;
 use super::utils::percentile;
+use std::collections::VecDeque;
 
 #[derive(Debug, Default)]
 pub struct CycleTracker {
@@ -14,15 +14,23 @@ pub struct CycleTracker {
 }
 
 impl CycleTracker {
-    pub fn update(&mut self, ts_ms: i64, divergence_bps: f64, convergence_bps: f64, window_ms: i64) {
+    pub fn update(
+        &mut self,
+        ts_ms: i64,
+        divergence_bps: f64,
+        convergence_bps: f64,
+        window_ms: i64,
+    ) {
         self.divergence_bps.push_back((ts_ms, divergence_bps));
         self.convergence_bps.push_back((ts_ms, convergence_bps));
         self.cleanup(ts_ms, window_ms);
 
-        let Some(p90_divergence) = percentile(self.divergence_bps.iter().map(|(_, v)| *v), 90.0) else {
+        let Some(p90_divergence) = percentile(self.divergence_bps.iter().map(|(_, v)| *v), 90.0)
+        else {
             return;
         };
-        let Some(p50_convergence) = percentile(self.convergence_bps.iter().map(|(_, v)| *v), 50.0) else {
+        let Some(p50_convergence) = percentile(self.convergence_bps.iter().map(|(_, v)| *v), 50.0)
+        else {
             return;
         };
 
@@ -71,19 +79,27 @@ impl CycleTracker {
     fn cleanup(&mut self, ts_ms: i64, window_ms: i64) {
         let cutoff = ts_ms - window_ms;
         while let Some((ts, _)) = self.divergence_bps.front() {
-            if *ts >= cutoff { break; }
+            if *ts >= cutoff {
+                break;
+            }
             self.divergence_bps.pop_front();
         }
         while let Some((ts, _)) = self.convergence_bps.front() {
-            if *ts >= cutoff { break; }
+            if *ts >= cutoff {
+                break;
+            }
             self.convergence_bps.pop_front();
         }
         while let Some((ts, _)) = self.half_life_samples_ms.front() {
-            if *ts >= cutoff { break; }
+            if *ts >= cutoff {
+                break;
+            }
             self.half_life_samples_ms.pop_front();
         }
         while let Some((ts, _)) = self.above_p90_samples_ms.front() {
-            if *ts >= cutoff { break; }
+            if *ts >= cutoff {
+                break;
+            }
             self.above_p90_samples_ms.pop_front();
         }
     }
