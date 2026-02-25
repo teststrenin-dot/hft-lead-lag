@@ -52,6 +52,17 @@ fn parse_json_f64_field(value: &serde_json::Value, key: &str) -> Option<f64> {
         .or_else(|| value.get(key).and_then(|v| v.as_f64()))
 }
 
+fn filter_tickers_by_volume(tickers: Vec<Ticker24h>, min_volume_usd: f64) -> Vec<Ticker24h> {
+    tickers
+        .into_iter()
+        .filter(|ticker| ticker.quote_volume >= min_volume_usd)
+        .collect()
+}
+
+fn ticker_symbols(tickers: Vec<Ticker24h>) -> Vec<String> {
+    tickers.into_iter().map(|ticker| ticker.symbol).collect()
+}
+
 fn parse_binance_ticker(value: serde_json::Value) -> Option<Ticker24h> {
     let symbol = value.get("symbol")?.as_str()?.to_string();
 
@@ -123,8 +134,7 @@ impl BinanceRestClient {
         min_volume_usd: f64,
     ) -> ExchangeResult<Vec<String>> {
         let tickers = self.get_tickers_with_volume(min_volume_usd).await?;
-
-        let symbols: Vec<String> = tickers.into_iter().map(|t| t.symbol).collect();
+        let symbols = ticker_symbols(tickers);
 
         debug!(
             "Found {} symbols with volume >= {} USD",
@@ -140,10 +150,7 @@ impl BinanceRestClient {
         min_volume_usd: f64,
     ) -> ExchangeResult<Vec<Ticker24h>> {
         let tickers = self.get_24h_tickers().await?;
-        Ok(tickers
-            .into_iter()
-            .filter(|t| t.quote_volume >= min_volume_usd)
-            .collect())
+        Ok(filter_tickers_by_volume(tickers, min_volume_usd))
     }
 }
 
@@ -259,8 +266,7 @@ impl GateRestClient {
         min_volume_usd: f64,
     ) -> ExchangeResult<Vec<String>> {
         let tickers = self.get_tickers_with_volume(min_volume_usd).await?;
-
-        let symbols: Vec<String> = tickers.into_iter().map(|t| t.symbol).collect();
+        let symbols = ticker_symbols(tickers);
 
         debug!(
             "Found {} symbols with volume >= {} USD",
@@ -276,10 +282,7 @@ impl GateRestClient {
         min_volume_usd: f64,
     ) -> ExchangeResult<Vec<Ticker24h>> {
         let tickers = self.get_24h_tickers().await?;
-        Ok(tickers
-            .into_iter()
-            .filter(|t| t.quote_volume >= min_volume_usd)
-            .collect())
+        Ok(filter_tickers_by_volume(tickers, min_volume_usd))
     }
 
     /// Get Gate NATR (%) on 30m candles for a symbol.
@@ -399,6 +402,56 @@ fn value_to_f64(value: &serde_json::Value) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_tickers_by_volume_keeps_only_threshold_matches() {
+        let tickers = vec![
+            Ticker24h {
+                symbol: "A".to_string(),
+                quote_volume: 99.0,
+                last_price: None,
+                price_change_24h_pct: None,
+            },
+            Ticker24h {
+                symbol: "B".to_string(),
+                quote_volume: 100.0,
+                last_price: None,
+                price_change_24h_pct: None,
+            },
+            Ticker24h {
+                symbol: "C".to_string(),
+                quote_volume: 101.0,
+                last_price: None,
+                price_change_24h_pct: None,
+            },
+        ];
+
+        let filtered = filter_tickers_by_volume(tickers, 100.0);
+        let symbols: Vec<String> = filtered.into_iter().map(|t| t.symbol).collect();
+        assert_eq!(symbols, vec!["B".to_string(), "C".to_string()]);
+    }
+
+    #[test]
+    fn ticker_symbols_collects_symbol_column() {
+        let tickers = vec![
+            Ticker24h {
+                symbol: "BTCUSDT".to_string(),
+                quote_volume: 0.0,
+                last_price: None,
+                price_change_24h_pct: None,
+            },
+            Ticker24h {
+                symbol: "ETHUSDT".to_string(),
+                quote_volume: 0.0,
+                last_price: None,
+                price_change_24h_pct: None,
+            },
+        ];
+        assert_eq!(
+            ticker_symbols(tickers),
+            vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
+        );
+    }
 
     #[test]
     fn parse_binance_ticker_reads_last_price_field() {

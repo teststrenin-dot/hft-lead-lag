@@ -11,9 +11,9 @@
 //! │  (WebSocket server, HTTP endpoints for monitoring/control)   │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │                     Application Layer                        │
-//! │  ┌──────────────────┐  ┌──────────────────┐                 │
-//! │  │  Lead-Lag Strat. │  │  Risk Manager    │                 │
-//! │  └──────────────────┘  └──────────────────┘                 │
+//! │  ┌──────────────────┐                                        │
+//! │  │  Lead-Lag Strat. │                                        │
+//! │  └──────────────────┘                                        │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │                      Domain Layer                            │
 //! │  ┌────────────┐  ┌────────────┐  ┌────────────┐             │
@@ -82,9 +82,7 @@ pub use domain::{
 
 pub use infrastructure::exchanges::{BinanceMarketData, GateMarketData};
 
-pub use application::services::{
-    LeadLagSignal, LeadLagStrategy, LeadLagStrategyConfig, RiskLimits, RiskManager,
-};
+pub use application::services::{LeadLagSignal, LeadLagStrategy, LeadLagStrategyConfig};
 pub use application::strategies::{
     build_runtime_strategy, RuntimeStrategy, StrategyBuildError, StrategySignal,
 };
