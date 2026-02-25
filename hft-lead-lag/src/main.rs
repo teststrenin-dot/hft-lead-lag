@@ -1066,13 +1066,13 @@ fn update_trial_queue_depth_health(health_state: &HealthState, config_dir: &Path
 
 const HOT_RELOAD_DEFAULT_SLEEP_MS: u64 = 5_000;
 const HOT_RELOAD_MIN_SLEEP_MS: u64 = 500;
-const TRIAL_WATCH_SLEEP_MS: u64 = 500;
+const TRIAL_BATCH_WATCH_SLEEP_MS: u64 = 500;
+const TRIAL_CONTROL_WATCH_SLEEP_MS: u64 = 500;
 const RUNTIME_GRID_RESET_CHANNEL_CAPACITY: usize = 32;
 
 #[derive(Default)]
-struct TrialWatchState {
+struct TrialBatchWatchState {
     last_trial_modified: Option<FileFingerprint>,
-    last_trial_control_modified: Option<FileFingerprint>,
 }
 
 struct RuntimeGridWatchState {
@@ -1300,28 +1300,41 @@ fn runtime_grid_sleep_ms(pending: Option<&RuntimeGridGeneration>) -> u64 {
         .max(HOT_RELOAD_MIN_SLEEP_MS)
 }
 
-async fn run_trial_watch_loop(
+async fn run_trial_control_watch_loop(
     screener: ScreenerStore,
     db_path: PathBuf,
-    health_state: Arc<HealthState>,
-    trial_batch_path: PathBuf,
     trial_control_path: PathBuf,
-    grid_reset_tx: tokio::sync::mpsc::Sender<()>,
 ) {
-    let mut state = TrialWatchState::default();
-    let config_dir = trial_batch_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    let mut last_trial_control_modified: Option<FileFingerprint> = None;
     loop {
         maybe_handle_trial_control(
             &screener,
             &db_path,
             &trial_control_path,
-            &mut state.last_trial_control_modified,
+            &mut last_trial_control_modified,
         )
         .await;
 
+        tokio::time::sleep(tokio::time::Duration::from_millis(
+            TRIAL_CONTROL_WATCH_SLEEP_MS,
+        ))
+        .await;
+    }
+}
+
+async fn run_trial_batch_watch_loop(
+    screener: ScreenerStore,
+    db_path: PathBuf,
+    health_state: Arc<HealthState>,
+    trial_batch_path: PathBuf,
+    grid_reset_tx: tokio::sync::mpsc::Sender<()>,
+) {
+    let mut state = TrialBatchWatchState::default();
+    let config_dir = trial_batch_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    loop {
         update_trial_queue_depth_health(health_state.as_ref(), &config_dir);
 
         let mut clear_runtime_grid_pending = false;
@@ -1349,7 +1362,10 @@ async fn run_trial_watch_loop(
             let _ = grid_reset_tx.try_send(());
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(TRIAL_WATCH_SLEEP_MS)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(
+            TRIAL_BATCH_WATCH_SLEEP_MS,
+        ))
+        .await;
     }
 }
 
@@ -1425,17 +1441,23 @@ fn spawn_runtime_grid_hot_reload(
     let trial_health_state = health_state.clone();
     let trial_batch_path_clone = trial_batch_path.clone();
     let trial_control_path_clone = trial_control_path.clone();
+    let control_screener = screener.clone();
+    let control_db_path = db_path.clone();
 
     tokio::spawn(async move {
-        run_trial_watch_loop(
+        run_trial_batch_watch_loop(
             trial_screener,
             trial_db_path,
             trial_health_state,
             trial_batch_path_clone,
-            trial_control_path_clone,
             grid_reset_tx,
         )
         .await;
+    });
+
+    tokio::spawn(async move {
+        run_trial_control_watch_loop(control_screener, control_db_path, trial_control_path_clone)
+            .await;
     });
 
     tokio::spawn(async move {
