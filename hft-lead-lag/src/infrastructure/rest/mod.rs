@@ -21,6 +21,7 @@ pub struct Ticker24h {
 }
 
 /// Binance REST API client
+#[derive(Clone)]
 pub struct BinanceRestClient {
     client: Client,
     base_url: String,
@@ -143,6 +144,7 @@ impl Default for BinanceRestClient {
 }
 
 /// Gate REST API client
+#[derive(Clone)]
 pub struct GateRestClient {
     client: Client,
     api_key: Option<String>,

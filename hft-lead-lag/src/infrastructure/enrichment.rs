@@ -30,6 +30,7 @@ pub fn enrich_gate_natr_30m_cached_only(
 ) -> Vec<String> {
     let now = crate::domain::screener::utils::now_ms();
     let mut to_fetch: Vec<String> = Vec::new();
+    let mut seen_for_fetch: HashSet<String> = HashSet::new();
 
     for row in rows.iter_mut() {
         if let Some(cached) = cache.get(&row.symbol) {
@@ -39,7 +40,9 @@ pub fn enrich_gate_natr_30m_cached_only(
             }
         }
 
-        if to_fetch.len() < NATR_FETCH_LIMIT_PER_REQUEST {
+        if to_fetch.len() < NATR_FETCH_LIMIT_PER_REQUEST
+            && seen_for_fetch.insert(row.symbol.clone())
+        {
             to_fetch.push(row.symbol.clone());
         }
         row.gate_natr_30m_pct = 0.0;
@@ -56,11 +59,12 @@ pub async fn warm_gate_natr_30m_cache(
         return;
     }
     let now = crate::domain::screener::utils::now_ms();
+    let client = GateRestClient::new();
     let futs: Vec<_> = symbols
         .iter()
         .map(|symbol| {
             let sym = symbol.clone();
-            let c = GateRestClient::new();
+            let c = client.clone();
             async move {
                 match tokio::time::timeout(
                     Duration::from_millis(NATR_FETCH_TIMEOUT_MS),
@@ -230,5 +234,18 @@ mod tests {
 
         assert_eq!(rows[0].gate_natr_30m_pct, 0.0);
         assert_eq!(to_fetch, vec!["BTCUSDT".to_string()]);
+    }
+
+    #[test]
+    fn cached_only_enrichment_deduplicates_fetch_symbols() {
+        let cache = Arc::new(DashMap::new());
+        let mut rows = vec![row("BTCUSDT"), row("BTCUSDT"), row("ETHUSDT"), row("ETHUSDT")];
+
+        let to_fetch = enrich_gate_natr_30m_cached_only(&mut rows, &cache);
+
+        assert_eq!(
+            to_fetch,
+            vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
+        );
     }
 }
