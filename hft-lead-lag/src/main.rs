@@ -25,6 +25,13 @@ mod runtime_grid;
 mod runtime_setup;
 mod trial_batch_apply;
 mod trial_queue_io;
+mod event_loop_ingest;
+use event_loop_ingest::{
+    BatchIngestContext, process_exchange_batch, strategy_ticks_in_order,
+    updated_symbols_from_batch,
+};
+#[cfg(test)]
+use event_loop_ingest::ingest_latest_batch;
 use runtime_hot_reload::{spawn_runtime_grid_hot_reload, RuntimeGridHotReloadSpec};
 use runtime_grid::{
     RuntimeGridGeneration, ensure_runtime_grid_config_file, load_runtime_grid_generation_async,
@@ -385,76 +392,6 @@ fn compute_common_symbols(
         .collect();
     common_symbols.sort_unstable();
     common_symbols
-}
-
-fn strategy_ticks_in_order<'a>(
-    strategy_symbols: &'a [&'a str],
-    latest: &'a std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
-) -> impl Iterator<Item = &'a hft_lead_lag::domain::BookTicker> + 'a {
-    strategy_symbols
-        .iter()
-        .filter_map(|symbol| latest.get(*symbol))
-}
-
-fn updated_symbols_from_batch(
-    first: &hft_lead_lag::domain::BookTicker,
-    drained: &[hft_lead_lag::domain::BookTicker],
-) -> Vec<String> {
-    let mut symbols = Vec::with_capacity(drained.len() + 1);
-    symbols.push(String::from_utf8_lossy(&first.symbol).to_string());
-    for ticker in drained {
-        symbols.push(String::from_utf8_lossy(&ticker.symbol).to_string());
-    }
-    symbols.sort_unstable();
-    symbols.dedup();
-    symbols
-}
-
-fn ingest_latest_batch<F: Fn() -> i64>(
-    latest: &std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
-    ctx: &mut BatchIngestContext<'_, F>,
-) {
-    for (symbol, ticker) in latest {
-        *ctx.ticker_count += 1;
-        ctx.metrics
-            .record_tick_drift((ctx.now_ms)(), ticker.exchange_ts_ns);
-        let bid = ticker.bid_price();
-        let ask = ticker.ask_price();
-        ctx.screener.update(
-            symbol,
-            ctx.exchange,
-            bid,
-            ask,
-            ticker.exchange_ts_ns,
-            ticker.local_ts_ns,
-        );
-        let _ = ctx.ws_tx.send(MarketDataEvent {
-            symbol: symbol.clone(),
-            exchange: ctx.exchange,
-            bid,
-            ask,
-            timestamp_ns: ticker.exchange_ts_ns,
-        });
-    }
-}
-
-struct BatchIngestContext<'a, F: Fn() -> i64> {
-    exchange: &'static str,
-    ticker_count: &'a mut usize,
-    metrics: &'a mut EventLoopMetrics,
-    now_ms: &'a F,
-    screener: &'a ScreenerStore,
-    ws_tx: &'a tokio::sync::broadcast::Sender<MarketDataEvent>,
-}
-
-fn process_exchange_batch<F: Fn() -> i64>(
-    latest: &mut std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
-    first: hft_lead_lag::domain::BookTicker,
-    drained: Vec<hft_lead_lag::domain::BookTicker>,
-    ctx: &mut BatchIngestContext<'_, F>,
-) {
-    let updated_batch = rebuild_latest_map(latest, first, drained);
-    ingest_latest_batch(&updated_batch, ctx);
 }
 
 #[derive(Debug)]
