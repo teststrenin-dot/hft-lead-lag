@@ -19,6 +19,7 @@ use tracing::{error, info, warn};
 
 mod runtime_hot_reload;
 mod runtime_grid;
+mod runtime_symbols;
 mod runtime_setup;
 mod file_fingerprint;
 mod trial_batch_protocol;
@@ -50,12 +51,12 @@ use runtime_grid::{
 #[cfg(test)]
 use runtime_grid::RuntimeGridConfig;
 use runtime_setup::{
-    RuntimeUniverse, build_runtime_universe, configure_and_connect_exchanges, drain_stale_ticks,
-    fetch_volume_tickers, init_screener_persistence, spawn_gate_natr_refresher, start_api_servers,
-    subscribe_gate_symbols,
+    configure_and_connect_exchanges, drain_stale_ticks, init_screener_persistence,
+    spawn_gate_natr_refresher, start_api_servers, subscribe_gate_symbols,
 };
+use runtime_symbols::{RuntimeUniverse, build_runtime_universe, fetch_volume_tickers};
 #[cfg(test)]
-use runtime_setup::{
+use runtime_symbols::{
     SymbolReconcileOutcome, compute_common_symbols, reconcile_volume_symbols, select_runtime_symbols,
 };
 use trial_batch_protocol::{
