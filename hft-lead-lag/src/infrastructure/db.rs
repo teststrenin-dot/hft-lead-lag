@@ -106,44 +106,10 @@ CREATE TABLE IF NOT EXISTS trial_runs_meta (
     closed_at_ms INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS config_families (
-    family_id TEXT NOT NULL,
-    config_id INTEGER NOT NULL REFERENCES configs(id),
-    weight REAL NOT NULL DEFAULT 1.0,
-    generated_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (family_id, config_id)
-);
-
-CREATE TABLE IF NOT EXISTS family_symbol_clusters (
-    family_id TEXT NOT NULL,
-    cluster_id TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    useful_winrate REAL NOT NULL DEFAULT 0.0,
-    avg_pnl_pct REAL NOT NULL DEFAULT 0.0,
-    stop_loss_share_pct REAL NOT NULL DEFAULT 0.0,
-    trades INTEGER NOT NULL DEFAULT 0,
-    generated_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (family_id, cluster_id, symbol)
-);
-
-CREATE TABLE IF NOT EXISTS portfolio_state (
-    config_id INTEGER PRIMARY KEY REFERENCES configs(id),
-    family_id TEXT NOT NULL,
-    cluster_id TEXT,
-    symbols_json TEXT NOT NULL DEFAULT '[]',
-    cooldown_until_ms INTEGER,
-    quarantined INTEGER NOT NULL DEFAULT 0,
-    updated_at_ms INTEGER NOT NULL
-);
-
 CREATE INDEX IF NOT EXISTS idx_trades_config ON trades(config_id);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_exit_ts ON trades(exit_ts_ms);
 CREATE INDEX IF NOT EXISTS idx_trial_runs_meta_applied_at ON trial_runs_meta(applied_at_ms);
-CREATE INDEX IF NOT EXISTS idx_config_families_config_id ON config_families(config_id);
-CREATE INDEX IF NOT EXISTS idx_family_symbol_clusters_family_id ON family_symbol_clusters(family_id);
-CREATE INDEX IF NOT EXISTS idx_family_symbol_clusters_symbol ON family_symbol_clusters(symbol);
-CREATE INDEX IF NOT EXISTS idx_portfolio_state_family_id ON portfolio_state(family_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_natural_key ON trades(config_id, symbol, entry_ts_ms, exit_ts_ms);
 ";
 
@@ -944,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn open_db_creates_family_cluster_tables() {
+    fn open_db_omits_unused_family_cluster_tables() {
         let path = temp_db_path("family-cluster-tables");
         let conn = open_db(&path).expect("open db");
 
@@ -957,7 +923,7 @@ mod tests {
                 .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1")
                 .and_then(|mut stmt| stmt.exists([table_name]))
                 .expect("table exists query");
-            assert!(has_table, "{table_name} table must exist");
+            assert!(!has_table, "{table_name} table must be omitted");
         }
 
         drop(conn);
