@@ -8,24 +8,25 @@ use hft_lead_lag::api::{
     WsServerConfig,
 };
 use hft_lead_lag::domain::screener::fleet_patch::{FleetPatchMode, FleetPatchPlan};
-use hft_lead_lag::domain::screener::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
+use hft_lead_lag::domain::screener::{CONFIG_ID_CONTRACT_VERSION, TraderConfig};
 use hft_lead_lag::infrastructure::logging::init_centralized_logging;
 use hft_lead_lag::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 use hft_lead_lag::{
-    build_runtime_strategy, BinanceMarketData, ConfigManager, GateMarketData, MarketDataStream,
-    RuntimeStrategy,
+    BinanceMarketData, ConfigManager, GateMarketData, MarketDataStream, RuntimeStrategy,
+    build_runtime_strategy,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{error, info, warn};
 
 mod runtime_hot_reload;
-use runtime_hot_reload::{spawn_runtime_grid_hot_reload, RuntimeGridHotReloadSpec};
+mod trial_queue_io;
+use runtime_hot_reload::{RuntimeGridHotReloadSpec, spawn_runtime_grid_hot_reload};
 
 /// Minimum 24h USD volume for symbol filtering
 const MIN_VOLUME_USD: f64 = 2_500_000.0; // 2.5 million USD
@@ -38,6 +39,8 @@ const RUNTIME_GRID_CONFIG_PATH: &str = "config/runtime-grid.toml";
 /// Symbols excluded from strategy — consistently unprofitable or structurally unsuitable.
 const STRATEGY_BLACKLIST: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "DYDXUSDT"];
 const SIGNAL_CHECK_BUDGET_PER_TICK: usize = 256;
+#[cfg(test)]
+const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SymbolReconcileOutcome {
@@ -339,14 +342,6 @@ struct FileFingerprint {
     content_hash: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct TrialBatchIdentity {
-    run_id: Option<String>,
-    submission_id: Option<String>,
-}
-
-const UNKNOWN_TRIAL_RUN_ID: &str = "unknown";
-
 fn hash_content_deterministic(bytes: &[u8]) -> u64 {
     // FNV-1a 64-bit hash keeps fingerprinting deterministic and dependency-free.
     const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -359,120 +354,8 @@ fn hash_content_deterministic(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn parse_ascii_u128(raw: &str) -> Option<u128> {
-    if raw.is_empty() || !raw.as_bytes().iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    raw.parse::<u128>().ok()
-}
-
-fn queue_submission_id_from_path(path: &Path) -> Option<String> {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(str::trim)
-        .filter(|stem| !stem.is_empty())
-        .map(|stem| stem.to_string())
-}
-
-fn queue_submission_timestamp(path: &Path) -> Option<u128> {
-    let submission_id = queue_submission_id_from_path(path)?;
-    submission_timestamp_from_id(&submission_id)
-}
-
-fn system_time_to_unix_ns(ts: SystemTime) -> Option<u128> {
-    ts.duration_since(SystemTime::UNIX_EPOCH)
-        .ok()
-        .map(|delta| delta.as_nanos())
-}
-
-fn queue_order_timestamp(path: &Path) -> Option<u128> {
-    queue_submission_timestamp(path).or_else(|| {
-        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-        system_time_to_unix_ns(modified)
-    })
-}
-
-fn submission_timestamp_from_id(submission_id: &str) -> Option<u128> {
-    if let Some((run_or_prefix, suffix)) = submission_id.rsplit_once('-') {
-        if !run_or_prefix.trim().is_empty() {
-            if let Some(ts) = parse_ascii_u128(suffix.trim()) {
-                return Some(ts);
-            }
-        }
-    }
-    if let Some((prefix, run_or_suffix)) = submission_id.split_once('-') {
-        if !run_or_suffix.trim().is_empty() {
-            if let Some(ts) = parse_ascii_u128(prefix.trim()) {
-                return Some(ts);
-            }
-        }
-    }
-    parse_ascii_u128(submission_id.trim())
-}
-
-fn run_id_from_submission_id(submission_id: &str) -> Option<String> {
-    if let Some((run_id, suffix)) = submission_id.rsplit_once('-') {
-        let run_id = run_id.trim();
-        if !run_id.is_empty() && parse_ascii_u128(suffix.trim()).is_some() {
-            return Some(run_id.to_string());
-        }
-    }
-    if let Some((prefix, run_id)) = submission_id.split_once('-') {
-        let run_id = run_id.trim();
-        if !run_id.is_empty() && parse_ascii_u128(prefix.trim()).is_some() {
-            return Some(run_id.to_string());
-        }
-    }
-    None
-}
-
-fn extract_trial_batch_identity_from_payload(path: &Path) -> TrialBatchIdentity {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(_) => return TrialBatchIdentity::default(),
-    };
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(json) => json,
-        Err(_) => return TrialBatchIdentity::default(),
-    };
-    let run_id = json
-        .get("run_id")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let submission_id = json
-        .get("submission_id")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    TrialBatchIdentity {
-        run_id,
-        submission_id,
-    }
-}
-
 fn build_trial_batch_error_ack(path: &Path, is_queue_mode: bool, error: String) -> TrialAck {
-    let mut identity = extract_trial_batch_identity_from_payload(path);
-    if is_queue_mode {
-        if identity.submission_id.is_none() {
-            identity.submission_id = queue_submission_id_from_path(path);
-        }
-        if identity.run_id.is_none() {
-            identity.run_id = identity
-                .submission_id
-                .as_deref()
-                .and_then(run_id_from_submission_id);
-        }
-    }
-    TrialAck::error(
-        identity
-            .run_id
-            .unwrap_or_else(|| UNKNOWN_TRIAL_RUN_ID.to_string()),
-        error,
-        identity.submission_id,
-    )
+    trial_queue_io::build_trial_batch_error_ack(path, is_queue_mode, error)
 }
 
 fn read_file_fingerprint(path: &Path) -> Option<FileFingerprint> {
@@ -550,144 +433,26 @@ fn load_trial_control(path: &Path) -> Result<TrialControl, String> {
         .map_err(|e| format!("parse trial control {}: {e}", path.display()))
 }
 
+#[cfg(test)]
 fn trial_batch_queue_dir(config_dir: &Path) -> PathBuf {
-    config_dir.join("trial-batches")
+    trial_queue_io::trial_batch_queue_dir(config_dir)
 }
 
-const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = 256;
-
+#[cfg(test)]
 fn trial_batch_archive_dir(config_dir: &Path, success: bool) -> PathBuf {
-    let bucket = if success { "ok" } else { "error" };
-    config_dir.join("trial-batches-archive").join(bucket)
-}
-
-fn trial_ack_queue_dir(config_dir: &Path) -> PathBuf {
-    config_dir.join("trial-acks")
+    trial_queue_io::trial_batch_archive_dir(config_dir, success)
 }
 
 fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
-    let queue_dir = trial_batch_queue_dir(config_dir);
-    let mut files = Vec::new();
-    let entries = match std::fs::read_dir(queue_dir) {
-        Ok(entries) => entries,
-        Err(_) => return files,
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
-        {
-            files.push(path);
-        }
-    }
-    files.sort_by(|left, right| {
-        match (queue_order_timestamp(left), queue_order_timestamp(right)) {
-            (Some(left_ts), Some(right_ts)) => left_ts.cmp(&right_ts).then_with(|| left.cmp(right)),
-            _ => left.cmp(right),
-        }
-    });
-    files
-}
-
-fn prune_trial_batch_archive_dir(archive_dir: &Path, max_files: usize) {
-    let entries = match std::fs::read_dir(archive_dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-    let mut files: Vec<(SystemTime, PathBuf)> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
-        })
-        .map(|path| {
-            let modified = std::fs::metadata(&path)
-                .and_then(|meta| meta.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            (modified, path)
-        })
-        .collect();
-    if files.len() <= max_files {
-        return;
-    }
-    files.sort_by(|(left_ts, left_path), (right_ts, right_path)| {
-        left_ts
-            .cmp(right_ts)
-            .then_with(|| left_path.cmp(right_path))
-    });
-    let remove_count = files.len().saturating_sub(max_files);
-    for (_, path) in files.into_iter().take(remove_count) {
-        if let Err(e) = std::fs::remove_file(&path) {
-            warn!(
-                "trial-batch queue: failed to prune archived file {}: {e}",
-                path.display()
-            );
-        }
-    }
+    trial_queue_io::list_trial_batch_queue_files(config_dir)
 }
 
 fn archive_trial_batch_queue_file(config_dir: &Path, queued_batch_path: &Path, success: bool) {
-    let archive_dir = trial_batch_archive_dir(config_dir, success);
-    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
-        warn!(
-            "trial-batch queue: failed to create archive dir {}: {e}",
-            archive_dir.display()
-        );
-        if let Err(remove_err) = std::fs::remove_file(queued_batch_path) {
-            warn!(
-                "trial-batch queue: failed to remove {} after archive error: {remove_err}",
-                queued_batch_path.display()
-            );
-        }
-        return;
-    }
-    let file_name = queued_batch_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("batch.json");
-    let archived_path = archive_dir.join(format!("{}-{file_name}", EventLoopState::now_ms()));
-    if let Err(e) = std::fs::rename(queued_batch_path, &archived_path) {
-        warn!(
-            "trial-batch queue: failed to archive {} -> {}: {e}",
-            queued_batch_path.display(),
-            archived_path.display()
-        );
-        if let Err(remove_err) = std::fs::remove_file(queued_batch_path) {
-            warn!(
-                "trial-batch queue: failed to remove {} after archive rename error: {remove_err}",
-                queued_batch_path.display()
-            );
-        }
-        return;
-    }
-    prune_trial_batch_archive_dir(&archive_dir, TRIAL_BATCH_ARCHIVE_MAX_FILES);
+    trial_queue_io::archive_trial_batch_queue_file(config_dir, queued_batch_path, success);
 }
 
 fn write_trial_ack(dir: &Path, ack: &TrialAck) {
-    let path = if let Some(submission_id) = ack.submission_id.as_deref() {
-        let ack_dir = trial_ack_queue_dir(dir);
-        if let Err(e) = std::fs::create_dir_all(&ack_dir) {
-            warn!(
-                "trial-ack: failed to create queue dir {}: {e}",
-                ack_dir.display()
-            );
-        }
-        ack_dir.join(format!("{submission_id}.json"))
-    } else {
-        dir.join(".trial-ack")
-    };
-    match serde_json::to_string_pretty(ack) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                warn!("trial-ack: failed to write {}: {e}", path.display());
-            }
-        }
-        Err(e) => warn!("trial-ack: serialize error: {e}"),
-    }
+    trial_queue_io::write_trial_ack(dir, ack);
 }
 
 const DEFAULT_RUNTIME_GRID_CONFIG_TOML: &str = r#"# Runtime grid hot-reload (deal-hunt phase A)
