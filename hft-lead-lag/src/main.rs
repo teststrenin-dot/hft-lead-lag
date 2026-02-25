@@ -8,19 +8,19 @@ use hft_lead_lag::api::{
     WsServerConfig,
 };
 use hft_lead_lag::domain::screener::fleet_patch::{FleetPatchMode, FleetPatchPlan};
-use hft_lead_lag::domain::screener::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
+use hft_lead_lag::domain::screener::{CONFIG_ID_CONTRACT_VERSION, TraderConfig};
 use hft_lead_lag::infrastructure::logging::init_centralized_logging;
 use hft_lead_lag::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 use hft_lead_lag::{
-    build_runtime_strategy, BinanceMarketData, ConfigManager, GateMarketData, MarketDataStream,
-    RuntimeStrategy,
+    BinanceMarketData, ConfigManager, GateMarketData, MarketDataStream, RuntimeStrategy,
+    build_runtime_strategy,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{error, info, warn};
 
@@ -965,6 +965,315 @@ async fn apply_trial_batch(
     )
 }
 
+const HOT_RELOAD_DEFAULT_SLEEP_MS: u64 = 5_000;
+const HOT_RELOAD_MIN_SLEEP_MS: u64 = 500;
+const TRIAL_WATCH_SLEEP_MS: u64 = 500;
+const RUNTIME_GRID_RESET_CHANNEL_CAPACITY: usize = 32;
+
+#[derive(Default)]
+struct TrialWatchState {
+    last_trial_modified: Option<FileFingerprint>,
+    last_trial_control_modified: Option<FileFingerprint>,
+}
+
+struct RuntimeGridWatchState {
+    last_modified: Option<FileFingerprint>,
+    last_applied_signature: Option<u64>,
+    pending: Option<RuntimeGridGeneration>,
+    last_apply_ms: i64,
+}
+
+async fn maybe_handle_trial_control(
+    screener: &ScreenerStore,
+    db_path: &Path,
+    trial_control_path: &Path,
+    last_trial_control_modified: &mut Option<FileFingerprint>,
+) {
+    let trial_control_modified = read_file_fingerprint(trial_control_path);
+    let control_changed =
+        file_fingerprint_changed(*last_trial_control_modified, trial_control_modified);
+    if !control_changed {
+        return;
+    }
+    *last_trial_control_modified = trial_control_modified;
+    match load_trial_control(trial_control_path) {
+        Ok(control) => {
+            if !control.clear_run_id {
+                return;
+            }
+            let active_run_id = screener.current_run_id();
+            match active_run_id {
+                Some(active) => {
+                    let request_matches = control
+                        .run_id
+                        .as_ref()
+                        .is_none_or(|requested| requested == &active);
+                    if request_matches {
+                        let closed_at_ms = EventLoopState::now_ms();
+                        if let Err(e) = close_trial_run_meta_async(
+                            db_path.to_path_buf(),
+                            active.clone(),
+                            closed_at_ms,
+                        )
+                        .await
+                        {
+                            warn!("trial-control: failed to close run {active}: {e}");
+                        }
+                        screener.set_run_id(None);
+                        info!("trial-control: cleared run_id={active} closed_at_ms={closed_at_ms}");
+                    } else if let Some(requested) = control.run_id {
+                        warn!(
+                            "trial-control: requested run_id={} does not match active run_id={}",
+                            requested, active
+                        );
+                    }
+                }
+                None => info!("trial-control: no active run_id to clear"),
+            }
+        }
+        Err(e) => warn!("trial-control: {e}"),
+    }
+}
+
+async fn maybe_handle_trial_batch_file(
+    screener: &ScreenerStore,
+    db_path: &Path,
+    trial_batch_path: &Path,
+    last_trial_modified: &mut Option<FileFingerprint>,
+) -> bool {
+    let trial_modified = read_file_fingerprint(trial_batch_path);
+    let trial_changed = file_fingerprint_changed(*last_trial_modified, trial_modified);
+    if !trial_changed {
+        return false;
+    }
+    *last_trial_modified = trial_modified;
+    match load_trial_batch(trial_batch_path) {
+        Ok(batch) => {
+            let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
+            let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
+            let is_ok = ack.status == "ok";
+            write_trial_ack(ack_dir, &ack);
+            is_ok
+        }
+        Err(e) => {
+            warn!("trial-batch: {e}");
+            let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
+            let ack = build_trial_batch_error_ack(trial_batch_path, false, e);
+            write_trial_ack(ack_dir, &ack);
+            false
+        }
+    }
+}
+
+async fn maybe_handle_trial_batch_queue(
+    screener: &ScreenerStore,
+    db_path: &Path,
+    config_dir: &Path,
+) -> bool {
+    let Some(queued_batch_path) = list_trial_batch_queue_files(config_dir).into_iter().next()
+    else {
+        return false;
+    };
+    let is_ok = match load_trial_batch(&queued_batch_path) {
+        Ok(batch) => {
+            let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
+            let ok = ack.status == "ok";
+            write_trial_ack(config_dir, &ack);
+            ok
+        }
+        Err(e) => {
+            warn!(
+                "trial-batch queue: invalid payload {}: {e}",
+                queued_batch_path.display()
+            );
+            let ack = build_trial_batch_error_ack(&queued_batch_path, true, e);
+            write_trial_ack(config_dir, &ack);
+            false
+        }
+    };
+    if let Err(e) = std::fs::remove_file(&queued_batch_path) {
+        warn!(
+            "trial-batch queue: failed to remove {}: {e}",
+            queued_batch_path.display()
+        );
+    }
+    is_ok
+}
+
+async fn maybe_refresh_pending_runtime_grid(
+    config_path: &Path,
+    last_modified: &mut Option<FileFingerprint>,
+    pending: &mut Option<RuntimeGridGeneration>,
+) {
+    let modified = read_file_fingerprint(config_path);
+    let changed = file_fingerprint_changed(*last_modified, modified);
+    if !changed {
+        return;
+    }
+    *last_modified = modified;
+    match load_runtime_grid_generation_async(config_path.to_path_buf()).await {
+        Ok(generation) => {
+            if generation.config.enabled {
+                info!(
+                    "runtime-grid: detected update, pending apply configs={} max_configs={} apply_interval_ms={}",
+                    generation.configs.len(),
+                    generation.config.max_configs,
+                    generation.config.apply_interval_ms
+                );
+                *pending = Some(generation);
+            } else {
+                info!("runtime-grid: disabled in {}", config_path.display());
+                *pending = None;
+            }
+        }
+        Err(e) => {
+            warn!("runtime-grid: invalid update ignored: {e}");
+        }
+    }
+}
+
+async fn maybe_apply_pending_runtime_grid(
+    screener: &ScreenerStore,
+    db_path: &Path,
+    pending: &mut Option<RuntimeGridGeneration>,
+    last_apply_ms: &mut i64,
+    last_applied_signature: &mut Option<u64>,
+) {
+    let Some(generation) = pending.as_ref() else {
+        return;
+    };
+    let now_ms = EventLoopState::now_ms();
+    let apply_interval_ms = generation.config.apply_interval_ms.max(1_000) as i64;
+    if now_ms.saturating_sub(*last_apply_ms) < apply_interval_ms {
+        return;
+    }
+    if Some(generation.signature) == *last_applied_signature {
+        *pending = None;
+        return;
+    }
+    if let Err(e) =
+        upsert_runtime_configs_async(db_path.to_path_buf(), generation.configs.clone()).await
+    {
+        warn!("runtime-grid: apply postponed, db upsert failed: {e}");
+        return;
+    }
+    let report = screener.replace_fleet_configs(generation.configs.clone());
+    screener.flush_db_writer().await;
+    *last_apply_ms = now_ms;
+    *last_applied_signature = Some(generation.signature);
+    info!(
+        "runtime-grid: applied configs old={} new={} symbols_reset={} drained_trades={} (flushed)",
+        report.old_config_count,
+        report.new_config_count,
+        report.symbols_reset,
+        report.drained_trades
+    );
+    *pending = None;
+}
+
+fn drain_runtime_grid_reset_signals(grid_reset_rx: &mut tokio::sync::mpsc::Receiver<()>) -> bool {
+    let mut had_signal = false;
+    loop {
+        match grid_reset_rx.try_recv() {
+            Ok(()) => had_signal = true,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        }
+    }
+    had_signal
+}
+
+fn runtime_grid_sleep_ms(pending: Option<&RuntimeGridGeneration>) -> u64 {
+    pending
+        .map(|generation| generation.config.watch_interval_ms)
+        .unwrap_or(HOT_RELOAD_DEFAULT_SLEEP_MS)
+        .max(HOT_RELOAD_MIN_SLEEP_MS)
+}
+
+async fn run_trial_watch_loop(
+    screener: ScreenerStore,
+    db_path: PathBuf,
+    trial_batch_path: PathBuf,
+    trial_control_path: PathBuf,
+    grid_reset_tx: tokio::sync::mpsc::Sender<()>,
+) {
+    let mut state = TrialWatchState::default();
+    loop {
+        maybe_handle_trial_control(
+            &screener,
+            &db_path,
+            &trial_control_path,
+            &mut state.last_trial_control_modified,
+        )
+        .await;
+
+        let mut clear_runtime_grid_pending = false;
+        if maybe_handle_trial_batch_file(
+            &screener,
+            &db_path,
+            &trial_batch_path,
+            &mut state.last_trial_modified,
+        )
+        .await
+        {
+            clear_runtime_grid_pending = true;
+        }
+
+        let config_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
+        if maybe_handle_trial_batch_queue(&screener, &db_path, config_dir).await {
+            clear_runtime_grid_pending = true;
+        }
+
+        if clear_runtime_grid_pending {
+            let _ = grid_reset_tx.try_send(());
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(TRIAL_WATCH_SLEEP_MS)).await;
+    }
+}
+
+async fn run_runtime_grid_watch_loop(
+    screener: ScreenerStore,
+    db_path: PathBuf,
+    config_path: PathBuf,
+    initial_modified: Option<FileFingerprint>,
+    initial_signature: Option<u64>,
+    mut grid_reset_rx: tokio::sync::mpsc::Receiver<()>,
+) {
+    let mut state = RuntimeGridWatchState {
+        last_modified: initial_modified,
+        last_applied_signature: initial_signature,
+        pending: None,
+        last_apply_ms: EventLoopState::now_ms(),
+    };
+
+    loop {
+        if drain_runtime_grid_reset_signals(&mut grid_reset_rx) {
+            state.pending = None;
+        }
+
+        maybe_refresh_pending_runtime_grid(
+            &config_path,
+            &mut state.last_modified,
+            &mut state.pending,
+        )
+        .await;
+        maybe_apply_pending_runtime_grid(
+            &screener,
+            &db_path,
+            &mut state.pending,
+            &mut state.last_apply_ms,
+            &mut state.last_applied_signature,
+        )
+        .await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(runtime_grid_sleep_ms(
+            state.pending.as_ref(),
+        )))
+        .await;
+    }
+}
+
 fn spawn_runtime_grid_hot_reload(
     screener: ScreenerStore,
     db_path: PathBuf,
@@ -974,247 +1283,35 @@ fn spawn_runtime_grid_hot_reload(
     initial_modified: Option<FileFingerprint>,
     initial_signature: Option<u64>,
 ) {
-    async fn maybe_handle_trial_control(
-        screener: &ScreenerStore,
-        db_path: &Path,
-        trial_control_path: &Path,
-        last_trial_control_modified: &mut Option<FileFingerprint>,
-    ) {
-        let trial_control_modified = read_file_fingerprint(trial_control_path);
-        let control_changed =
-            file_fingerprint_changed(*last_trial_control_modified, trial_control_modified);
-        if !control_changed {
-            return;
-        }
-        *last_trial_control_modified = trial_control_modified;
-        match load_trial_control(trial_control_path) {
-            Ok(control) => {
-                if !control.clear_run_id {
-                    return;
-                }
-                let active_run_id = screener.current_run_id();
-                match active_run_id {
-                    Some(active) => {
-                        let request_matches = control
-                            .run_id
-                            .as_ref()
-                            .is_none_or(|requested| requested == &active);
-                        if request_matches {
-                            let closed_at_ms = EventLoopState::now_ms();
-                            if let Err(e) = close_trial_run_meta_async(
-                                db_path.to_path_buf(),
-                                active.clone(),
-                                closed_at_ms,
-                            )
-                            .await
-                            {
-                                warn!("trial-control: failed to close run {active}: {e}");
-                            }
-                            screener.set_run_id(None);
-                            info!(
-                                "trial-control: cleared run_id={active} closed_at_ms={closed_at_ms}"
-                            );
-                        } else if let Some(requested) = control.run_id {
-                            warn!(
-                                "trial-control: requested run_id={} does not match active run_id={}",
-                                requested, active
-                            );
-                        }
-                    }
-                    None => info!("trial-control: no active run_id to clear"),
-                }
-            }
-            Err(e) => warn!("trial-control: {e}"),
-        }
-    }
+    let (grid_reset_tx, grid_reset_rx) =
+        tokio::sync::mpsc::channel::<()>(RUNTIME_GRID_RESET_CHANNEL_CAPACITY);
 
-    async fn maybe_handle_trial_batch_file(
-        screener: &ScreenerStore,
-        db_path: &Path,
-        trial_batch_path: &Path,
-        last_trial_modified: &mut Option<FileFingerprint>,
-    ) -> bool {
-        let trial_modified = read_file_fingerprint(trial_batch_path);
-        let trial_changed = file_fingerprint_changed(*last_trial_modified, trial_modified);
-        if !trial_changed {
-            return false;
-        }
-        *last_trial_modified = trial_modified;
-        match load_trial_batch(trial_batch_path) {
-            Ok(batch) => {
-                let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
-                let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
-                let is_ok = ack.status == "ok";
-                write_trial_ack(ack_dir, &ack);
-                is_ok
-            }
-            Err(e) => {
-                warn!("trial-batch: {e}");
-                let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
-                let ack = build_trial_batch_error_ack(trial_batch_path, false, e);
-                write_trial_ack(ack_dir, &ack);
-                false
-            }
-        }
-    }
-
-    async fn maybe_handle_trial_batch_queue(
-        screener: &ScreenerStore,
-        db_path: &Path,
-        config_dir: &Path,
-    ) -> bool {
-        let Some(queued_batch_path) = list_trial_batch_queue_files(config_dir).into_iter().next()
-        else {
-            return false;
-        };
-        let is_ok = match load_trial_batch(&queued_batch_path) {
-            Ok(batch) => {
-                let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
-                let ok = ack.status == "ok";
-                write_trial_ack(config_dir, &ack);
-                ok
-            }
-            Err(e) => {
-                warn!(
-                    "trial-batch queue: invalid payload {}: {e}",
-                    queued_batch_path.display()
-                );
-                let ack = build_trial_batch_error_ack(&queued_batch_path, true, e);
-                write_trial_ack(config_dir, &ack);
-                false
-            }
-        };
-        if let Err(e) = std::fs::remove_file(&queued_batch_path) {
-            warn!(
-                "trial-batch queue: failed to remove {}: {e}",
-                queued_batch_path.display()
-            );
-        }
-        is_ok
-    }
-
-    async fn maybe_refresh_pending_runtime_grid(
-        config_path: &Path,
-        last_modified: &mut Option<FileFingerprint>,
-        pending: &mut Option<RuntimeGridGeneration>,
-    ) {
-        let modified = read_file_fingerprint(config_path);
-        let changed = file_fingerprint_changed(*last_modified, modified);
-        if !changed {
-            return;
-        }
-        *last_modified = modified;
-        match load_runtime_grid_generation_async(config_path.to_path_buf()).await {
-            Ok(generation) => {
-                if generation.config.enabled {
-                    info!(
-                        "runtime-grid: detected update, pending apply configs={} max_configs={} apply_interval_ms={}",
-                        generation.configs.len(),
-                        generation.config.max_configs,
-                        generation.config.apply_interval_ms
-                    );
-                    *pending = Some(generation);
-                } else {
-                    info!("runtime-grid: disabled in {}", config_path.display());
-                    *pending = None;
-                }
-            }
-            Err(e) => {
-                warn!("runtime-grid: invalid update ignored: {e}");
-            }
-        }
-    }
-
-    async fn maybe_apply_pending_runtime_grid(
-        screener: &ScreenerStore,
-        db_path: &Path,
-        pending: &mut Option<RuntimeGridGeneration>,
-        last_apply_ms: &mut i64,
-        last_applied_signature: &mut Option<u64>,
-    ) {
-        let Some(generation) = pending.as_ref() else {
-            return;
-        };
-        let now_ms = EventLoopState::now_ms();
-        let apply_interval_ms = generation.config.apply_interval_ms.max(1_000) as i64;
-        if now_ms.saturating_sub(*last_apply_ms) < apply_interval_ms {
-            return;
-        }
-        if Some(generation.signature) == *last_applied_signature {
-            *pending = None;
-            return;
-        }
-        if let Err(e) =
-            upsert_runtime_configs_async(db_path.to_path_buf(), generation.configs.clone()).await
-        {
-            warn!("runtime-grid: apply postponed, db upsert failed: {e}");
-            return;
-        }
-        let report = screener.replace_fleet_configs(generation.configs.clone());
-        screener.flush_db_writer().await;
-        *last_apply_ms = now_ms;
-        *last_applied_signature = Some(generation.signature);
-        info!(
-            "runtime-grid: applied configs old={} new={} symbols_reset={} drained_trades={} (flushed)",
-            report.old_config_count,
-            report.new_config_count,
-            report.symbols_reset,
-            report.drained_trades
-        );
-        *pending = None;
-    }
+    let trial_screener = screener.clone();
+    let trial_db_path = db_path.clone();
+    let trial_batch_path_clone = trial_batch_path.clone();
+    let trial_control_path_clone = trial_control_path.clone();
 
     tokio::spawn(async move {
-        let mut last_modified = initial_modified;
-        let mut last_applied_signature = initial_signature;
-        let mut pending: Option<RuntimeGridGeneration> = None;
-        let mut last_apply_ms = EventLoopState::now_ms();
-        let mut last_trial_modified: Option<FileFingerprint> = None;
-        let mut last_trial_control_modified: Option<FileFingerprint> = None;
+        run_trial_watch_loop(
+            trial_screener,
+            trial_db_path,
+            trial_batch_path_clone,
+            trial_control_path_clone,
+            grid_reset_tx,
+        )
+        .await;
+    });
 
-        loop {
-            maybe_handle_trial_control(
-                &screener,
-                &db_path,
-                &trial_control_path,
-                &mut last_trial_control_modified,
-            )
-            .await;
-
-            if maybe_handle_trial_batch_file(
-                &screener,
-                &db_path,
-                &trial_batch_path,
-                &mut last_trial_modified,
-            )
-            .await
-            {
-                pending = None;
-            }
-
-            let config_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
-            if maybe_handle_trial_batch_queue(&screener, &db_path, config_dir).await {
-                pending = None;
-            }
-
-            maybe_refresh_pending_runtime_grid(&config_path, &mut last_modified, &mut pending)
-                .await;
-            maybe_apply_pending_runtime_grid(
-                &screener,
-                &db_path,
-                &mut pending,
-                &mut last_apply_ms,
-                &mut last_applied_signature,
-            )
-            .await;
-
-            let sleep_ms = pending
-                .as_ref()
-                .map(|g| g.config.watch_interval_ms)
-                .unwrap_or(5_000)
-                .max(500);
-            tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
-        }
+    tokio::spawn(async move {
+        run_runtime_grid_watch_loop(
+            screener,
+            db_path,
+            config_path,
+            initial_modified,
+            initial_signature,
+            grid_reset_rx,
+        )
+        .await;
     });
 }
 
@@ -1857,10 +1954,14 @@ fn build_runtime_universe(
 
     match reconcile_outcome {
         SymbolReconcileOutcome::BinanceMissing => {
-            warn!("Binance volume fetch failed — cannot safely copy Gate symbols (different listing). Using BTC/ETH fallback for both.");
+            warn!(
+                "Binance volume fetch failed — cannot safely copy Gate symbols (different listing). Using BTC/ETH fallback for both."
+            );
         }
         SymbolReconcileOutcome::GateMissing => {
-            warn!("Gate volume fetch failed — cannot safely copy Binance symbols (different listing). Using BTC/ETH fallback for both.");
+            warn!(
+                "Gate volume fetch failed — cannot safely copy Binance symbols (different listing). Using BTC/ETH fallback for both."
+            );
         }
         SymbolReconcileOutcome::BothMissing => {
             warn!("No symbols from REST; using BTC/ETH fallback");

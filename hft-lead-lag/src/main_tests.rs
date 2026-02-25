@@ -1123,3 +1123,33 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
     assert_eq!(primary, vec!["ETHUSDT".to_string()]);
     assert_eq!(hedge, vec!["BTCUSDT".to_string()]);
 }
+
+#[tokio::test]
+async fn drain_runtime_grid_reset_signals_reports_presence() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.try_send(()).expect("send reset signal");
+    tx.try_send(()).expect("send reset signal");
+
+    assert!(drain_runtime_grid_reset_signals(&mut rx));
+    assert!(!drain_runtime_grid_reset_signals(&mut rx));
+}
+
+#[test]
+fn runtime_grid_sleep_ms_uses_pending_watch_interval_with_min_bound() {
+    let generation = RuntimeGridGeneration {
+        signature: 42,
+        config: RuntimeGridConfig {
+            watch_interval_ms: 250,
+            ..RuntimeGridConfig::default()
+        },
+        configs: Vec::new(),
+        modified: FileFingerprint {
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            len: 0,
+            content_hash: 0,
+        },
+    };
+
+    assert_eq!(runtime_grid_sleep_ms(Some(&generation)), 500);
+    assert_eq!(runtime_grid_sleep_ms(None), 5_000);
+}
