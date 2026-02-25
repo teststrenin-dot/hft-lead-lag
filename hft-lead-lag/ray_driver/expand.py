@@ -1,36 +1,13 @@
 """Expand phase — grow parameter ranges around live scout references."""
 
 import itertools
-import sqlite3
 import time
 from pathlib import Path
 
 from .bounds import AXES, FIXED_DEFAULTS
+from .config_store import fetch_config_params
 from .ipc import FleetIPC, RunMetrics
 from .run_id import generate_run_id
-
-
-def _config_from_db(db_path: Path, config_id: int) -> dict | None:
-    """Read config params from optimizer.db by config_id."""
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
-    try:
-        row = conn.execute(
-            """SELECT spike_threshold_bps, target_ratio, stop_loss_bps,
-                      max_hold_ms, max_spread_bps, trailing_decay_ratio,
-                      baseline_window_ms
-               FROM configs WHERE id = ?""",
-            (config_id,),
-        ).fetchone()
-        if not row:
-            return None
-        keys = [
-            "spike_threshold_bps", "target_ratio", "stop_loss_bps",
-            "max_hold_ms", "max_spread_bps", "trailing_decay_ratio",
-            "baseline_window_ms",
-        ]
-        return dict(zip(keys, row))
-    finally:
-        conn.close()
 
 
 def expand_around_references(
@@ -43,7 +20,7 @@ def expand_around_references(
     expanded: list[dict] = []
 
     for ref in references:
-        center = _config_from_db(db_path, ref.config_id)
+        center = fetch_config_params(db_path, ref.config_id)
         if not center:
             continue
 
@@ -57,7 +34,7 @@ def expand_around_references(
         for combo in itertools.product(*(per_axis_values[k] for k in keys)):
             cfg = dict(zip(keys, combo))
             cfg.update(FIXED_DEFAULTS)
-            key = tuple(sorted(cfg.items()))
+            key = tuple(combo)
             if key not in seen:
                 seen.add(key)
                 expanded.append(cfg)

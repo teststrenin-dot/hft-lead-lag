@@ -1,9 +1,9 @@
 """Promote top configs from a completed run into a reviewable export."""
 
 import json
-import sqlite3
 from pathlib import Path
 
+from .config_store import fetch_config_params_many
 from .ipc import FleetIPC
 
 
@@ -28,37 +28,21 @@ def promote_top_configs(
     qualified.sort(key=lambda m: m.avg_pnl_pct, reverse=True)
     top = qualified[:top_k]
 
-    conn = sqlite3.connect(
-        f"file:{ipc.db_path}?mode=ro", uri=True, timeout=5.0
-    )
-    try:
-        promoted = []
-        for m in top:
-            row = conn.execute(
-                """SELECT spike_threshold_bps, target_ratio, stop_loss_bps,
-                          max_hold_ms, max_spread_bps, trailing_decay_ratio,
-                          baseline_window_ms
-                   FROM configs WHERE id = ?""",
-                (m.config_id,),
-            ).fetchone()
-            if row:
-                promoted.append({
-                    "config_id": m.config_id,
-                    "trades": m.trades,
-                    "avg_pnl_pct": m.avg_pnl_pct,
-                    "win_rate_pct": m.win_rate_pct,
-                    "params": {
-                        "spike_threshold_bps": row[0],
-                        "target_ratio": row[1],
-                        "stop_loss_bps": row[2],
-                        "max_hold_ms": row[3],
-                        "max_spread_bps": row[4],
-                        "trailing_decay_ratio": row[5],
-                        "baseline_window_ms": row[6],
-                    },
-                })
-    finally:
-        conn.close()
+    params_map = fetch_config_params_many(ipc.db_path, [m.config_id for m in top])
+    promoted = []
+    for m in top:
+        params = params_map.get(m.config_id)
+        if not params:
+            continue
+        promoted.append(
+            {
+                "config_id": m.config_id,
+                "trades": m.trades,
+                "avg_pnl_pct": m.avg_pnl_pct,
+                "win_rate_pct": m.win_rate_pct,
+                "params": params,
+            }
+        )
 
     out = Path(f"data/promoted-{run_id}.json")
     out.parent.mkdir(parents=True, exist_ok=True)

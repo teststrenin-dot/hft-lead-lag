@@ -1,6 +1,6 @@
 //! HTTP handler functions and response types.
 
-use axum::{extract::State, Json};
+use axum::{extract::Query, extract::State, Json};
 use dashmap::DashMap;
 use serde::Deserialize;
 use serde::Serialize;
@@ -10,6 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
+use crate::domain::screener::PolicyConfigSnapshot;
 use crate::domain::screener::{ScreenerRow, ScreenerStore};
 use crate::infrastructure::db::DbWriter;
 use crate::infrastructure::enrichment::{self, CachedNatr};
@@ -213,6 +214,25 @@ pub(crate) async fn get_chart_data(
     axum::extract::Path(symbol): axum::extract::Path<String>,
 ) -> Json<Option<ChartData>> {
     Json(state.screener.chart_data(&symbol))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FleetPolicyQuery {
+    top_k: Option<usize>,
+}
+
+pub(crate) async fn get_fleet_policy_for_symbol(
+    State(state): State<Arc<HttpState>>,
+    axum::extract::Path(symbol): axum::extract::Path<String>,
+    Query(query): Query<FleetPolicyQuery>,
+) -> Json<Vec<PolicyConfigSnapshot>> {
+    let top_k = query.top_k.unwrap_or(20).clamp(1, 200);
+    Json(
+        state
+            .screener
+            .top_policy_configs(&symbol, top_k)
+            .unwrap_or_default(),
+    )
 }
 
 // ── Fleet ranking ───────────────────────────────────────────────────

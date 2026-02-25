@@ -31,6 +31,7 @@ use self::utils::{now_ms, TimeDomainSample};
 use crate::infrastructure::db::DbWriter;
 
 pub use self::shadow_trader::{ChartTrade, ShadowStats};
+pub use self::shadow_fleet::PolicyConfigSnapshot;
 pub use self::trader_config::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
@@ -491,6 +492,24 @@ impl ScreenerStore {
             .get(symbol)
             .map(|s| s.shadow.chart_data(symbol, &s.price_samples))
     }
+
+    pub fn top_policy_configs(
+        &self,
+        symbol: &str,
+        top_k: usize,
+    ) -> Option<Vec<PolicyConfigSnapshot>> {
+        let top_k = top_k.max(1);
+        if let Some(state) = self.symbols.get(symbol) {
+            return state
+                .fleet
+                .as_ref()
+                .map(|fleet| fleet.top_policy_configs(top_k));
+        }
+        let normalized = symbol.trim().to_ascii_uppercase();
+        self.symbols
+            .get(&normalized)
+            .and_then(|state| state.fleet.as_ref().map(|fleet| fleet.top_policy_configs(top_k)))
+    }
 }
 
 impl Default for ScreenerStore {
@@ -514,9 +533,27 @@ mod tests {
     }
 
     fn with_symbol_fleet(store: &ScreenerStore, symbol: &str, configs: &[TraderConfig]) {
-        let mut state = SymbolState::default();
-        state.fleet = Some(ShadowFleet::new(configs));
+        let state = SymbolState {
+            fleet: Some(ShadowFleet::new(configs)),
+            ..SymbolState::default()
+        };
         store.symbols.insert(symbol.to_string(), state);
+    }
+
+    #[test]
+    fn top_policy_configs_returns_none_for_unknown_symbol() {
+        let store = ScreenerStore::default();
+        assert!(store.top_policy_configs("BTCUSDT", 5).is_none());
+    }
+
+    #[test]
+    fn top_policy_configs_returns_some_for_known_symbol_fleet() {
+        let store = ScreenerStore::default();
+        with_symbol_fleet(&store, "BTCUSDT", &[config_with_gap(50.0)]);
+        let rows = store
+            .top_policy_configs("btcusdt", 5)
+            .expect("policy rows for known symbol");
+        assert!(rows.is_empty());
     }
 
     #[test]

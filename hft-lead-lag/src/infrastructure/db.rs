@@ -24,6 +24,23 @@ const CHANNEL_CAPACITY: usize = 100_000;
 const OVERFLOW_CHANNEL_CAPACITY: usize = 8_192;
 const DEFAULT_STRATEGY_KIND: &str = "baseline_gap";
 
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1");
+    conn.prepare(&sql).and_then(|mut stmt| stmt.exists([column]))
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    alter_sql: &str,
+) -> rusqlite::Result<()> {
+    if !table_has_column(conn, table, column)? {
+        conn.execute_batch(alter_sql)?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
@@ -152,61 +169,120 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     }
 
     conn.execute_batch(SCHEMA)?;
-    // Migration: add columns if missing (older DBs without these columns).
-    let _ = conn.execute_batch(
+    // Compatibility migration: only run ALTER statements when columns are absent.
+    add_column_if_missing(
+        &conn,
+        "configs",
+        "strategy_kind",
         "ALTER TABLE configs ADD COLUMN strategy_kind TEXT NOT NULL DEFAULT 'baseline_gap';",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "configs",
+        "trailing_decay_ratio",
         "ALTER TABLE configs ADD COLUMN trailing_decay_ratio REAL NOT NULL DEFAULT 0.5;",
-    );
-    let _ = conn
-        .execute_batch("ALTER TABLE configs ADD COLUMN warmup_ms INTEGER NOT NULL DEFAULT 30000;");
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "configs",
+        "warmup_ms",
+        "ALTER TABLE configs ADD COLUMN warmup_ms INTEGER NOT NULL DEFAULT 30000;",
+    )?;
+    add_column_if_missing(
+        &conn,
+        "configs",
+        "quote_freshness_ms",
         "ALTER TABLE configs ADD COLUMN quote_freshness_ms INTEGER NOT NULL DEFAULT 1000;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "configs",
+        "baseline_window_ms",
         "ALTER TABLE configs ADD COLUMN baseline_window_ms INTEGER NOT NULL DEFAULT 2000;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "configs",
+        "min_baseline_samples",
         "ALTER TABLE configs ADD COLUMN min_baseline_samples INTEGER NOT NULL DEFAULT 20;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trades",
+        "gate_natr_30m_pct_at_entry",
         "ALTER TABLE trades ADD COLUMN gate_natr_30m_pct_at_entry REAL NOT NULL DEFAULT 0.0;",
-    );
-    let _ = conn.execute_batch("ALTER TABLE trades ADD COLUMN hold_ms INTEGER NOT NULL DEFAULT 0;");
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trades",
+        "hold_ms",
+        "ALTER TABLE trades ADD COLUMN hold_ms INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trades",
+        "early_stop_churn",
         "ALTER TABLE trades ADD COLUMN early_stop_churn INTEGER NOT NULL DEFAULT 0;",
-    );
-    let _ = conn.execute_batch("ALTER TABLE trades ADD COLUMN run_id TEXT;");
-    let _ = conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);");
-    let _ = conn.execute_batch("ALTER TABLE trial_runs_meta ADD COLUMN closed_at_ms INTEGER;");
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(&conn, "trades", "run_id", "ALTER TABLE trades ADD COLUMN run_id TEXT;")?;
+    add_column_if_missing(
+        &conn,
+        "trial_runs_meta",
+        "closed_at_ms",
+        "ALTER TABLE trial_runs_meta ADD COLUMN closed_at_ms INTEGER;",
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trial_runs_meta",
+        "apply_mode",
         "ALTER TABLE trial_runs_meta ADD COLUMN apply_mode TEXT NOT NULL DEFAULT 'full_replace';",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trial_runs_meta",
+        "symbols_reset",
         "ALTER TABLE trial_runs_meta ADD COLUMN symbols_reset INTEGER NOT NULL DEFAULT 0;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trial_runs_meta",
+        "changed_ids_requested",
         "ALTER TABLE trial_runs_meta ADD COLUMN changed_ids_requested INTEGER NOT NULL DEFAULT 0;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trial_runs_meta",
+        "matched_changed_ids_old",
         "ALTER TABLE trial_runs_meta ADD COLUMN matched_changed_ids_old INTEGER NOT NULL DEFAULT 0;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trial_runs_meta",
+        "matched_changed_ids_new",
         "ALTER TABLE trial_runs_meta ADD COLUMN matched_changed_ids_new INTEGER NOT NULL DEFAULT 0;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trial_runs_meta",
+        "unmatched_changed_ids",
         "ALTER TABLE trial_runs_meta ADD COLUMN unmatched_changed_ids INTEGER NOT NULL DEFAULT 0;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trial_runs_meta",
+        "scope_symbols_requested",
         "ALTER TABLE trial_runs_meta ADD COLUMN scope_symbols_requested INTEGER NOT NULL DEFAULT 0;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    add_column_if_missing(
+        &conn,
+        "trial_runs_meta",
+        "scope_symbols_matched",
         "ALTER TABLE trial_runs_meta ADD COLUMN scope_symbols_matched INTEGER NOT NULL DEFAULT 0;",
-    );
-    let _ = conn.execute_batch(
+    )?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);")?;
+    conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_trial_runs_meta_closed_at ON trial_runs_meta(closed_at_ms);",
-    );
+    )?;
     Ok(conn)
 }
 
