@@ -23,15 +23,15 @@ pub struct CachedNatr {
     updated_at_ms: i64,
 }
 
-/// Enrich screener rows with Gate 30m NATR (cached, rate-limited).
-pub async fn enrich_gate_natr_30m(
+/// Fill screener rows with cached Gate 30m NATR values and return symbols to warm in background.
+pub fn enrich_gate_natr_30m_cached_only(
     rows: &mut [ScreenerRow],
     cache: &Arc<DashMap<String, CachedNatr>>,
-) {
+) -> Vec<String> {
     let now = crate::domain::screener::utils::now_ms();
-    let mut to_fetch: Vec<(usize, String)> = Vec::new();
+    let mut to_fetch: Vec<String> = Vec::new();
 
-    for (idx, row) in rows.iter_mut().enumerate() {
+    for row in rows.iter_mut() {
         if let Some(cached) = cache.get(&row.symbol) {
             if now.saturating_sub(cached.updated_at_ms) <= NATR_CACHE_TTL_MS {
                 row.gate_natr_30m_pct = cached.value_pct.unwrap_or(0.0);
@@ -40,13 +40,25 @@ pub async fn enrich_gate_natr_30m(
         }
 
         if to_fetch.len() < NATR_FETCH_LIMIT_PER_REQUEST {
-            to_fetch.push((idx, row.symbol.clone()));
+            to_fetch.push(row.symbol.clone());
         }
+        row.gate_natr_30m_pct = 0.0;
     }
+    to_fetch
+}
 
-    let futs: Vec<_> = to_fetch
+/// Warm Gate 30m NATR cache for requested symbols.
+pub async fn warm_gate_natr_30m_cache(
+    symbols: Vec<String>,
+    cache: Arc<DashMap<String, CachedNatr>>,
+) {
+    if symbols.is_empty() {
+        return;
+    }
+    let now = crate::domain::screener::utils::now_ms();
+    let futs: Vec<_> = symbols
         .iter()
-        .map(|(_, symbol)| {
+        .map(|symbol| {
             let sym = symbol.clone();
             let c = GateRestClient::new();
             async move {
@@ -68,7 +80,7 @@ pub async fn enrich_gate_natr_30m(
 
     let results = futures_util::future::join_all(futs).await;
 
-    for ((idx, symbol), value) in to_fetch.into_iter().zip(results) {
+    for (symbol, value) in symbols.into_iter().zip(results) {
         cache.insert(
             symbol,
             CachedNatr {
@@ -76,7 +88,6 @@ pub async fn enrich_gate_natr_30m(
                 updated_at_ms: now,
             },
         );
-        rows[idx].gate_natr_30m_pct = value.unwrap_or(0.0);
     }
 }
 
@@ -114,7 +125,11 @@ pub async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             let gate_volume = gate_volumes.get(&symbol).copied().unwrap_or(0.0);
             ScreenerRow {
                 symbol,
-                leader_exchange: if binance_volume >= gate_volume { "binance" } else { "gate" },
+                leader_exchange: if binance_volume >= gate_volume {
+                    "binance"
+                } else {
+                    "gate"
+                },
                 data_source: "rest_fallback",
                 is_fallback: true,
                 last_update_ms: crate::domain::screener::utils::now_ms(),
@@ -139,4 +154,76 @@ pub async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(symbol: &str) -> ScreenerRow {
+        ScreenerRow {
+            symbol: symbol.to_string(),
+            leader_exchange: "binance",
+            data_source: "ws_live",
+            is_fallback: false,
+            last_update_ms: 1,
+            lag_ms: 0.0,
+            ws_drift_ms: 0.0,
+            ws_drift_binance_ms: 0.0,
+            ws_drift_gate_ms: 0.0,
+            ws_drift_ingress_binance_ms: 0.0,
+            ws_drift_ingress_gate_ms: 0.0,
+            entry_half_life_ms: 0.0,
+            avg_gt_p90_ms: 0.0,
+            gate_natr_30m_pct: 0.0,
+            volume_24h_usd: 0.0,
+            shadow_session_pnl_pct: 0.0,
+            shadow_session_trades: 0,
+            shadow_avg_trade_pct: 0.0,
+            shadow_win_rate_pct: 0.0,
+            shadow_position: "FLAT",
+            shadow_spikes_detected: 0,
+            shadow_avg_catchup_pct: 0.0,
+            shadow_avg_lag_ms: 0.0,
+        }
+    }
+
+    #[test]
+    fn cached_only_enrichment_uses_fresh_cache_and_marks_misses() {
+        let cache = Arc::new(DashMap::new());
+        let now = crate::domain::screener::utils::now_ms();
+        cache.insert(
+            "BTCUSDT".to_string(),
+            CachedNatr {
+                value_pct: Some(1.23),
+                updated_at_ms: now,
+            },
+        );
+        let mut rows = vec![row("BTCUSDT"), row("ETHUSDT")];
+
+        let to_fetch = enrich_gate_natr_30m_cached_only(&mut rows, &cache);
+
+        assert_eq!(rows[0].gate_natr_30m_pct, 1.23);
+        assert_eq!(rows[1].gate_natr_30m_pct, 0.0);
+        assert_eq!(to_fetch, vec!["ETHUSDT".to_string()]);
+    }
+
+    #[test]
+    fn cached_only_enrichment_refreshes_stale_cache_entries() {
+        let cache = Arc::new(DashMap::new());
+        let now = crate::domain::screener::utils::now_ms();
+        cache.insert(
+            "BTCUSDT".to_string(),
+            CachedNatr {
+                value_pct: Some(9.99),
+                updated_at_ms: now - NATR_CACHE_TTL_MS - 1,
+            },
+        );
+        let mut rows = vec![row("BTCUSDT")];
+
+        let to_fetch = enrich_gate_natr_30m_cached_only(&mut rows, &cache);
+
+        assert_eq!(rows[0].gate_natr_30m_pct, 0.0);
+        assert_eq!(to_fetch, vec!["BTCUSDT".to_string()]);
+    }
 }

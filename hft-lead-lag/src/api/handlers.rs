@@ -263,7 +263,13 @@ pub(crate) async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<Sc
         live_rows
     };
     rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
-    enrichment::enrich_gate_natr_30m(&mut rows, &state.natr_cache).await;
+    let to_fetch = enrichment::enrich_gate_natr_30m_cached_only(&mut rows, &state.natr_cache);
+    if !to_fetch.is_empty() {
+        let cache = state.natr_cache.clone();
+        tokio::spawn(async move {
+            enrichment::warm_gate_natr_30m_cache(to_fetch, cache).await;
+        });
+    }
 
     Json(ScreenerResponse {
         generated_at_ms: crate::domain::screener::utils::now_ms(),
