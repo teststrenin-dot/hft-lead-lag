@@ -15,18 +15,21 @@ use hft_lead_lag::{
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::SystemTime;
 use tracing::{error, info, warn};
 
 mod runtime_hot_reload;
 mod runtime_grid;
 mod runtime_setup;
+mod file_fingerprint;
 mod trial_batch_protocol;
 mod trial_batch_apply;
 mod trial_queue_io;
 mod event_loop_ingest;
 mod event_loop_core;
 mod event_loop_runtime;
+use file_fingerprint::{
+    FileFingerprint, file_fingerprint_changed, hash_content_deterministic, read_file_fingerprint,
+};
 use event_loop_ingest::{
     BatchIngestContext, process_exchange_batch, strategy_ticks_in_order,
     updated_symbols_from_batch,
@@ -83,48 +86,8 @@ struct RuntimeUniverse {
     gate_vol_map: std::collections::HashMap<String, f64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileFingerprint {
-    modified: SystemTime,
-    len: u64,
-    content_hash: u64,
-}
-
-fn hash_content_deterministic(bytes: &[u8]) -> u64 {
-    // FNV-1a 64-bit hash keeps fingerprinting deterministic and dependency-free.
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = FNV_OFFSET_BASIS;
-    for &byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
 fn build_trial_batch_error_ack(path: &Path, is_queue_mode: bool, error: String) -> TrialAck {
     trial_queue_io::build_trial_batch_error_ack(path, is_queue_mode, error)
-}
-
-fn read_file_fingerprint(path: &Path) -> Option<FileFingerprint> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let modified = metadata.modified().ok()?;
-    let content = std::fs::read(path).ok()?;
-    Some(FileFingerprint {
-        modified,
-        len: metadata.len(),
-        content_hash: hash_content_deterministic(&content),
-    })
-}
-
-fn file_fingerprint_changed(
-    previous: Option<FileFingerprint>,
-    current: Option<FileFingerprint>,
-) -> bool {
-    match current {
-        Some(current) => previous != Some(current),
-        None => false,
-    }
 }
 
 #[cfg(test)]
