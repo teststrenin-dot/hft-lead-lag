@@ -42,6 +42,8 @@ use event_loop_runtime::{EventLoopRuntimeContext, run_event_loop};
 #[cfg(test)]
 use event_loop_ingest::ingest_latest_batch;
 use runtime_hot_reload::{spawn_runtime_grid_hot_reload, RuntimeGridHotReloadSpec};
+#[cfg(test)]
+use runtime_hot_reload::{drain_runtime_grid_reset_signals, runtime_grid_sleep_ms};
 use runtime_grid::{
     RuntimeGridGeneration, ensure_runtime_grid_config_file, load_runtime_grid_generation_async,
 };
@@ -61,9 +63,12 @@ use trial_batch_protocol::{
 };
 #[cfg(test)]
 use trial_batch_protocol::TrialBatchMode;
-use trial_batch_apply::{
-    apply_trial_batch, close_trial_run_meta_async, upsert_runtime_configs_async,
-};
+use trial_batch_apply::{apply_trial_batch, close_trial_run_meta_async, upsert_runtime_configs_async};
+#[cfg(test)]
+use trial_batch_apply::validate_trial_batch_run_lease;
+use trial_queue_io::{archive_trial_batch_queue_file, build_trial_batch_error_ack, list_trial_batch_queue_files, write_trial_ack};
+#[cfg(test)]
+use trial_queue_io::{trial_batch_archive_dir, trial_batch_queue_dir};
 
 /// Minimum 24h USD volume for symbol filtering
 const MIN_VOLUME_USD: f64 = 2_500_000.0; // 2.5 million USD
@@ -74,45 +79,6 @@ const STRATEGY_BLACKLIST: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "DYDXUSDT
 const SIGNAL_CHECK_BUDGET_PER_TICK: usize = 256;
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
-
-fn build_trial_batch_error_ack(path: &Path, is_queue_mode: bool, error: String) -> TrialAck {
-    trial_queue_io::build_trial_batch_error_ack(path, is_queue_mode, error)
-}
-
-#[cfg(test)]
-fn trial_batch_queue_dir(config_dir: &Path) -> PathBuf {
-    trial_queue_io::trial_batch_queue_dir(config_dir)
-}
-
-#[cfg(test)]
-fn trial_batch_archive_dir(config_dir: &Path, success: bool) -> PathBuf {
-    trial_queue_io::trial_batch_archive_dir(config_dir, success)
-}
-
-fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
-    trial_queue_io::list_trial_batch_queue_files(config_dir)
-}
-
-fn archive_trial_batch_queue_file(config_dir: &Path, queued_batch_path: &Path, success: bool) {
-    trial_queue_io::archive_trial_batch_queue_file(config_dir, queued_batch_path, success);
-}
-
-fn write_trial_ack(dir: &Path, ack: &TrialAck) {
-    trial_queue_io::write_trial_ack(dir, ack);
-}
-
-#[cfg(test)]
-fn validate_trial_batch_run_lease(
-    active_run_id: Option<&str>,
-    incoming_run_id: &str,
-    allow_run_id_takeover: bool,
-) -> Result<(), String> {
-    trial_batch_apply::validate_trial_batch_run_lease(
-        active_run_id,
-        incoming_run_id,
-        allow_run_id_takeover,
-    )
-}
 
 fn rebuild_latest_map(
     latest: &mut std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
@@ -131,16 +97,6 @@ fn rebuild_latest_map(
         latest.insert(symbol.clone(), ticker.clone());
     }
     batch_latest
-}
-
-#[cfg(test)]
-fn drain_runtime_grid_reset_signals(grid_reset_rx: &mut tokio::sync::mpsc::Receiver<()>) -> bool {
-    runtime_hot_reload::drain_runtime_grid_reset_signals(grid_reset_rx)
-}
-
-#[cfg(test)]
-fn runtime_grid_sleep_ms(pending: Option<&RuntimeGridGeneration>) -> u64 {
-    runtime_hot_reload::runtime_grid_sleep_ms(pending)
 }
 
 #[tokio::main]
