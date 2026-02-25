@@ -15,31 +15,32 @@ pub mod state;
 pub mod trader_config;
 pub mod utils;
 
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::{collections::HashSet, fmt};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use serde::Serialize;
 
-use self::fleet_patch::{FleetPatchMode, FleetPatchPlan, should_reset_symbol};
-use self::shadow_fleet::{FleetTickMeta, ShadowFleet, generate_grid};
+use self::fleet_patch::{should_reset_symbol, FleetPatchMode, FleetPatchPlan};
+use self::shadow_fleet::{generate_grid, FleetTickMeta, ShadowFleet};
 use self::shadow_trader::{ChartData, ShadowDebug};
 use self::state::{Quote, SymbolState};
-use self::utils::{TimeDomainSample, now_ms};
+use self::utils::{now_ms, TimeDomainSample};
 
 use crate::infrastructure::db::DbWriter;
 
 pub use self::shadow_fleet::PolicyConfigSnapshot;
 pub use self::shadow_trader::{ChartTrade, ShadowStats};
-pub use self::trader_config::{CONFIG_ID_CONTRACT_VERSION, TraderConfig};
+pub use self::trader_config::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
 const SYMBOL_STALE_TTL_MS: i64 = 30 * 60 * 1000;
 const SYMBOL_CATALOG_MAX_SIZE: usize = 2_000;
 const SYMBOL_CATALOG_PRUNE_INTERVAL_MS: i64 = 30_000;
+const ROWS_CACHE_MIN_REBUILD_INTERVAL_MS: i64 = 250;
 
 // ---------------------------------------------------------------------------
 // ScreenerRow — read-model DTO for API / UI consumption
@@ -84,6 +85,9 @@ pub struct ScreenerStore {
     db_writer: Option<DbWriter>,
     current_run_id: Arc<ArcSwap<Option<String>>>,
     last_catalog_prune_ms: Arc<AtomicI64>,
+    rows_cache: Arc<ArcSwap<Vec<ScreenerRow>>>,
+    rows_cache_last_rebuild_ms: Arc<AtomicI64>,
+    rows_cache_dirty: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -163,7 +167,14 @@ impl ScreenerStore {
             db_writer: None,
             current_run_id: Arc::new(ArcSwap::from_pointee(None)),
             last_catalog_prune_ms: Arc::new(AtomicI64::new(0)),
+            rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            rows_cache_last_rebuild_ms: Arc::new(AtomicI64::new(0)),
+            rows_cache_dirty: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    fn mark_rows_cache_dirty(&self) {
+        self.rows_cache_dirty.store(true, Ordering::Relaxed);
     }
 
     /// Attach a db writer for fleet trade persistence.
@@ -189,18 +200,34 @@ impl ScreenerStore {
 
     /// Set 24h volume for symbols (called once at startup from REST data).
     pub fn set_volumes(&self, volumes: &[(String, f64)]) {
+        let mut changed = false;
         for (sym, vol) in volumes {
-            self.symbols.entry(sym.clone()).or_default().volume_24h_usd = *vol;
+            let mut state = self.symbols.entry(sym.clone()).or_default();
+            let state = state.value_mut();
+            if state.volume_24h_usd != *vol {
+                state.volume_24h_usd = *vol;
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_rows_cache_dirty();
         }
     }
 
     /// Set Gate 30m NATR (%) snapshots for symbols.
     pub fn set_gate_natr_30m(&self, values: &[(String, f64)]) {
+        let mut changed = false;
         for (sym, natr_pct) in values {
-            self.symbols
-                .entry(sym.clone())
-                .or_default()
-                .gate_natr_30m_pct = (*natr_pct).max(0.0);
+            let next = (*natr_pct).max(0.0);
+            let mut state = self.symbols.entry(sym.clone()).or_default();
+            let state = state.value_mut();
+            if (state.gate_natr_30m_pct - next).abs() > f64::EPSILON {
+                state.gate_natr_30m_pct = next;
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_rows_cache_dirty();
         }
     }
 
@@ -377,7 +404,14 @@ impl ScreenerStore {
         {
             return;
         }
-        self.prune_symbol_catalog_with_limits(now_ms, SYMBOL_STALE_TTL_MS, SYMBOL_CATALOG_MAX_SIZE);
+        let removed = self.prune_symbol_catalog_with_limits(
+            now_ms,
+            SYMBOL_STALE_TTL_MS,
+            SYMBOL_CATALOG_MAX_SIZE,
+        );
+        if removed > 0 {
+            self.mark_rows_cache_dirty();
+        }
     }
 
     fn prune_symbol_catalog_with_limits(
@@ -474,6 +508,7 @@ impl ScreenerStore {
             state.updated_at_ms = clocks.exchange_event_ts_ms;
             state.leader_exchange = exchange;
             state.lag_ms = 0.0;
+            self.mark_rows_cache_dirty();
             return;
         }
 
@@ -512,10 +547,37 @@ impl ScreenerStore {
             }
             // Without a writer attached, drop drained trades to keep fleet queue bounded.
         }
+        self.mark_rows_cache_dirty();
     }
 
     pub fn rows_sorted(&self) -> Vec<ScreenerRow> {
-        self.prune_symbol_catalog_if_needed(now_ms());
+        let now = now_ms();
+        self.prune_symbol_catalog_if_needed(now);
+        if let Some(cached) = self.rows_snapshot_from_cache(now) {
+            return cached;
+        }
+        let rows = Arc::new(self.build_rows_sorted());
+        self.rows_cache.store(rows.clone());
+        self.rows_cache_last_rebuild_ms
+            .store(now, Ordering::Relaxed);
+        self.rows_cache_dirty.store(false, Ordering::Relaxed);
+        rows.as_ref().clone()
+    }
+
+    fn rows_snapshot_from_cache(&self, now_ms: i64) -> Option<Vec<ScreenerRow>> {
+        let cached = self.rows_cache.load_full();
+        if cached.is_empty() {
+            return None;
+        }
+        let dirty = self.rows_cache_dirty.load(Ordering::Relaxed);
+        let last_rebuild_ms = self.rows_cache_last_rebuild_ms.load(Ordering::Relaxed);
+        if !dirty || now_ms.saturating_sub(last_rebuild_ms) < ROWS_CACHE_MIN_REBUILD_INTERVAL_MS {
+            return Some(cached.as_ref().clone());
+        }
+        None
+    }
+
+    fn build_rows_sorted(&self) -> Vec<ScreenerRow> {
         let mut rows: Vec<ScreenerRow> = self
             .symbols
             .iter()
@@ -620,8 +682,8 @@ impl Default for ScreenerStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        FleetPatchApplyError, FleetPatchMode, FleetPatchPlan, ScreenerStore, ShadowFleet,
-        SymbolState, TraderConfig, shadow_fleet::FleetTrade,
+        shadow_fleet::FleetTrade, FleetPatchApplyError, FleetPatchMode, FleetPatchPlan,
+        ScreenerStore, ShadowFleet, SymbolState, TraderConfig,
     };
     use crate::domain::screener::shadow_trader::{ClosedTrade, Direction};
 
@@ -786,6 +848,38 @@ mod tests {
     }
 
     #[test]
+    fn rows_sorted_uses_snapshot_within_rebuild_interval() {
+        let store = ScreenerStore::default();
+        let ts_ns = 1_700_000_000_000_000_000_i64;
+        store.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
+        store.update(
+            "BTCUSDT",
+            "gate",
+            100.0,
+            100.1,
+            ts_ns + 1_000_000,
+            ts_ns + 1_000_000,
+        );
+
+        let first = store.rows_sorted();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].volume_24h_usd, 0.0);
+
+        store.set_volumes(&[("BTCUSDT".to_string(), 42.0)]);
+        let second = store.rows_sorted();
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].volume_24h_usd, 0.0,
+            "within cache interval rows must come from previous snapshot"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        let third = store.rows_sorted();
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].volume_24h_usd, 42.0);
+    }
+
+    #[test]
     fn full_replace_resets_all_symbol_fleets() {
         let store = ScreenerStore::default();
         let old_a = config_with_gap(31.0);
@@ -805,22 +899,18 @@ mod tests {
         assert_eq!(report.symbols_reset, 2);
         assert_eq!(report.drained_trades, 0);
         assert_eq!(report.changed_ids_requested, 0);
-        assert!(
-            store
-                .symbols
-                .get("BTCUSDT")
-                .expect("BTCUSDT state")
-                .fleet
-                .is_none()
-        );
-        assert!(
-            store
-                .symbols
-                .get("ETHUSDT")
-                .expect("ETHUSDT state")
-                .fleet
-                .is_none()
-        );
+        assert!(store
+            .symbols
+            .get("BTCUSDT")
+            .expect("BTCUSDT state")
+            .fleet
+            .is_none());
+        assert!(store
+            .symbols
+            .get("ETHUSDT")
+            .expect("ETHUSDT state")
+            .fleet
+            .is_none());
     }
 
     #[test]
@@ -844,22 +934,18 @@ mod tests {
         assert_eq!(report.matched_changed_ids_old, 1);
         assert_eq!(report.matched_changed_ids_new, 1);
         assert_eq!(report.unmatched_changed_ids, 0);
-        assert!(
-            store
-                .symbols
-                .get("BTCUSDT")
-                .expect("BTCUSDT state")
-                .fleet
-                .is_none()
-        );
-        assert!(
-            store
-                .symbols
-                .get("ETHUSDT")
-                .expect("ETHUSDT state")
-                .fleet
-                .is_some()
-        );
+        assert!(store
+            .symbols
+            .get("BTCUSDT")
+            .expect("BTCUSDT state")
+            .fleet
+            .is_none());
+        assert!(store
+            .symbols
+            .get("ETHUSDT")
+            .expect("ETHUSDT state")
+            .fleet
+            .is_some());
     }
 
     #[test]
@@ -937,14 +1023,12 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            store
-                .symbols
-                .get("BTCUSDT")
-                .expect("BTCUSDT state")
-                .fleet
-                .is_some()
-        );
+        assert!(store
+            .symbols
+            .get("BTCUSDT")
+            .expect("BTCUSDT state")
+            .fleet
+            .is_some());
     }
 
     #[test]

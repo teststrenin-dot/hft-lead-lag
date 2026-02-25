@@ -1,16 +1,16 @@
 //! HTTP handler functions and response types.
 
-use axum::{Json, extract::Query, extract::State};
+use axum::{extract::Query, extract::State, Json};
 use dashmap::DashMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
-use crate::domain::screener::PolicyConfigSnapshot;
 use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
+use crate::domain::screener::PolicyConfigSnapshot;
 use crate::domain::screener::{ScreenerRow, ScreenerStore};
 use crate::infrastructure::db::DbWriter;
 use crate::infrastructure::enrichment::{self, CachedNatr};
@@ -262,7 +262,6 @@ pub(crate) async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<Sc
     } else {
         live_rows
     };
-    rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
     let to_fetch = enrichment::enrich_gate_natr_30m_cached_only(&mut rows, &state.natr_cache);
     if !to_fetch.is_empty() {
         let cache = state.natr_cache.clone();
@@ -579,7 +578,11 @@ pub(crate) async fn get_fleet_ranked(
             let profit_factor = if gross_loss > 1e-9 {
                 gross_win / gross_loss
             } else {
-                if gross_win > 0.0 { 99.0 } else { 0.0 }
+                if gross_win > 0.0 {
+                    99.0
+                } else {
+                    0.0
+                }
             };
             let pf_capped = profit_factor.min(3.0);
             let composite = sharpe * (total as f64).sqrt() * pf_capped;
@@ -1329,8 +1332,8 @@ mod tests {
     use dashmap::DashMap;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]

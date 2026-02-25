@@ -117,9 +117,14 @@ pub async fn fallback_screener_rows(min_volume_usd: f64) -> Vec<ScreenerRow> {
     let binance_symbols: HashSet<String> = binance_volumes.keys().cloned().collect();
     let gate_symbols: HashSet<String> = gate_volumes.keys().cloned().collect();
 
-    binance_symbols
+    let mut common_symbols: Vec<String> = binance_symbols
         .intersection(&gate_symbols)
         .cloned()
+        .collect();
+    common_symbols.sort_unstable();
+
+    common_symbols
+        .into_iter()
         .map(|symbol| {
             let binance_volume = binance_volumes.get(&symbol).copied().unwrap_or(0.0);
             let gate_volume = gate_volumes.get(&symbol).copied().unwrap_or(0.0);
