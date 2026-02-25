@@ -4,6 +4,7 @@
 //! flushes every 5s — zero impact on trading hot path.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::{params, Connection, OpenFlags};
@@ -413,12 +414,19 @@ pub struct DbWriter {
     retry_tx: mpsc::Sender<DbCommand>,
     spillover_tx: mpsc::Sender<DbCommand>,
     backpressure_tx: mpsc::Sender<DbCommand>,
+    next_trade_seq: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
 enum DbCommand {
-    Trades(Vec<FleetTrade>),
-    Flush(tokio::sync::oneshot::Sender<()>),
+    Trades {
+        seq: u64,
+        trades: Vec<FleetTrade>,
+    },
+    Flush {
+        target_seq: u64,
+        done: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug)]
@@ -477,7 +485,8 @@ impl DbWriter {
         if trades.is_empty() {
             return;
         }
-        let command = DbCommand::Trades(trades);
+        let seq = self.next_trade_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let command = DbCommand::Trades { seq, trades };
         let outcome = try_enqueue_command(
             &self.tx,
             &self.overflow_tx,
@@ -530,10 +539,23 @@ impl DbWriter {
         }
     }
 
-    /// Flush all buffered DB writer data to disk (best effort).
+    /// Flush all currently enqueued DB writer data to disk (best effort).
+    ///
+    /// The flush waits until the writer has observed all trade batches that
+    /// were enqueued before this call, including those temporarily staged in
+    /// overflow/retry/spillover/backpressure channels.
     pub async fn flush_all(&self) {
+        let target_seq = self.next_trade_seq.load(Ordering::Acquire);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if self.tx.send(DbCommand::Flush(tx)).await.is_err() {
+        if self
+            .tx
+            .send(DbCommand::Flush {
+                target_seq,
+                done: tx,
+            })
+            .await
+            .is_err()
+        {
             warn!("db writer flush requested but channel is closed");
             return;
         }
@@ -558,6 +580,29 @@ impl DbWriter {
     /// Overflow counter threshold after which health emits warnings.
     pub const fn overflow_warn_threshold() -> u64 {
         OVERFLOW_WARN_THRESHOLD
+    }
+}
+
+fn flush_buffer_and_complete(
+    conn: &Connection,
+    buf: &mut Vec<FleetTrade>,
+    observed_max_seq: u64,
+    pending_flushes: &mut Vec<(u64, tokio::sync::oneshot::Sender<()>)>,
+) {
+    if !buf.is_empty() {
+        match flush_trades(conn, buf) {
+            Ok(_) => buf.clear(),
+            Err(e) => warn!("db flush error (retaining {} trades): {e}", buf.len()),
+        }
+    }
+    let mut idx = 0usize;
+    while idx < pending_flushes.len() {
+        if pending_flushes[idx].0 <= observed_max_seq {
+            let (_, done) = pending_flushes.swap_remove(idx);
+            let _ = done.send(());
+        } else {
+            idx += 1;
+        }
     }
 }
 
@@ -628,37 +673,59 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
         let mut buf: Vec<FleetTrade> = Vec::with_capacity(1024);
         let mut interval =
             tokio::time::interval(tokio::time::Duration::from_secs(FLUSH_INTERVAL_SECS));
+        let mut observed_max_seq: u64 = 0;
+        let mut pending_flushes: Vec<(u64, tokio::sync::oneshot::Sender<()>)> = Vec::new();
 
         loop {
             tokio::select! {
                 command = rx.recv() => {
                     match command {
-                        Some(DbCommand::Trades(trades)) => buf.extend(trades),
-                        Some(DbCommand::Flush(done)) => {
-                            if !buf.is_empty() {
-                                match flush_trades(&conn, &buf) {
-                                    Ok(_) => buf.clear(),
-                                    Err(e) => warn!("db flush error on explicit flush (retaining {} trades): {e}", buf.len()),
-                                }
+                        Some(DbCommand::Trades { seq, trades }) => {
+                            observed_max_seq = observed_max_seq.max(seq);
+                            buf.extend(trades);
+                            if !pending_flushes.is_empty() {
+                                flush_buffer_and_complete(
+                                    &conn,
+                                    &mut buf,
+                                    observed_max_seq,
+                                    &mut pending_flushes,
+                                );
                             }
-                            let _ = done.send(());
+                        }
+                        Some(DbCommand::Flush { target_seq, done }) => {
+                            flush_buffer_and_complete(
+                                &conn,
+                                &mut buf,
+                                observed_max_seq,
+                                &mut pending_flushes,
+                            );
+                            if observed_max_seq >= target_seq {
+                                let _ = done.send(());
+                            } else {
+                                pending_flushes.push((target_seq, done));
+                            }
                         }
                         None => break, // channel closed
                     }
                 }
                 _ = interval.tick() => {
-                    if !buf.is_empty() {
-                        match flush_trades(&conn, &buf) {
-                            Ok(_) => buf.clear(),
-                            Err(e) => warn!("db flush error (retaining {} trades): {e}", buf.len()),
-                        }
-                    }
+                    flush_buffer_and_complete(
+                        &conn,
+                        &mut buf,
+                        observed_max_seq,
+                        &mut pending_flushes,
+                    );
                 }
             }
         }
         // Flush remaining on shutdown.
         if !buf.is_empty() {
-            let _ = flush_trades(&conn, &buf);
+            if let Err(e) = flush_trades(&conn, &buf) {
+                warn!("db flush error during shutdown (dropping {} trades): {e}", buf.len());
+            }
+        }
+        for (_, done) in pending_flushes.drain(..) {
+            let _ = done.send(());
         }
         info!("db writer stopped");
     });
@@ -669,6 +736,7 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
         retry_tx,
         spillover_tx,
         backpressure_tx,
+        next_trade_seq: Arc::new(AtomicU64::new(0)),
     }
 }
 
@@ -1088,7 +1156,10 @@ mod tests {
         let (overflow_tx, mut overflow_rx) = mpsc::channel::<DbCommand>(2);
         let (retry_tx, _retry_rx) = mpsc::channel::<DbCommand>(2);
         let (spillover_tx, _spillover_rx) = mpsc::channel::<DbCommand>(2);
-        tx.try_send(DbCommand::Trades(vec![sample_trade("BTCUSDT")]))
+        tx.try_send(DbCommand::Trades {
+            seq: 1,
+            trades: vec![sample_trade("BTCUSDT")],
+        })
             .expect("pre-fill primary channel");
 
         let outcome = try_enqueue_command(
@@ -1096,15 +1167,18 @@ mod tests {
             &overflow_tx,
             &retry_tx,
             &spillover_tx,
-            DbCommand::Trades(vec![sample_trade("ETHUSDT")]),
+            DbCommand::Trades {
+                seq: 2,
+                trades: vec![sample_trade("ETHUSDT")],
+            },
         );
 
         assert!(matches!(outcome, EnqueueOutcome::QueuedOverflow));
         assert!(
-            matches!(overflow_rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "ETHUSDT")
+            matches!(overflow_rx.try_recv(), Ok(DbCommand::Trades { trades, .. }) if trades.len() == 1 && trades[0].symbol == "ETHUSDT")
         );
         assert!(
-            matches!(rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "BTCUSDT")
+            matches!(rx.try_recv(), Ok(DbCommand::Trades { trades, .. }) if trades.len() == 1 && trades[0].symbol == "BTCUSDT")
         );
         assert_eq!(DROPPED_BATCHES.load(Ordering::Relaxed), 0);
     }
@@ -1116,10 +1190,16 @@ mod tests {
         let (overflow_tx, _overflow_rx) = mpsc::channel::<DbCommand>(1);
         let (retry_tx, mut retry_rx) = mpsc::channel::<DbCommand>(2);
         let (spillover_tx, _spillover_rx) = mpsc::channel::<DbCommand>(2);
-        tx.try_send(DbCommand::Trades(vec![sample_trade("BTCUSDT")]))
+        tx.try_send(DbCommand::Trades {
+            seq: 1,
+            trades: vec![sample_trade("BTCUSDT")],
+        })
             .expect("pre-fill primary channel");
         overflow_tx
-            .try_send(DbCommand::Trades(vec![sample_trade("ETHUSDT")]))
+            .try_send(DbCommand::Trades {
+                seq: 2,
+                trades: vec![sample_trade("ETHUSDT")],
+            })
             .expect("pre-fill overflow channel");
 
         let outcome = try_enqueue_command(
@@ -1127,12 +1207,15 @@ mod tests {
             &overflow_tx,
             &retry_tx,
             &spillover_tx,
-            DbCommand::Trades(vec![sample_trade("SOLUSDT")]),
+            DbCommand::Trades {
+                seq: 3,
+                trades: vec![sample_trade("SOLUSDT")],
+            },
         );
 
         assert!(matches!(outcome, EnqueueOutcome::QueuedRetry));
         assert!(
-            matches!(retry_rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "SOLUSDT")
+            matches!(retry_rx.try_recv(), Ok(DbCommand::Trades { trades, .. }) if trades.len() == 1 && trades[0].symbol == "SOLUSDT")
         );
         assert_eq!(DROPPED_BATCHES.load(Ordering::Relaxed), 0);
     }
@@ -1144,13 +1227,22 @@ mod tests {
         let (overflow_tx, _overflow_rx) = mpsc::channel::<DbCommand>(1);
         let (retry_tx, _retry_rx) = mpsc::channel::<DbCommand>(1);
         let (spillover_tx, mut spillover_rx) = mpsc::channel::<DbCommand>(2);
-        tx.try_send(DbCommand::Trades(vec![sample_trade("BTCUSDT")]))
+        tx.try_send(DbCommand::Trades {
+            seq: 1,
+            trades: vec![sample_trade("BTCUSDT")],
+        })
             .expect("pre-fill primary channel");
         overflow_tx
-            .try_send(DbCommand::Trades(vec![sample_trade("ETHUSDT")]))
+            .try_send(DbCommand::Trades {
+                seq: 2,
+                trades: vec![sample_trade("ETHUSDT")],
+            })
             .expect("pre-fill overflow channel");
         retry_tx
-            .try_send(DbCommand::Trades(vec![sample_trade("SOLUSDT")]))
+            .try_send(DbCommand::Trades {
+                seq: 3,
+                trades: vec![sample_trade("SOLUSDT")],
+            })
             .expect("pre-fill retry channel");
 
         let outcome = try_enqueue_command(
@@ -1158,12 +1250,15 @@ mod tests {
             &overflow_tx,
             &retry_tx,
             &spillover_tx,
-            DbCommand::Trades(vec![sample_trade("ADAUSDT")]),
+            DbCommand::Trades {
+                seq: 4,
+                trades: vec![sample_trade("ADAUSDT")],
+            },
         );
 
         assert!(matches!(outcome, EnqueueOutcome::QueuedSpillover));
         assert!(
-            matches!(spillover_rx.try_recv(), Ok(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "ADAUSDT")
+            matches!(spillover_rx.try_recv(), Ok(DbCommand::Trades { trades, .. }) if trades.len() == 1 && trades[0].symbol == "ADAUSDT")
         );
         assert_eq!(DROPPED_BATCHES.load(Ordering::Relaxed), 0);
     }
@@ -1175,16 +1270,28 @@ mod tests {
         let (overflow_tx, _overflow_rx) = mpsc::channel::<DbCommand>(1);
         let (retry_tx, _retry_rx) = mpsc::channel::<DbCommand>(1);
         let (spillover_tx, _spillover_rx) = mpsc::channel::<DbCommand>(1);
-        tx.try_send(DbCommand::Trades(vec![sample_trade("BTCUSDT")]))
+        tx.try_send(DbCommand::Trades {
+            seq: 1,
+            trades: vec![sample_trade("BTCUSDT")],
+        })
             .expect("pre-fill primary channel");
         overflow_tx
-            .try_send(DbCommand::Trades(vec![sample_trade("ETHUSDT")]))
+            .try_send(DbCommand::Trades {
+                seq: 2,
+                trades: vec![sample_trade("ETHUSDT")],
+            })
             .expect("pre-fill overflow channel");
         retry_tx
-            .try_send(DbCommand::Trades(vec![sample_trade("SOLUSDT")]))
+            .try_send(DbCommand::Trades {
+                seq: 3,
+                trades: vec![sample_trade("SOLUSDT")],
+            })
             .expect("pre-fill retry channel");
         spillover_tx
-            .try_send(DbCommand::Trades(vec![sample_trade("XRPUSDT")]))
+            .try_send(DbCommand::Trades {
+                seq: 4,
+                trades: vec![sample_trade("XRPUSDT")],
+            })
             .expect("pre-fill spillover channel");
 
         let outcome = try_enqueue_command(
@@ -1192,11 +1299,14 @@ mod tests {
             &overflow_tx,
             &retry_tx,
             &spillover_tx,
-            DbCommand::Trades(vec![sample_trade("ADAUSDT")]),
+            DbCommand::Trades {
+                seq: 5,
+                trades: vec![sample_trade("ADAUSDT")],
+            },
         );
 
         assert!(
-            matches!(outcome, EnqueueOutcome::NeedsBackpressure(DbCommand::Trades(trades)) if trades.len() == 1 && trades[0].symbol == "ADAUSDT")
+            matches!(outcome, EnqueueOutcome::NeedsBackpressure(DbCommand::Trades { trades, .. }) if trades.len() == 1 && trades[0].symbol == "ADAUSDT")
         );
         assert_eq!(DROPPED_BATCHES.load(Ordering::Relaxed), 0);
     }

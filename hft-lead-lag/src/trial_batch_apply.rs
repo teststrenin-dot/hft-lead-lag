@@ -124,10 +124,7 @@ pub(super) async fn apply_trial_batch(
         }
     };
     let mode = patch_plan.mode;
-    if let Err(e) = upsert_runtime_configs_async(db_path.clone(), batch.configs.clone()).await {
-        warn!("trial-batch: db upsert failed: {e}");
-        return TrialAck::error(run_id, e, submission_id);
-    }
+    let runtime_configs = batch.configs.clone();
     let report = match screener.try_apply_fleet_patch(batch.configs, patch_plan) {
         Ok(report) => report,
         Err(e) => {
@@ -135,6 +132,9 @@ pub(super) async fn apply_trial_batch(
             return TrialAck::error(run_id, e.to_string(), submission_id);
         }
     };
+    if let Err(e) = upsert_runtime_configs_async(db_path.clone(), runtime_configs).await {
+        warn!("trial-batch: db upsert failed after patch apply: {e}");
+    }
     let applied_at_ms = EventLoopState::now_ms();
     if let Some(previous_run_id) = previous_run_id.as_ref() {
         if previous_run_id != &run_id {

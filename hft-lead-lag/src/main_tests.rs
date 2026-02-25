@@ -455,6 +455,47 @@ fn validate_trial_batch_run_lease_allows_mismatched_run_with_takeover() {
     assert!(result.is_ok(), "expected ok, got: {result:?}");
 }
 
+#[tokio::test]
+async fn apply_trial_batch_reject_does_not_upsert_runtime_configs() {
+    let db_path = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-trial-reject-no-upsert-{}-{}.sqlite",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    let pre_conn = hft_lead_lag::infrastructure::db::open_db(&db_path).expect("open db");
+    drop(pre_conn);
+
+    let screener = ScreenerStore::default();
+    let cfg = TraderConfig::default();
+    let changed_id = cfg.config_id();
+    let batch = TrialBatch {
+        run_id: "run-reject".to_string(),
+        configs: vec![cfg],
+        mode: Some("incremental".to_string()),
+        changed_config_ids: Some(vec![changed_id]),
+        symbols: None,
+        config_id_contract_version: Some(CONFIG_ID_CONTRACT_VERSION),
+        submission_id: Some("sub-reject".to_string()),
+        allow_run_id_takeover: false,
+    };
+
+    let ack = apply_trial_batch(&screener, db_path.clone(), batch).await;
+    assert_eq!(ack.status, "error");
+
+    let conn = hft_lead_lag::infrastructure::db::open_db(&db_path).expect("open db");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM configs", [], |row| row.get(0))
+        .expect("count configs");
+    assert_eq!(
+        count, 0,
+        "rejected trial batch must not upsert runtime configs into db"
+    );
+
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{}-wal", db_path.display()));
+    let _ = fs::remove_file(format!("{}-shm", db_path.display()));
+}
+
 fn prime_symbol_fleet(screener: &ScreenerStore, symbol: &str, exchange_ts_ns: i64) {
     screener.update(
         symbol,
