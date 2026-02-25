@@ -1230,6 +1230,35 @@ async fn handle_signal_tick_skips_when_no_pending_symbols() {
 }
 
 #[tokio::test]
+async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
+    let mut state = EventLoopState::new();
+    let strategy = RecordingRuntimeStrategy::default();
+    let total = SIGNAL_CHECK_BUDGET_PER_TICK + 2;
+
+    for idx in 0..total {
+        state.pending_signal_symbols.insert(format!("SYM{idx:04}"));
+    }
+
+    state.handle_signal_tick(&strategy).await;
+    assert_eq!(state.pending_signal_symbols.len(), 2);
+    let checked_after_first_tick = strategy
+        .checked_symbols
+        .lock()
+        .expect("checked symbols")
+        .len();
+    assert_eq!(checked_after_first_tick, SIGNAL_CHECK_BUDGET_PER_TICK);
+
+    state.handle_signal_tick(&strategy).await;
+    assert!(state.pending_signal_symbols.is_empty());
+    let checked_after_second_tick = strategy
+        .checked_symbols
+        .lock()
+        .expect("checked symbols")
+        .len();
+    assert_eq!(checked_after_second_tick, total);
+}
+
+#[tokio::test]
 async fn drain_runtime_grid_reset_signals_reports_presence() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     tx.try_send(()).expect("send reset signal");

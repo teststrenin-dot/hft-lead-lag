@@ -8,19 +8,19 @@ use hft_lead_lag::api::{
     WsServerConfig,
 };
 use hft_lead_lag::domain::screener::fleet_patch::{FleetPatchMode, FleetPatchPlan};
-use hft_lead_lag::domain::screener::{CONFIG_ID_CONTRACT_VERSION, TraderConfig};
+use hft_lead_lag::domain::screener::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
 use hft_lead_lag::infrastructure::logging::init_centralized_logging;
 use hft_lead_lag::infrastructure::rest::{BinanceRestClient, GateRestClient, Ticker24h};
 use hft_lead_lag::{
-    BinanceMarketData, ConfigManager, GateMarketData, MarketDataStream, RuntimeStrategy,
-    build_runtime_strategy,
+    build_runtime_strategy, BinanceMarketData, ConfigManager, GateMarketData, MarketDataStream,
+    RuntimeStrategy,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{error, info, warn};
 
@@ -1069,6 +1069,7 @@ const HOT_RELOAD_MIN_SLEEP_MS: u64 = 500;
 const TRIAL_BATCH_WATCH_SLEEP_MS: u64 = 500;
 const TRIAL_CONTROL_WATCH_SLEEP_MS: u64 = 500;
 const RUNTIME_GRID_RESET_CHANNEL_CAPACITY: usize = 32;
+const SIGNAL_CHECK_BUDGET_PER_TICK: usize = 256;
 
 #[derive(Default)]
 struct TrialBatchWatchState {
@@ -1671,7 +1672,7 @@ struct EventLoopState {
     signal_interval: tokio::time::Interval,
     latest_bn: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
     latest_gt: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
-    pending_signal_symbols: std::collections::HashSet<String>,
+    pending_signal_symbols: std::collections::BTreeSet<String>,
     metrics: EventLoopMetrics,
 }
 
@@ -1803,7 +1804,7 @@ impl EventLoopState {
             signal_interval,
             latest_bn: std::collections::HashMap::new(),
             latest_gt: std::collections::HashMap::new(),
-            pending_signal_symbols: std::collections::HashSet::new(),
+            pending_signal_symbols: std::collections::BTreeSet::new(),
             metrics: EventLoopMetrics::new(),
         }
     }
@@ -1899,9 +1900,10 @@ impl EventLoopState {
             self.maybe_log_status();
             return;
         }
-        let mut symbols_to_check: Vec<String> = self.pending_signal_symbols.drain().collect();
-        symbols_to_check.sort_unstable();
-        for symbol in symbols_to_check {
+        for _ in 0..SIGNAL_CHECK_BUDGET_PER_TICK {
+            let Some(symbol) = self.pending_signal_symbols.pop_first() else {
+                break;
+            };
             if let Some(signal) = strategy.check_signal(&symbol).await {
                 self.signal_count += 1;
                 info!(
