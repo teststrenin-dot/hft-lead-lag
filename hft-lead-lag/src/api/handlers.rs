@@ -44,6 +44,10 @@ pub(crate) struct HealthResponse {
     gate: bool,
     binance_last_tick_age_ms: i64,
     gate_last_tick_age_ms: i64,
+    trial_queue_depth: u64,
+    trial_last_ack_age_ms: Option<i64>,
+    trial_last_ack_status: &'static str,
+    trial_active_run_id: Option<String>,
     binance_dropped_messages: u64,
     gate_dropped_messages: u64,
     db_dropped_batches: u64,
@@ -101,6 +105,8 @@ pub(crate) async fn health(
     State(state): State<Arc<HttpState>>,
 ) -> (axum::http::StatusCode, Json<HealthResponse>) {
     const STALE_TICK_THRESHOLD_MS: i64 = 5_000;
+    const TRIAL_ACK_STALE_WARN_MS: i64 = 120_000;
+    const TRIAL_QUEUE_DEPTH_WARN_THRESHOLD: u64 = 10;
 
     let now_ms = crate::domain::screener::utils::now_ms();
     let binance_last_tick_ms = state.health.binance_last_tick_ms.load(Ordering::Relaxed);
@@ -118,6 +124,22 @@ pub(crate) async fn health(
 
     let binance_connected = state.health.binance_connected.load(Ordering::Relaxed);
     let gate_connected = state.health.gate_connected.load(Ordering::Relaxed);
+    let trial_queue_depth = state.health.trial_queue_depth.load(Ordering::Relaxed);
+    let trial_last_ack_ms = state.health.trial_last_ack_ms.load(Ordering::Relaxed);
+    let trial_last_ack_error = state.health.trial_last_ack_error.load(Ordering::Relaxed);
+    let trial_last_ack_age_ms = if trial_last_ack_ms > 0 {
+        Some(now_ms.saturating_sub(trial_last_ack_ms))
+    } else {
+        None
+    };
+    let trial_last_ack_status = if trial_last_ack_ms <= 0 {
+        "unknown"
+    } else if trial_last_ack_error {
+        "error"
+    } else {
+        "ok"
+    };
+    let trial_active_run_id = state.screener.current_run_id();
     let binance = binance_connected && binance_last_tick_age_ms <= STALE_TICK_THRESHOLD_MS;
     let gate = gate_connected && gate_last_tick_age_ms <= STALE_TICK_THRESHOLD_MS;
 
@@ -151,6 +173,21 @@ pub(crate) async fn health(
     if db_saturation.overflow_warn {
         warnings.push("db_overflow_batches_high");
     }
+    if trial_queue_depth >= TRIAL_QUEUE_DEPTH_WARN_THRESHOLD {
+        warnings.push("trial_queue_depth_high");
+    }
+    if trial_last_ack_error {
+        warnings.push("trial_last_ack_error");
+    }
+    if trial_queue_depth > 0 {
+        match trial_last_ack_age_ms {
+            Some(age_ms) if age_ms > TRIAL_ACK_STALE_WARN_MS => {
+                warnings.push("trial_ack_stale");
+            }
+            None => warnings.push("trial_ack_missing_for_queued_batches"),
+            _ => {}
+        }
+    }
 
     let healthy = issues.is_empty();
     let status = if healthy { "ok" } else { "degraded" };
@@ -167,6 +204,10 @@ pub(crate) async fn health(
             gate,
             binance_last_tick_age_ms,
             gate_last_tick_age_ms,
+            trial_queue_depth,
+            trial_last_ack_age_ms,
+            trial_last_ack_status,
+            trial_active_run_id,
             binance_dropped_messages,
             gate_dropped_messages,
             db_dropped_batches,
@@ -1366,6 +1407,55 @@ mod tests {
             resp.warnings.contains(&"db_overflow_batches_high"),
             expected.overflow_warn
         );
+        assert_eq!(resp.trial_queue_depth, 0);
+        assert_eq!(resp.trial_last_ack_status, "unknown");
+        assert_eq!(resp.trial_active_run_id, None);
+    }
+
+    #[tokio::test]
+    async fn health_reports_trial_lifecycle_telemetry() {
+        let health_state = Arc::new(HealthState::new());
+        let now_ms = crate::domain::screener::utils::now_ms();
+        health_state
+            .binance_connected
+            .store(true, Ordering::Relaxed);
+        health_state.gate_connected.store(true, Ordering::Relaxed);
+        health_state
+            .binance_last_tick_ms
+            .store(now_ms, Ordering::Relaxed);
+        health_state
+            .gate_last_tick_ms
+            .store(now_ms, Ordering::Relaxed);
+        health_state
+            .trial_last_ack_ms
+            .store(now_ms.saturating_sub(1_000), Ordering::Relaxed);
+        health_state
+            .trial_last_ack_error
+            .store(true, Ordering::Relaxed);
+        health_state.trial_queue_depth.store(12, Ordering::Relaxed);
+
+        let screener = ScreenerStore::default();
+        screener.set_run_id(Some("run-health-telemetry".to_string()));
+        let state = Arc::new(HttpState {
+            min_volume_usd: 1_000_000.0,
+            screener,
+            natr_cache: Arc::new(DashMap::new()),
+            health: health_state,
+            trial_runner: TrialRunnerManager::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
+            db_path: PathBuf::from("data/optimizer.db"),
+        });
+
+        let (_code, Json(resp)) = health(State(state)).await;
+        assert_eq!(resp.trial_queue_depth, 12);
+        assert_eq!(resp.trial_last_ack_status, "error");
+        assert_eq!(
+            resp.trial_active_run_id.as_deref(),
+            Some("run-health-telemetry")
+        );
+        assert!(resp.warnings.contains(&"trial_last_ack_error"));
+        assert!(resp.warnings.contains(&"trial_queue_depth_high"));
     }
 
     #[tokio::test]

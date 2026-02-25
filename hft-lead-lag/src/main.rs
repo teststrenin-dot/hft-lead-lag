@@ -965,6 +965,22 @@ async fn apply_trial_batch(
     )
 }
 
+fn record_trial_ack_health(health_state: &HealthState, ack: &TrialAck) {
+    health_state
+        .trial_last_ack_ms
+        .store(ack.applied_at_ms, Ordering::Relaxed);
+    health_state
+        .trial_last_ack_error
+        .store(ack.status != "ok", Ordering::Relaxed);
+}
+
+fn update_trial_queue_depth_health(health_state: &HealthState, config_dir: &Path) {
+    let depth = list_trial_batch_queue_files(config_dir).len() as u64;
+    health_state
+        .trial_queue_depth
+        .store(depth, Ordering::Relaxed);
+}
+
 const HOT_RELOAD_DEFAULT_SLEEP_MS: u64 = 5_000;
 const HOT_RELOAD_MIN_SLEEP_MS: u64 = 500;
 const TRIAL_WATCH_SLEEP_MS: u64 = 500;
@@ -1038,6 +1054,7 @@ async fn maybe_handle_trial_control(
 async fn maybe_handle_trial_batch_file(
     screener: &ScreenerStore,
     db_path: &Path,
+    health_state: &HealthState,
     trial_batch_path: &Path,
     last_trial_modified: &mut Option<FileFingerprint>,
 ) -> bool {
@@ -1051,6 +1068,7 @@ async fn maybe_handle_trial_batch_file(
         Ok(batch) => {
             let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
             let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
+            record_trial_ack_health(health_state, &ack);
             let is_ok = ack.status == "ok";
             write_trial_ack(ack_dir, &ack);
             is_ok
@@ -1059,6 +1077,7 @@ async fn maybe_handle_trial_batch_file(
             warn!("trial-batch: {e}");
             let ack_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
             let ack = build_trial_batch_error_ack(trial_batch_path, false, e);
+            record_trial_ack_health(health_state, &ack);
             write_trial_ack(ack_dir, &ack);
             false
         }
@@ -1068,6 +1087,7 @@ async fn maybe_handle_trial_batch_file(
 async fn maybe_handle_trial_batch_queue(
     screener: &ScreenerStore,
     db_path: &Path,
+    health_state: &HealthState,
     config_dir: &Path,
 ) -> bool {
     let Some(queued_batch_path) = list_trial_batch_queue_files(config_dir).into_iter().next()
@@ -1077,6 +1097,7 @@ async fn maybe_handle_trial_batch_queue(
     let is_ok = match load_trial_batch(&queued_batch_path) {
         Ok(batch) => {
             let ack = apply_trial_batch(screener, db_path.to_path_buf(), batch).await;
+            record_trial_ack_health(health_state, &ack);
             let ok = ack.status == "ok";
             write_trial_ack(config_dir, &ack);
             ok
@@ -1087,6 +1108,7 @@ async fn maybe_handle_trial_batch_queue(
                 queued_batch_path.display()
             );
             let ack = build_trial_batch_error_ack(&queued_batch_path, true, e);
+            record_trial_ack_health(health_state, &ack);
             write_trial_ack(config_dir, &ack);
             false
         }
@@ -1193,11 +1215,16 @@ fn runtime_grid_sleep_ms(pending: Option<&RuntimeGridGeneration>) -> u64 {
 async fn run_trial_watch_loop(
     screener: ScreenerStore,
     db_path: PathBuf,
+    health_state: Arc<HealthState>,
     trial_batch_path: PathBuf,
     trial_control_path: PathBuf,
     grid_reset_tx: tokio::sync::mpsc::Sender<()>,
 ) {
     let mut state = TrialWatchState::default();
+    let config_dir = trial_batch_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
     loop {
         maybe_handle_trial_control(
             &screener,
@@ -1207,10 +1234,13 @@ async fn run_trial_watch_loop(
         )
         .await;
 
+        update_trial_queue_depth_health(health_state.as_ref(), &config_dir);
+
         let mut clear_runtime_grid_pending = false;
         if maybe_handle_trial_batch_file(
             &screener,
             &db_path,
+            health_state.as_ref(),
             &trial_batch_path,
             &mut state.last_trial_modified,
         )
@@ -1219,10 +1249,13 @@ async fn run_trial_watch_loop(
             clear_runtime_grid_pending = true;
         }
 
-        let config_dir = trial_batch_path.parent().unwrap_or(Path::new("."));
-        if maybe_handle_trial_batch_queue(&screener, &db_path, config_dir).await {
+        if maybe_handle_trial_batch_queue(&screener, &db_path, health_state.as_ref(), &config_dir)
+            .await
+        {
             clear_runtime_grid_pending = true;
         }
+
+        update_trial_queue_depth_health(health_state.as_ref(), &config_dir);
 
         if clear_runtime_grid_pending {
             let _ = grid_reset_tx.try_send(());
@@ -1274,20 +1307,34 @@ async fn run_runtime_grid_watch_loop(
     }
 }
 
-fn spawn_runtime_grid_hot_reload(
-    screener: ScreenerStore,
-    db_path: PathBuf,
+#[derive(Debug)]
+struct RuntimeGridHotReloadSpec {
     config_path: PathBuf,
     trial_batch_path: PathBuf,
     trial_control_path: PathBuf,
     initial_modified: Option<FileFingerprint>,
     initial_signature: Option<u64>,
+}
+
+fn spawn_runtime_grid_hot_reload(
+    screener: ScreenerStore,
+    db_path: PathBuf,
+    health_state: Arc<HealthState>,
+    spec: RuntimeGridHotReloadSpec,
 ) {
+    let RuntimeGridHotReloadSpec {
+        config_path,
+        trial_batch_path,
+        trial_control_path,
+        initial_modified,
+        initial_signature,
+    } = spec;
     let (grid_reset_tx, grid_reset_rx) =
         tokio::sync::mpsc::channel::<()>(RUNTIME_GRID_RESET_CHANNEL_CAPACITY);
 
     let trial_screener = screener.clone();
     let trial_db_path = db_path.clone();
+    let trial_health_state = health_state.clone();
     let trial_batch_path_clone = trial_batch_path.clone();
     let trial_control_path_clone = trial_control_path.clone();
 
@@ -1295,6 +1342,7 @@ fn spawn_runtime_grid_hot_reload(
         run_trial_watch_loop(
             trial_screener,
             trial_db_path,
+            trial_health_state,
             trial_batch_path_clone,
             trial_control_path_clone,
             grid_reset_tx,
@@ -2252,11 +2300,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     spawn_runtime_grid_hot_reload(
         screener.clone(),
         db_path.to_path_buf(),
-        runtime_grid_path.to_path_buf(),
-        PathBuf::from("config/trial-batch.json"),
-        PathBuf::from("config/trial-control.json"),
-        runtime_grid_last_modified,
-        runtime_grid_last_signature,
+        health_state.clone(),
+        RuntimeGridHotReloadSpec {
+            config_path: runtime_grid_path.to_path_buf(),
+            trial_batch_path: PathBuf::from("config/trial-batch.json"),
+            trial_control_path: PathBuf::from("config/trial-control.json"),
+            initial_modified: runtime_grid_last_modified,
+            initial_signature: runtime_grid_last_signature,
+        },
     );
     spawn_gate_natr_refresher(screener.clone(), common_symbols.clone());
     let ws_tx = start_api_servers(MIN_VOLUME_USD, screener.clone(), health_state.clone()).await?;

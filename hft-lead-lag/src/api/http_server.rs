@@ -1,13 +1,13 @@
 //! HTTP server — routing and configuration.
 
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use dashmap::DashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use tracing::info;
 
 use crate::domain::screener::ScreenerStore;
@@ -38,6 +38,9 @@ pub struct HealthState {
     pub gate_connected: AtomicBool,
     pub binance_last_tick_ms: AtomicI64,
     pub gate_last_tick_ms: AtomicI64,
+    pub trial_last_ack_ms: AtomicI64,
+    pub trial_last_ack_error: AtomicBool,
+    pub trial_queue_depth: AtomicU64,
 }
 
 impl HealthState {
@@ -47,6 +50,9 @@ impl HealthState {
             gate_connected: AtomicBool::new(false),
             binance_last_tick_ms: AtomicI64::new(0),
             gate_last_tick_ms: AtomicI64::new(0),
+            trial_last_ack_ms: AtomicI64::new(0),
+            trial_last_ack_error: AtomicBool::new(false),
+            trial_queue_depth: AtomicU64::new(0),
         }
     }
 }
