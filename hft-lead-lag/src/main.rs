@@ -1513,6 +1513,7 @@ struct EventLoopState {
     signal_interval: tokio::time::Interval,
     latest_bn: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
     latest_gt: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    pending_signal_symbols: std::collections::HashSet<String>,
     metrics: EventLoopMetrics,
 }
 
@@ -1644,6 +1645,7 @@ impl EventLoopState {
             signal_interval,
             latest_bn: std::collections::HashMap::new(),
             latest_gt: std::collections::HashMap::new(),
+            pending_signal_symbols: std::collections::HashSet::new(),
             metrics: EventLoopMetrics::new(),
         }
     }
@@ -1721,13 +1723,28 @@ impl EventLoopState {
         }
     }
 
-    async fn handle_signal_tick(
+    fn mark_pending_signal_symbols(
         &mut self,
-        strategy: &dyn RuntimeStrategy,
-        strategy_symbols: &[String],
+        updated_symbols: &[String],
+        strategy_symbol_set: &std::collections::HashSet<&str>,
     ) {
-        for symbol in strategy_symbols {
-            if let Some(signal) = strategy.check_signal(symbol).await {
+        for symbol in updated_symbols {
+            let raw = symbol.as_str();
+            if strategy_symbol_set.contains(raw) {
+                self.pending_signal_symbols.insert(symbol.clone());
+            }
+        }
+    }
+
+    async fn handle_signal_tick(&mut self, strategy: &dyn RuntimeStrategy) {
+        if self.pending_signal_symbols.is_empty() {
+            self.maybe_log_status();
+            return;
+        }
+        let mut symbols_to_check: Vec<String> = self.pending_signal_symbols.drain().collect();
+        symbols_to_check.sort_unstable();
+        for symbol in symbols_to_check {
+            if let Some(signal) = strategy.check_signal(&symbol).await {
                 self.signal_count += 1;
                 info!(
                     "{} signal #{}: {} | spread={:.2}bps | {}",
@@ -1765,6 +1782,7 @@ async fn handle_exchange_tick(
     match state.process_exchange_result(side, result, drained, context.screener, context.ws_tx) {
         Ok(updated_symbols) => {
             side.mark_alive(context.health_state, EventLoopState::now_ms());
+            state.mark_pending_signal_symbols(&updated_symbols, context.strategy_symbol_set);
             state
                 .update_strategy_books(
                     side,
@@ -2151,7 +2169,7 @@ async fn run_event_loop(
             }
 
             _ = state.signal_interval.tick() => {
-                state.handle_signal_tick(strategy, strategy_symbols).await;
+                state.handle_signal_tick(strategy).await;
             }
         }
     }

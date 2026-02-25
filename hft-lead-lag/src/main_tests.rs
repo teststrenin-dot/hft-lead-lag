@@ -1042,6 +1042,7 @@ symbols = ["BTCUSDT"]
 struct RecordingRuntimeStrategy {
     primary_symbols: std::sync::Mutex<Vec<String>>,
     hedge_symbols: std::sync::Mutex<Vec<String>>,
+    checked_symbols: std::sync::Mutex<Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -1065,6 +1066,10 @@ impl RuntimeStrategy for RecordingRuntimeStrategy {
     }
 
     async fn check_signal(&self, _symbol: &str) -> Option<hft_lead_lag::StrategySignal> {
+        self.checked_symbols
+            .lock()
+            .expect("checked lock")
+            .push(_symbol.to_string());
         None
     }
 }
@@ -1122,6 +1127,46 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
         .clone();
     assert_eq!(primary, vec!["ETHUSDT".to_string()]);
     assert_eq!(hedge, vec!["BTCUSDT".to_string()]);
+}
+
+#[tokio::test]
+async fn handle_signal_tick_checks_only_pending_symbols() {
+    let mut state = EventLoopState::new();
+    let strategy = RecordingRuntimeStrategy::default();
+
+    let strategy_symbol_set: std::collections::HashSet<&str> =
+        ["BTCUSDT", "ETHUSDT"].into_iter().collect();
+    let updated = vec![
+        "BTCUSDT".to_string(),
+        "SOLUSDT".to_string(),
+        "ETHUSDT".to_string(),
+        "BTCUSDT".to_string(),
+    ];
+    state.mark_pending_signal_symbols(&updated, &strategy_symbol_set);
+
+    state.handle_signal_tick(&strategy).await;
+
+    let checked = strategy
+        .checked_symbols
+        .lock()
+        .expect("checked symbols")
+        .clone();
+    assert_eq!(checked, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+}
+
+#[tokio::test]
+async fn handle_signal_tick_skips_when_no_pending_symbols() {
+    let mut state = EventLoopState::new();
+    let strategy = RecordingRuntimeStrategy::default();
+
+    state.handle_signal_tick(&strategy).await;
+
+    let checked = strategy
+        .checked_symbols
+        .lock()
+        .expect("checked symbols")
+        .clone();
+    assert!(checked.is_empty());
 }
 
 #[tokio::test]
