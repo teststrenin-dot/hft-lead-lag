@@ -12,6 +12,7 @@ pub mod fleet_patch;
 mod fleet_reload;
 mod policy_views;
 pub mod price_samples;
+mod quote_ingest;
 pub mod shadow_fleet;
 pub mod shadow_trader;
 pub mod state;
@@ -27,10 +28,10 @@ use dashmap::DashMap;
 use serde::Serialize;
 
 use self::fleet_patch::{FleetPatchMode, FleetPatchPlan};
-use self::shadow_fleet::{generate_grid, FleetTickMeta, ShadowFleet};
+use self::shadow_fleet::generate_grid;
 use self::shadow_trader::{ChartData, ShadowDebug};
-use self::state::{Quote, SymbolState};
-use self::utils::{now_ms, TimeDomainSample};
+use self::state::SymbolState;
+use self::utils::now_ms;
 
 use crate::infrastructure::db::DbWriter;
 
@@ -306,72 +307,15 @@ impl ScreenerStore {
         timestamp_ns: i64,
         local_receive_ts_ns: i64,
     ) {
-        if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || ask <= 0.0 {
-            return;
-        }
-
-        let clocks = TimeDomainSample::from_raw(timestamp_ns, local_receive_ts_ns, now_ms());
-        self.prune_symbol_catalog_if_needed(clocks.decision_ts_ms);
-
-        let mut state = self.symbols.entry(symbol.to_string()).or_default();
-
-        let state = state.value_mut();
-        let ws_drift = clocks.decision_ws_drift_ms();
-        let ingress_ws_drift = clocks.ingress_ws_drift_ms();
-        let quote = Quote {
+        quote_ingest::update(
+            self,
+            symbol,
+            exchange,
             bid,
             ask,
-            ts_ms: clocks.exchange_event_ts_ms,
-        };
-
-        if !state.ingest_quote(exchange, quote, ws_drift, ingress_ws_drift) {
-            return;
-        }
-
-        if state.binance.is_none() || state.gate.is_none() {
-            state.updated_at_ms = clocks.exchange_event_ts_ms;
-            state.leader_exchange = exchange;
-            state.lag_ms = 0.0;
-            self.mark_rows_cache_dirty();
-            return;
-        }
-
-        state.updated_at_ms = clocks.exchange_event_ts_ms;
-        state.update_lag(clocks.exchange_event_ts_ms, LAG_WINDOW_MS);
-        state.update_cycles(clocks.exchange_event_ts_ms, self.window_ms);
-        state.tick_shadow(clocks.exchange_event_ts_ms, self.window_ms);
-
-        // Fleet: lazy-init on first tick, then tick all + drain trades to db.
-        let (binance_ref, gate_ref) = match (state.binance.as_ref(), state.gate.as_ref()) {
-            (Some(b), Some(g)) => (b, g),
-            _ => return,
-        };
-        let fleet_configs = self.fleet_configs.load_full();
-        let fleet = state
-            .fleet
-            .get_or_insert_with(|| ShadowFleet::new(fleet_configs.as_ref()));
-        let run_id_arc = self.current_run_id.load();
-        let run_id_ref = run_id_arc.as_deref();
-        fleet.tick_all(
-            clocks.exchange_event_ts_ms,
-            binance_ref,
-            gate_ref,
-            &state.price_samples,
-            self.window_ms,
-            FleetTickMeta {
-                symbol,
-                gate_natr_30m_pct_at_entry: state.gate_natr_30m_pct,
-                run_id: run_id_ref,
-            },
+            timestamp_ns,
+            local_receive_ts_ns,
         );
-        let trades = fleet.drain_trades();
-        if !trades.is_empty() {
-            if let Some(ref writer) = self.db_writer {
-                writer.send(trades);
-            }
-            // Without a writer attached, drop drained trades to keep fleet queue bounded.
-        }
-        self.mark_rows_cache_dirty();
     }
 
     pub fn rows_sorted(&self) -> Vec<ScreenerRow> {
@@ -416,8 +360,9 @@ impl Default for ScreenerStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        shadow_fleet::FleetTrade, FleetPatchApplyError, FleetPatchMode, FleetPatchPlan,
-        ScreenerStore, ShadowFleet, SymbolState, TraderConfig,
+        shadow_fleet::{FleetTrade, ShadowFleet},
+        FleetPatchApplyError, FleetPatchMode, FleetPatchPlan, ScreenerStore, SymbolState,
+        TraderConfig,
     };
     use crate::domain::screener::shadow_trader::{ClosedTrade, Direction};
 
