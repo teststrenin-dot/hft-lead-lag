@@ -17,7 +17,6 @@ pub struct ExchangeCredentials {
 pub struct BinanceConfig {
     pub enabled: bool,
     pub credentials: Option<ExchangeCredentials>,
-    pub volume_filter: Option<VolumeFilter>,
     pub blacklist: Vec<String>,
 }
 
@@ -26,24 +25,7 @@ pub struct BinanceConfig {
 pub struct GateConfig {
     pub enabled: bool,
     pub credentials: Option<ExchangeCredentials>,
-    pub volume_filter: Option<VolumeFilter>,
     pub blacklist: Vec<String>,
-}
-
-/// Volume filter settings
-#[derive(Debug, Clone, Deserialize)]
-pub struct VolumeFilter {
-    pub min_usd_volume: f64,
-    pub max_usd_volume: f64,
-}
-
-/// Trading bot configuration
-#[derive(Debug, Clone, Deserialize)]
-pub struct TradingConfig {
-    pub order_qty_usd: f64,
-    pub min_min_spread: f64,
-    pub min_profit_spread: f64,
-    pub max_position_size_usd: f64,
 }
 
 /// Lead-lag strategy configuration
@@ -113,7 +95,6 @@ impl Default for StrategyRuntimeConfig {
 pub struct AppConfig {
     pub binance: BinanceConfig,
     pub gate: GateConfig,
-    pub trading: Option<TradingConfig>,
     pub lead_lag: Option<LeadLagConfig>,
     #[serde(default)]
     pub strategy: StrategyRuntimeConfig,
@@ -125,16 +106,13 @@ impl Default for AppConfig {
             binance: BinanceConfig {
                 enabled: true,
                 credentials: None,
-                volume_filter: None,
                 blacklist: vec![],
             },
             gate: GateConfig {
                 enabled: true,
                 credentials: None,
-                volume_filter: None,
                 blacklist: vec![],
             },
-            trading: None,
             lead_lag: None,
             strategy: StrategyRuntimeConfig::default(),
         }

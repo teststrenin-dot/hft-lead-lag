@@ -1,5 +1,5 @@
 //! Market data message types optimized for HFT
-//! 
+//!
 //! Design principles:
 //! - Zero-copy parsing where possible (using bytes::Bytes)
 //! - Fixed-point arithmetic for prices (i64 ticks at 1e-8 precision)
@@ -165,14 +165,4 @@ impl Trade {
     pub fn qty(&self) -> f64 {
         ticks_to_decimal(self.qty_ticks)
     }
-}
-
-/// Subscription result message
-#[derive(Debug, Clone)]
-pub struct SubscriptionResult {
-    pub subscription_id: u64,
-    pub symbol: Bytes,
-    pub channel: Bytes,
-    pub success: bool,
-    pub error_message: Option<Bytes>,
 }

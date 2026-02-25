@@ -22,17 +22,17 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use serde::Serialize;
 
-use self::fleet_patch::{should_reset_symbol, FleetPatchMode, FleetPatchPlan};
-use self::shadow_fleet::{generate_grid, FleetTickMeta, ShadowFleet};
+use self::fleet_patch::{FleetPatchMode, FleetPatchPlan, should_reset_symbol};
+use self::shadow_fleet::{FleetTickMeta, ShadowFleet, generate_grid};
 use self::shadow_trader::{ChartData, ShadowDebug};
 use self::state::{Quote, SymbolState};
-use self::utils::{now_ms, TimeDomainSample};
+use self::utils::{TimeDomainSample, now_ms};
 
 use crate::infrastructure::db::DbWriter;
 
 pub use self::shadow_fleet::PolicyConfigSnapshot;
 pub use self::shadow_trader::{ChartTrade, ShadowStats};
-pub use self::trader_config::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
+pub use self::trader_config::{CONFIG_ID_CONTRACT_VERSION, TraderConfig};
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -516,6 +516,28 @@ impl ScreenerStore {
                 .map(|fleet| fleet.top_policy_configs(top_k))
         })
     }
+
+    pub fn fleet_policy_overview(
+        &self,
+        top_k: usize,
+        max_symbols: usize,
+    ) -> Vec<(String, Vec<PolicyConfigSnapshot>)> {
+        let top_k = top_k.max(1);
+        let max_symbols = max_symbols.max(1);
+        let mut rows: Vec<(String, Vec<PolicyConfigSnapshot>)> = self
+            .symbols
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .fleet
+                    .as_ref()
+                    .map(|fleet| (entry.key().clone(), fleet.top_policy_configs(top_k)))
+            })
+            .collect();
+        rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+        rows.truncate(max_symbols);
+        rows
+    }
 }
 
 impl Default for ScreenerStore {
@@ -527,8 +549,8 @@ impl Default for ScreenerStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        shadow_fleet::FleetTrade, FleetPatchApplyError, FleetPatchMode, FleetPatchPlan,
-        ScreenerStore, ShadowFleet, SymbolState, TraderConfig,
+        FleetPatchApplyError, FleetPatchMode, FleetPatchPlan, ScreenerStore, ShadowFleet,
+        SymbolState, TraderConfig, shadow_fleet::FleetTrade,
     };
     use crate::domain::screener::shadow_trader::{ClosedTrade, Direction};
 
@@ -580,6 +602,17 @@ mod tests {
             .top_policy_configs("btcusdt", 5)
             .expect("policy rows for known symbol");
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn fleet_policy_overview_sorts_symbols_and_applies_limit() {
+        let store = ScreenerStore::default();
+        with_symbol_fleet(&store, "BTCUSDT", &[config_with_gap(50.0)]);
+        with_symbol_fleet(&store, "ADAUSDT", &[config_with_gap(60.0)]);
+
+        let overview = store.fleet_policy_overview(5, 1);
+        assert_eq!(overview.len(), 1);
+        assert_eq!(overview[0].0, "ADAUSDT");
     }
 
     #[test]

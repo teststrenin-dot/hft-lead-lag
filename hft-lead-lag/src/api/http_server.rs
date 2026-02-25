@@ -144,6 +144,10 @@ impl HttpServer {
             .route("/api/v1/fleet/ranked", get(handlers::get_fleet_ranked))
             .route("/api/v1/fleet/symbols", get(handlers::get_fleet_by_symbol))
             .route(
+                "/api/v1/fleet/policy",
+                get(handlers::get_fleet_policy_overview),
+            )
+            .route(
                 "/api/v1/fleet/policy/:symbol",
                 get(handlers::get_fleet_policy_for_symbol),
             )

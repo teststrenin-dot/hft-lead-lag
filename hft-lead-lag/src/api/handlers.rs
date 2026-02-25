@@ -292,6 +292,34 @@ pub(crate) struct FleetPolicyQuery {
     top_k: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct FleetPolicyOverviewQuery {
+    top_k: Option<usize>,
+    max_symbols: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FleetPolicyOverviewRow {
+    symbol: String,
+    policies: Vec<PolicyConfigSnapshot>,
+}
+
+pub(crate) async fn get_fleet_policy_overview(
+    State(state): State<Arc<HttpState>>,
+    Query(query): Query<FleetPolicyOverviewQuery>,
+) -> Json<Vec<FleetPolicyOverviewRow>> {
+    let top_k = query.top_k.unwrap_or(20).clamp(1, 200);
+    let max_symbols = query.max_symbols.unwrap_or(100).clamp(1, 2000);
+    Json(
+        state
+            .screener
+            .fleet_policy_overview(top_k, max_symbols)
+            .into_iter()
+            .map(|(symbol, policies)| FleetPolicyOverviewRow { symbol, policies })
+            .collect(),
+    )
+}
+
 pub(crate) async fn get_fleet_policy_for_symbol(
     State(state): State<Arc<HttpState>>,
     axum::extract::Path(symbol): axum::extract::Path<String>,
@@ -1479,6 +1507,61 @@ mod tests {
         )
         .await;
         assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fleet_policy_overview_returns_empty_without_fleets() {
+        let health_state = Arc::new(HealthState::new());
+        let state = Arc::new(HttpState {
+            min_volume_usd: 1_000_000.0,
+            screener: ScreenerStore::default(),
+            natr_cache: Arc::new(DashMap::new()),
+            health: health_state,
+            trial_runner: TrialRunnerManager::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
+            db_path: PathBuf::from("data/optimizer.db"),
+        });
+
+        let Json(rows) = get_fleet_policy_overview(
+            State(state),
+            Query(FleetPolicyOverviewQuery {
+                top_k: Some(5),
+                max_symbols: Some(10),
+            }),
+        )
+        .await;
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fleet_policy_overview_returns_symbol_rows_with_policies() {
+        let health_state = Arc::new(HealthState::new());
+        let screener = ScreenerStore::default();
+        screener.update("BTCUSDT", "binance", 100.0, 100.1, 1_000_000, 1_000_000);
+        screener.update("BTCUSDT", "gate", 100.0, 100.1, 1_001_000, 1_001_000);
+        let state = Arc::new(HttpState {
+            min_volume_usd: 1_000_000.0,
+            screener,
+            natr_cache: Arc::new(DashMap::new()),
+            health: health_state,
+            trial_runner: TrialRunnerManager::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
+            db_path: PathBuf::from("data/optimizer.db"),
+        });
+
+        let Json(rows) = get_fleet_policy_overview(
+            State(state),
+            Query(FleetPolicyOverviewQuery {
+                top_k: Some(3),
+                max_symbols: Some(10),
+            }),
+        )
+        .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "BTCUSDT");
+        assert!(rows[0].policies.len() <= 3);
     }
 
     #[tokio::test]

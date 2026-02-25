@@ -702,6 +702,79 @@ mod tests {
     }
 
     #[test]
+    fn open_db_renames_legacy_tables_to_timestamped_backups() {
+        let path = temp_db_path("legacy-backup-migration");
+        let conn = rusqlite::Connection::open(&path).expect("open raw db");
+        conn.execute_batch(
+            "CREATE TABLE configs (
+                id INTEGER PRIMARY KEY,
+                trailing_stop_bps REAL NOT NULL
+            );
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                config_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL
+            );
+            INSERT INTO configs (id, trailing_stop_bps) VALUES (1, 12.5);
+            INSERT INTO trades (config_id, symbol) VALUES (1, 'BTCUSDT');",
+        )
+        .expect("seed legacy schema");
+        drop(conn);
+
+        let migrated = open_db(&path).expect("open and migrate db");
+
+        let backup_configs_table: String = migrated
+            .query_row(
+                "SELECT name
+                 FROM sqlite_master
+                 WHERE type='table' AND name LIKE 'configs_backup_%'
+                 ORDER BY name DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backup configs table exists");
+        let backup_trades_table: String = migrated
+            .query_row(
+                "SELECT name
+                 FROM sqlite_master
+                 WHERE type='table' AND name LIKE 'trades_backup_%'
+                 ORDER BY name DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backup trades table exists");
+
+        let backup_configs_rows: i64 = migrated
+            .query_row(
+                &format!("SELECT COUNT(*) FROM \"{backup_configs_table}\""),
+                [],
+                |row| row.get(0),
+            )
+            .expect("count backup configs");
+        let backup_trades_rows: i64 = migrated
+            .query_row(
+                &format!("SELECT COUNT(*) FROM \"{backup_trades_table}\""),
+                [],
+                |row| row.get(0),
+            )
+            .expect("count backup trades");
+
+        assert_eq!(backup_configs_rows, 1);
+        assert_eq!(backup_trades_rows, 1);
+
+        let has_strategy_kind: bool = migrated
+            .prepare("SELECT 1 FROM pragma_table_info('configs') WHERE name='strategy_kind'")
+            .and_then(|mut stmt| stmt.exists([]))
+            .expect("pragma query");
+        assert!(has_strategy_kind, "new configs table must be recreated");
+
+        drop(migrated);
+        cleanup_temp_db(&path);
+    }
+
+    #[test]
     fn open_db_adds_trade_context_columns() {
         let path = temp_db_path("trade-context-columns");
         let conn = open_db(&path).expect("open db");

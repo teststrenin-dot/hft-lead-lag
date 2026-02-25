@@ -7,27 +7,9 @@
 
 use crate::domain::ExchangeResult;
 use crate::infrastructure::exchanges::common::HmacSha256;
-use reqwest::{header::HeaderMap, Client};
+use reqwest::{Client, header::HeaderMap};
 use serde::Deserialize;
 use tracing::debug;
-
-/// REST client configuration
-#[derive(Debug, Clone)]
-pub struct RestConfig {
-    pub base_url: String,
-    pub timeout_ms: u64,
-    pub max_retries: u32,
-}
-
-impl Default for RestConfig {
-    fn default() -> Self {
-        Self {
-            base_url: String::new(),
-            timeout_ms: 10000,
-            max_retries: 3,
-        }
-    }
-}
 
 /// 24h ticker data
 #[derive(Debug, Clone, Deserialize)]
