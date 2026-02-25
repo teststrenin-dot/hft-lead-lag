@@ -84,8 +84,11 @@ api/ui             <--(read-only)--------   optimizer.db
   - `full_replace` (default, если поля нет),
   - `incremental` (строгая валидация);
 - для `incremental` обязателен непустой `changed_config_ids`;
+- `changed_config_ids` должны матчиться с old fleet или с incoming new configs;
+- при `new-only` changed ids (нет в old fleet, но есть в incoming new configs) обязателен `symbols`;
 - `symbols` в `incremental` optional, но если поле передано, после нормализации список не может быть пустым;
 - invalid incremental payload не применяется частично (batch skip + `warn`).
+- если часть `changed_config_ids` неизвестна, runtime логирует `unmatched_changed_ids`.
 
 ### 3.2 Ack: `config/.trial-ack` (Rust -> Python)
 
@@ -115,8 +118,8 @@ api/ui             <--(read-only)--------   optimizer.db
    - `load_trial_batch()`,
    - `build_trial_batch_patch_plan()` (strict validation),
    - `upsert_runtime_configs()` в SQLite `configs`,
-   - `screener.set_run_id(Some(run_id))`,
-   - `screener.apply_fleet_patch(batch.configs, plan)`,
+   - `screener.try_apply_fleet_patch(batch.configs, plan)`,
+   - при успехе: `screener.set_run_id(Some(run_id))`,
    - `screener.flush_db_writer().await`,
    - `write_trial_ack(...)`.
 3. Ошибки парсинга/DB не падают процессом, а логируются (`warn!`).

@@ -78,6 +78,52 @@
         let _ = fs::remove_file(path);
     }
 
+    #[test]
+    fn build_trial_batch_patch_plan_rejects_incremental_without_changed_ids() {
+        let batch = TrialBatch {
+            run_id: "run-missing".to_string(),
+            configs: vec![TraderConfig::default()],
+            mode: Some("incremental".to_string()),
+            changed_config_ids: None,
+            symbols: None,
+        };
+        let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
+        assert!(
+            err.contains("requires changed_config_ids"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn build_trial_batch_patch_plan_rejects_incremental_with_empty_changed_ids() {
+        let batch = TrialBatch {
+            run_id: "run-empty-ids".to_string(),
+            configs: vec![TraderConfig::default()],
+            mode: Some("incremental".to_string()),
+            changed_config_ids: Some(Vec::new()),
+            symbols: None,
+        };
+        let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
+        assert!(
+            err.contains("requires non-empty changed_config_ids"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn build_trial_batch_patch_plan_rejects_incremental_with_empty_symbols_after_trim() {
+        let cfg = TraderConfig::default();
+        let batch = TrialBatch {
+            run_id: "run-empty-symbols".to_string(),
+            configs: vec![cfg],
+            mode: Some("incremental".to_string()),
+            changed_config_ids: Some(vec![cfg.config_id()]),
+            symbols: Some(vec![" ".to_string(), "".to_string()]),
+        };
+        let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
+        assert!(err.contains("symbols must contain"), "unexpected error: {err}");
+    }
+
     fn prime_symbol_fleet(screener: &ScreenerStore, symbol: &str, exchange_ts_ns: i64) {
         screener.update(
             symbol,

@@ -413,6 +413,13 @@ impl ShadowFleet {
             .any(|(config_id, _)| config_ids.contains(config_id))
     }
 
+    /// Add all fleet config IDs to the provided set.
+    pub fn collect_config_ids(&self, out: &mut HashSet<u64>) {
+        for (config_id, _) in &self.traders {
+            out.insert(*config_id);
+        }
+    }
+
     /// Tick all active traders with shared price data.
     pub fn tick_all(
         &mut self,

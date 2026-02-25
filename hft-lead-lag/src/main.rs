@@ -286,21 +286,6 @@ fn load_trial_batch(path: &Path) -> Result<TrialBatch, String> {
     Ok(batch)
 }
 
-fn normalize_symbol_scope(symbols: &[String]) -> Vec<String> {
-    let mut dedup = std::collections::HashSet::new();
-    let mut normalized = Vec::new();
-    for symbol in symbols {
-        let candidate = symbol.trim().to_uppercase();
-        if candidate.is_empty() {
-            continue;
-        }
-        if dedup.insert(candidate.clone()) {
-            normalized.push(candidate);
-        }
-    }
-    normalized
-}
-
 fn build_trial_batch_patch_plan(batch: &TrialBatch) -> Result<FleetPatchPlan, String> {
     let mode = batch.parse_mode_strict()?;
     match mode {
@@ -317,23 +302,18 @@ fn build_trial_batch_patch_plan(batch: &TrialBatch) -> Result<FleetPatchPlan, St
             if changed_config_ids.is_empty() {
                 return Err("incremental mode requires non-empty changed_config_ids".to_string());
             }
-            let symbol_scope = if let Some(symbols) = batch.symbols.as_ref() {
-                let normalized = normalize_symbol_scope(symbols);
-                if normalized.is_empty() {
-                    return Err(
-                        "incremental mode symbols must contain at least one non-empty symbol"
-                            .to_string(),
-                    );
-                }
-                Some(normalized)
-            } else {
-                None
-            };
-            Ok(FleetPatchPlan::new(
+            let plan = FleetPatchPlan::new(
                 FleetPatchMode::Incremental,
                 changed_config_ids.iter().copied(),
-                symbol_scope,
-            ))
+                batch.symbols.clone(),
+            );
+            if batch.symbols.is_some() && !plan.has_symbol_scope() {
+                return Err(
+                    "incremental mode symbols must contain at least one non-empty symbol"
+                        .to_string(),
+                );
+            }
+            Ok(plan)
         }
     }
 }
@@ -655,14 +635,21 @@ fn spawn_runtime_grid_hot_reload(
                             if let Err(e) = upsert_runtime_configs(&db_path, &batch.configs) {
                                 warn!("trial-batch: db upsert failed: {e}");
                             } else {
+                                let report =
+                                    match screener.try_apply_fleet_patch(batch.configs, patch_plan) {
+                                        Ok(report) => report,
+                                        Err(e) => {
+                                            warn!("trial-batch: patch rejected: {e}");
+                                            continue;
+                                        }
+                                    };
                                 let applied_at_ms = EventLoopState::now_ms();
-                                if let Some(previous_run_id) = screener.current_run_id() {
-                                    if previous_run_id != run_id {
-                                        if let Err(e) = close_trial_run_meta(
-                                            &db_path,
-                                            &previous_run_id,
-                                            applied_at_ms,
-                                        ) {
+                                let previous_run_id = screener.current_run_id();
+                                if let Some(previous_run_id) = previous_run_id.as_ref() {
+                                    if previous_run_id != &run_id {
+                                        if let Err(e) =
+                                            close_trial_run_meta(&db_path, previous_run_id, applied_at_ms)
+                                        {
                                             warn!(
                                                 "trial-batch: failed to close previous run_id={previous_run_id}: {e}"
                                             );
@@ -670,7 +657,6 @@ fn spawn_runtime_grid_hot_reload(
                                     }
                                 }
                                 screener.set_run_id(Some(run_id.clone()));
-                                let report = screener.apply_fleet_patch(batch.configs, patch_plan);
                                 screener.flush_db_writer().await;
                                 if let Err(e) = upsert_trial_run_meta(
                                     &db_path,
@@ -683,11 +669,33 @@ fn spawn_runtime_grid_hot_reload(
                                 }
                                 info!(
                                     "trial-batch: applied run_id={run_id} mode={} configs={config_count} \
-                                     symbols_reset={} drained_trades={}",
+                                     symbols_reset={} drained_trades={} \
+                                     changed_ids_requested={} matched_old={} matched_new={} unmatched_changed_ids={} \
+                                     scope_symbols={}/{}",
                                     mode.as_str(),
                                     report.symbols_reset,
-                                    report.drained_trades
+                                    report.drained_trades,
+                                    report.changed_ids_requested,
+                                    report.matched_changed_ids_old,
+                                    report.matched_changed_ids_new,
+                                    report.unmatched_changed_ids,
+                                    report.scope_symbols_matched,
+                                    report.scope_symbols_requested
                                 );
+                                if report.unmatched_changed_ids > 0 {
+                                    warn!(
+                                        "trial-batch: changed_config_ids include {} unknown ids (run_id={run_id})",
+                                        report.unmatched_changed_ids
+                                    );
+                                }
+                                if report.scope_symbols_requested > 0
+                                    && report.scope_symbols_matched == 0
+                                {
+                                    warn!(
+                                        "trial-batch: symbol scope matched nothing run_id={run_id} requested_scope_symbols={}",
+                                        report.scope_symbols_requested
+                                    );
+                                }
                                 write_trial_ack(
                                     trial_batch_path.parent().unwrap_or(Path::new(".")),
                                     &TrialAck {

@@ -16,6 +16,7 @@ pub mod trader_config;
 pub mod utils;
 
 use std::sync::Arc;
+use std::{collections::HashSet, fmt};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -82,6 +83,66 @@ pub struct FleetReloadReport {
     pub new_config_count: usize,
     pub symbols_reset: usize,
     pub drained_trades: usize,
+    pub changed_ids_requested: usize,
+    pub matched_changed_ids_old: usize,
+    pub matched_changed_ids_new: usize,
+    pub unmatched_changed_ids: usize,
+    pub scope_symbols_requested: usize,
+    pub scope_symbols_matched: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FleetPatchApplyError {
+    IncrementalMissingChangedConfigIds,
+    IncrementalNewConfigIdsRequireSymbolScope {
+        changed_ids_requested: usize,
+    },
+    IncrementalNoMatchedChangedConfigIds {
+        changed_ids_requested: usize,
+        scope_symbols_requested: usize,
+    },
+}
+
+impl fmt::Display for FleetPatchApplyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IncrementalMissingChangedConfigIds => {
+                write!(f, "incremental patch requires non-empty changed_config_ids")
+            }
+            Self::IncrementalNewConfigIdsRequireSymbolScope {
+                changed_ids_requested,
+            } => write!(
+                f,
+                "incremental patch with new-only changed ids requires symbol scope (requested_ids={changed_ids_requested})"
+            ),
+            Self::IncrementalNoMatchedChangedConfigIds {
+                changed_ids_requested,
+                scope_symbols_requested,
+            } => write!(
+                f,
+                "incremental patch changed_config_ids matched nothing (requested_ids={changed_ids_requested} scope_symbols_requested={scope_symbols_requested})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FleetPatchApplyError {}
+
+#[derive(Debug, Clone, Copy)]
+struct FleetPatchMatchStats {
+    changed_ids_requested: usize,
+    matched_changed_ids_old: usize,
+    matched_changed_ids_new: usize,
+    matched_changed_ids_any: usize,
+    unmatched_changed_ids: usize,
+    has_new_only_changed_ids: bool,
+    scope_symbols_requested: usize,
+}
+
+impl FleetPatchMatchStats {
+    fn has_any_match(self) -> bool {
+        self.matched_changed_ids_any > 0
+    }
 }
 
 impl ScreenerStore {
@@ -139,7 +200,7 @@ impl ScreenerStore {
     /// on the next tick. Pending completed trades are drained and forwarded
     /// to DB writer before reset.
     pub fn replace_fleet_configs(&self, new_configs: Vec<TraderConfig>) -> FleetReloadReport {
-        self.apply_fleet_patch(
+        self.try_apply_fleet_patch(
             new_configs,
             FleetPatchPlan::new(
                 FleetPatchMode::FullReplace,
@@ -147,28 +208,55 @@ impl ScreenerStore {
                 None::<Vec<String>>,
             ),
         )
+        .expect("full-replace patch must be valid")
     }
 
     /// Apply a patch plan to fleet configs, resetting only symbols selected
     /// by the planner in incremental mode.
-    pub fn apply_fleet_patch(
+    pub fn try_apply_fleet_patch(
         &self,
         new_configs: Vec<TraderConfig>,
         plan: FleetPatchPlan,
-    ) -> FleetReloadReport {
+    ) -> Result<FleetReloadReport, FleetPatchApplyError> {
         let old_config_count = self.fleet_configs.load().len();
         let new_config_count = new_configs.len();
+        let match_stats = self.collect_patch_match_stats(&plan, &new_configs);
+        if matches!(plan.mode, FleetPatchMode::Incremental) {
+            if !plan.has_changed_configs() {
+                return Err(FleetPatchApplyError::IncrementalMissingChangedConfigIds);
+            }
+            if !match_stats.has_any_match() {
+                return Err(FleetPatchApplyError::IncrementalNoMatchedChangedConfigIds {
+                    changed_ids_requested: match_stats.changed_ids_requested,
+                    scope_symbols_requested: match_stats.scope_symbols_requested,
+                });
+            }
+            if match_stats.has_new_only_changed_ids && !plan.has_symbol_scope() {
+                return Err(FleetPatchApplyError::IncrementalNewConfigIdsRequireSymbolScope {
+                    changed_ids_requested: match_stats.changed_ids_requested,
+                });
+            }
+        }
         self.fleet_configs.store(Arc::new(new_configs));
 
         let mut symbols_reset = 0usize;
         let mut drained_trades = 0usize;
+        let mut scope_symbols_matched = 0usize;
+        let allow_incremental_fallback_reset = matches!(plan.mode, FleetPatchMode::Incremental)
+            && match_stats.has_new_only_changed_ids;
         for mut entry in self.symbols.iter_mut() {
             let symbol = entry.key().clone();
             let state = entry.value_mut();
+            let symbol_in_scope = plan.symbol_in_scope(&symbol);
+            if plan.has_symbol_scope() && symbol_in_scope {
+                scope_symbols_matched += 1;
+            }
             let symbol_has_touched_configs = if matches!(plan.mode, FleetPatchMode::FullReplace) {
                 true
             } else if !plan.has_changed_configs() {
                 false
+            } else if allow_incremental_fallback_reset {
+                true
             } else {
                 state
                     .fleet
@@ -192,11 +280,76 @@ impl ScreenerStore {
             }
         }
 
-        FleetReloadReport {
+        Ok(FleetReloadReport {
             old_config_count,
             new_config_count,
             symbols_reset,
             drained_trades,
+            changed_ids_requested: match_stats.changed_ids_requested,
+            matched_changed_ids_old: match_stats.matched_changed_ids_old,
+            matched_changed_ids_new: match_stats.matched_changed_ids_new,
+            unmatched_changed_ids: match_stats.unmatched_changed_ids,
+            scope_symbols_requested: match_stats.scope_symbols_requested,
+            scope_symbols_matched,
+        })
+    }
+
+    /// Apply fleet patch or panic in internal/test call sites where error
+    /// propagation is not expected.
+    pub fn apply_fleet_patch(
+        &self,
+        new_configs: Vec<TraderConfig>,
+        plan: FleetPatchPlan,
+    ) -> FleetReloadReport {
+        self.try_apply_fleet_patch(new_configs, plan)
+            .expect("patch apply must be valid")
+    }
+
+    fn collect_patch_match_stats(
+        &self,
+        plan: &FleetPatchPlan,
+        new_configs: &[TraderConfig],
+    ) -> FleetPatchMatchStats {
+        let mut old_ids = HashSet::new();
+        for entry in self.symbols.iter() {
+            if let Some(fleet) = entry.value().fleet.as_ref() {
+                fleet.collect_config_ids(&mut old_ids);
+            }
+        }
+        let new_ids: HashSet<u64> = new_configs.iter().map(TraderConfig::config_id).collect();
+        let mut matched_changed_ids_old = 0usize;
+        let mut matched_changed_ids_new = 0usize;
+        let mut matched_changed_ids_any = 0usize;
+        let mut has_new_only_changed_ids = false;
+        for id in &plan.changed_config_ids {
+            let in_old = old_ids.contains(id);
+            let in_new = new_ids.contains(id);
+            if in_old {
+                matched_changed_ids_old += 1;
+            }
+            if in_new {
+                matched_changed_ids_new += 1;
+            }
+            if in_old || in_new {
+                matched_changed_ids_any += 1;
+            }
+            if in_new && !in_old {
+                has_new_only_changed_ids = true;
+            }
+        }
+        let unmatched_changed_ids = plan
+            .changed_config_ids
+            .len()
+            .saturating_sub(matched_changed_ids_any);
+
+        FleetPatchMatchStats {
+            changed_ids_requested: plan.changed_config_ids.len(),
+            matched_changed_ids_old,
+            matched_changed_ids_new,
+            matched_changed_ids_any,
+            unmatched_changed_ids,
+            has_new_only_changed_ids,
+            scope_symbols_requested: plan.symbol_scope_len(),
         }
     }
 
@@ -342,7 +495,10 @@ impl Default for ScreenerStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{FleetPatchMode, FleetPatchPlan, ScreenerStore, ShadowFleet, SymbolState, TraderConfig};
+    use super::{
+        FleetPatchApplyError, FleetPatchMode, FleetPatchPlan, ScreenerStore, ShadowFleet,
+        SymbolState, TraderConfig,
+    };
 
     fn config_with_gap(spike_threshold_bps: f64) -> TraderConfig {
         TraderConfig {
@@ -376,6 +532,7 @@ mod tests {
 
         assert_eq!(report.symbols_reset, 2);
         assert_eq!(report.drained_trades, 0);
+        assert_eq!(report.changed_ids_requested, 0);
         assert!(
             store
                 .symbols
@@ -412,6 +569,9 @@ mod tests {
         );
 
         assert_eq!(report.symbols_reset, 1);
+        assert_eq!(report.matched_changed_ids_old, 1);
+        assert_eq!(report.matched_changed_ids_new, 1);
+        assert_eq!(report.unmatched_changed_ids, 0);
         assert!(
             store
                 .symbols
@@ -449,8 +609,137 @@ mod tests {
 
         assert_eq!(report.symbols_reset, 1);
         assert_eq!(report.drained_trades, 0);
+        assert_eq!(report.scope_symbols_requested, 1);
+        assert_eq!(report.scope_symbols_matched, 1);
+        assert_eq!(report.unmatched_changed_ids, 0);
         let eth = store.symbols.get("ETHUSDT").expect("ETHUSDT state");
         assert!(eth.fleet.is_some());
         assert_eq!(eth.fleet.as_ref().expect("ETH fleet").len(), 1);
+    }
+
+    #[test]
+    fn incremental_matches_changed_ids_from_old_or_new_configs() {
+        let store = ScreenerStore::default();
+        let old_cfg = config_with_gap(91.0);
+        with_symbol_fleet(&store, "BTCUSDT", &[old_cfg]);
+        with_symbol_fleet(&store, "ETHUSDT", &[old_cfg]);
+
+        let new_cfg = TraderConfig {
+            spike_threshold_bps: 92.0,
+            ..old_cfg
+        };
+        let report = store
+            .try_apply_fleet_patch(
+                vec![new_cfg],
+                FleetPatchPlan::new(
+                    FleetPatchMode::Incremental,
+                    [new_cfg.config_id()],
+                    Some(vec!["BTCUSDT".to_string()]),
+                ),
+            )
+            .expect("incremental patch should apply when ids match new configs");
+
+        assert_eq!(report.matched_changed_ids_old, 0);
+        assert_eq!(report.matched_changed_ids_new, 1);
+        assert_eq!(report.unmatched_changed_ids, 0);
+        assert_eq!(report.symbols_reset, 1);
+    }
+
+    #[test]
+    fn incremental_rejects_when_changed_ids_match_nothing() {
+        let store = ScreenerStore::default();
+        let old_cfg = config_with_gap(101.0);
+        with_symbol_fleet(&store, "BTCUSDT", &[old_cfg]);
+
+        let err = store
+            .try_apply_fleet_patch(
+                vec![old_cfg],
+                FleetPatchPlan::new(FleetPatchMode::Incremental, [u64::MAX], None::<Vec<String>>),
+            )
+            .expect_err("incremental patch should reject unmatched changed ids");
+
+        assert!(matches!(
+            err,
+            FleetPatchApplyError::IncrementalNoMatchedChangedConfigIds {
+                changed_ids_requested: 1,
+                ..
+            }
+        ));
+        assert!(
+            store
+                .symbols
+                .get("BTCUSDT")
+                .expect("BTCUSDT state")
+                .fleet
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn incremental_rejects_new_only_ids_without_symbol_scope() {
+        let store = ScreenerStore::default();
+        let old_cfg = config_with_gap(131.0);
+        with_symbol_fleet(&store, "BTCUSDT", &[old_cfg]);
+        with_symbol_fleet(&store, "ETHUSDT", &[old_cfg]);
+        let new_cfg = TraderConfig {
+            spike_threshold_bps: 132.0,
+            ..old_cfg
+        };
+
+        let err = store
+            .try_apply_fleet_patch(
+                vec![new_cfg],
+                FleetPatchPlan::new(
+                    FleetPatchMode::Incremental,
+                    [new_cfg.config_id()],
+                    None::<Vec<String>>,
+                ),
+            )
+            .expect_err("new-only ids without symbol scope must fail");
+
+        assert!(matches!(
+            err,
+            FleetPatchApplyError::IncrementalNewConfigIdsRequireSymbolScope { .. }
+        ));
+    }
+
+    #[test]
+    fn incremental_with_mixed_old_and_new_ids_resets_symbol_for_new_only_id() {
+        let store = ScreenerStore::default();
+        let old_a = config_with_gap(111.0);
+        let old_b = config_with_gap(121.0);
+        with_symbol_fleet(&store, "BTCUSDT", &[old_a]);
+        with_symbol_fleet(&store, "ETHUSDT", &[old_b]);
+
+        let new_b = TraderConfig {
+            spike_threshold_bps: 122.0,
+            ..old_b
+        };
+        let report = store
+            .try_apply_fleet_patch(
+                vec![old_a, new_b],
+                FleetPatchPlan::new(
+                    FleetPatchMode::Incremental,
+                    [old_a.config_id(), new_b.config_id()],
+                    Some(vec!["ETHUSDT".to_string()]),
+                ),
+            )
+            .expect("mixed old/new incremental patch should apply");
+
+        assert_eq!(report.matched_changed_ids_old, 1);
+        assert_eq!(report.matched_changed_ids_new, 2);
+        assert_eq!(report.unmatched_changed_ids, 0);
+        assert_eq!(report.scope_symbols_requested, 1);
+        assert_eq!(report.scope_symbols_matched, 1);
+        assert_eq!(report.symbols_reset, 1);
+        assert!(
+            store
+                .symbols
+                .get("ETHUSDT")
+                .expect("ETHUSDT state")
+                .fleet
+                .is_none(),
+            "new-only changed id must reset in-scope symbol fleet"
+        );
     }
 }

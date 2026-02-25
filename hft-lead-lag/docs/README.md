@@ -60,11 +60,16 @@
 2. `incremental`:
    - обязателен `changed_config_ids: [u64, ...]`;
    - optional `symbols: [\"BTCUSDT\", ...]` ограничивает reset только этой областью.
+   - `changed_config_ids` считаются валидными, если match найден в old fleet или во входящем new batch.
+   - если есть `new-only` id (есть в new batch, но нет в old fleet), `symbols` становятся обязательными.
 
 Safety behavior:
 
 - некорректный `incremental` payload не применяется частично;
 - runtime пишет `warn` и пропускает batch целиком.
+- если `changed_config_ids` не матчится ни с old, ни с new конфигами, patch отклоняется (fail-closed).
+- `run_id` переключается только после успешного apply patch.
+- если в `changed_config_ids` есть неизвестные id, runtime пишет warning (`unmatched_changed_ids`).
 
 ---
 
