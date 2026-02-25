@@ -231,6 +231,8 @@ struct TrialBatch {
     config_id_contract_version: Option<u16>,
     #[serde(default)]
     submission_id: Option<String>,
+    #[serde(default)]
+    allow_run_id_takeover: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -950,6 +952,22 @@ async fn close_trial_run_meta_async(
         .map_err(|e| format!("trial-run close task join error: {e}"))?
 }
 
+fn validate_trial_batch_run_lease(
+    active_run_id: Option<&str>,
+    incoming_run_id: &str,
+    allow_run_id_takeover: bool,
+) -> Result<(), String> {
+    let Some(active_run_id) = active_run_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    if active_run_id == incoming_run_id || allow_run_id_takeover {
+        return Ok(());
+    }
+    Err(format!(
+        "active run_id lease held by {active_run_id}; reject run_id={incoming_run_id} (set allow_run_id_takeover=true to override)"
+    ))
+}
+
 async fn apply_trial_batch(
     screener: &ScreenerStore,
     db_path: PathBuf,
@@ -957,6 +975,15 @@ async fn apply_trial_batch(
 ) -> TrialAck {
     let run_id = batch.run_id.clone();
     let submission_id = batch.submission_id.clone();
+    let previous_run_id = screener.current_run_id();
+    if let Err(e) = validate_trial_batch_run_lease(
+        previous_run_id.as_deref(),
+        &run_id,
+        batch.allow_run_id_takeover,
+    ) {
+        warn!("trial-batch: {e}");
+        return TrialAck::error(run_id, e, submission_id);
+    }
     let config_count = batch.configs.len();
     let patch_plan = match build_trial_batch_patch_plan(&batch) {
         Ok(plan) => plan,
@@ -978,7 +1005,6 @@ async fn apply_trial_batch(
         }
     };
     let applied_at_ms = EventLoopState::now_ms();
-    let previous_run_id = screener.current_run_id();
     if let Some(previous_run_id) = previous_run_id.as_ref() {
         if previous_run_id != &run_id {
             if let Err(e) =

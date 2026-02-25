@@ -355,6 +355,7 @@ fn build_trial_batch_patch_plan_rejects_incremental_without_changed_ids() {
         symbols: None,
         config_id_contract_version: None,
         submission_id: None,
+        allow_run_id_takeover: false,
     };
     let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
     assert!(
@@ -373,6 +374,7 @@ fn build_trial_batch_patch_plan_rejects_incremental_with_empty_changed_ids() {
         symbols: None,
         config_id_contract_version: None,
         submission_id: None,
+        allow_run_id_takeover: false,
     };
     let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
     assert!(
@@ -392,6 +394,7 @@ fn build_trial_batch_patch_plan_rejects_incremental_with_empty_symbols_after_tri
         symbols: Some(vec![" ".to_string(), "".to_string()]),
         config_id_contract_version: None,
         submission_id: None,
+        allow_run_id_takeover: false,
     };
     let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
     assert!(
@@ -411,12 +414,45 @@ fn build_trial_batch_patch_plan_rejects_config_id_contract_version_mismatch() {
         symbols: None,
         config_id_contract_version: Some(999),
         submission_id: None,
+        allow_run_id_takeover: false,
     };
     let err = build_trial_batch_patch_plan(&batch).expect_err("expected validation error");
     assert!(
         err.contains("config_id contract version mismatch"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn validate_trial_batch_run_lease_allows_when_no_active_run() {
+    let result = validate_trial_batch_run_lease(None, "run-new", false);
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+}
+
+#[test]
+fn validate_trial_batch_run_lease_allows_when_active_equals_incoming() {
+    let result = validate_trial_batch_run_lease(Some("run-1"), "run-1", false);
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+}
+
+#[test]
+fn validate_trial_batch_run_lease_rejects_mismatched_run_without_takeover() {
+    let err = validate_trial_batch_run_lease(Some("run-active"), "run-next", false)
+        .expect_err("expected lease reject");
+    assert!(
+        err.contains("active run_id lease held by run-active"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.contains("allow_run_id_takeover=true"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn validate_trial_batch_run_lease_allows_mismatched_run_with_takeover() {
+    let result = validate_trial_batch_run_lease(Some("run-active"), "run-next", true);
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
 }
 
 fn prime_symbol_fleet(screener: &ScreenerStore, symbol: &str, exchange_ts_ns: i64) {
@@ -461,6 +497,7 @@ fn trial_batch_patch_plan_full_replace_resets_all_symbols() {
         symbols: None,
         config_id_contract_version: None,
         submission_id: None,
+        allow_run_id_takeover: false,
     };
     let plan = build_trial_batch_patch_plan(&batch).expect("build patch plan");
     assert!(matches!(plan.mode, FleetPatchMode::FullReplace));
@@ -494,6 +531,7 @@ fn trial_batch_patch_plan_incremental_respects_symbol_scope() {
         symbols: Some(vec!["btcusdt".to_string()]),
         config_id_contract_version: None,
         submission_id: None,
+        allow_run_id_takeover: false,
     };
     let plan = build_trial_batch_patch_plan(&batch).expect("build patch plan");
     assert!(matches!(plan.mode, FleetPatchMode::Incremental));
