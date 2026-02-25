@@ -24,6 +24,10 @@ const CHANNEL_CAPACITY: usize = 100_000;
 const OVERFLOW_CHANNEL_CAPACITY: usize = 8_192;
 /// Tertiary bounded queue used only when both primary and overflow queues are full.
 const RETRY_CHANNEL_CAPACITY: usize = 2_048;
+/// Maximum allowed dropped batches under saturation before health degrades.
+const DROPPED_BATCH_BUDGET: u64 = 0;
+/// Overflowed batch count above this threshold triggers a health warning.
+const OVERFLOW_WARN_THRESHOLD: u64 = 1_000;
 const DEFAULT_STRATEGY_KIND: &str = "baseline_gap";
 
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
@@ -536,6 +540,21 @@ impl DbWriter {
     /// Number of trade batches lost because writer queues are saturated or closed.
     pub fn dropped_batches() -> u64 {
         DROPPED_BATCHES.load(Ordering::Relaxed)
+    }
+
+    /// Number of batches that entered overflow/retry buffers due to primary saturation.
+    pub fn overflowed_batches() -> u64 {
+        OVERFLOWED_BATCHES.load(Ordering::Relaxed)
+    }
+
+    /// Allowed dropped-batch budget before health degrades.
+    pub const fn dropped_batch_budget() -> u64 {
+        DROPPED_BATCH_BUDGET
+    }
+
+    /// Overflow counter threshold after which health emits warnings.
+    pub const fn overflow_warn_threshold() -> u64 {
+        OVERFLOW_WARN_THRESHOLD
     }
 }
 

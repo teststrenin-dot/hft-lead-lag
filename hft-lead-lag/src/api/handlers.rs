@@ -1,16 +1,16 @@
 //! HTTP handler functions and response types.
 
-use axum::{extract::Query, extract::State, Json};
+use axum::{Json, extract::Query, extract::State};
 use dashmap::DashMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
 use crate::domain::screener::PolicyConfigSnapshot;
+use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
 use crate::domain::screener::{ScreenerRow, ScreenerStore};
 use crate::infrastructure::db::DbWriter;
 use crate::infrastructure::enrichment::{self, CachedNatr};
@@ -47,7 +47,27 @@ pub(crate) struct HealthResponse {
     binance_dropped_messages: u64,
     gate_dropped_messages: u64,
     db_dropped_batches: u64,
+    db_overflowed_batches: u64,
+    db_dropped_batch_budget: u64,
+    db_overflow_warn_threshold: u64,
     issues: Vec<&'static str>,
+    warnings: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DbSaturationHealth {
+    drop_budget_exhausted: bool,
+    overflow_warn: bool,
+}
+
+fn evaluate_db_saturation_health(
+    db_dropped_batches: u64,
+    db_overflowed_batches: u64,
+) -> DbSaturationHealth {
+    DbSaturationHealth {
+        drop_budget_exhausted: db_dropped_batches > DbWriter::dropped_batch_budget(),
+        overflow_warn: db_overflowed_batches >= DbWriter::overflow_warn_threshold(),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -104,8 +124,11 @@ pub(crate) async fn health(
     let binance_dropped_messages = BinanceMarketData::dropped_messages();
     let gate_dropped_messages = GateMarketData::dropped_messages();
     let db_dropped_batches = DbWriter::dropped_batches();
+    let db_overflowed_batches = DbWriter::overflowed_batches();
+    let db_saturation = evaluate_db_saturation_health(db_dropped_batches, db_overflowed_batches);
 
     let mut issues = Vec::new();
+    let mut warnings = Vec::new();
     if !binance_connected {
         issues.push("binance_disconnected");
     } else if binance_last_tick_age_ms > STALE_TICK_THRESHOLD_MS {
@@ -122,8 +145,11 @@ pub(crate) async fn health(
     if gate_dropped_messages > 0 {
         issues.push("gate_dropped_messages");
     }
-    if db_dropped_batches > 0 {
-        issues.push("db_dropped_batches");
+    if db_saturation.drop_budget_exhausted {
+        issues.push("db_drop_budget_exhausted");
+    }
+    if db_saturation.overflow_warn {
+        warnings.push("db_overflow_batches_high");
     }
 
     let healthy = issues.is_empty();
@@ -144,7 +170,11 @@ pub(crate) async fn health(
             binance_dropped_messages,
             gate_dropped_messages,
             db_dropped_batches,
+            db_overflowed_batches,
+            db_dropped_batch_budget: DbWriter::dropped_batch_budget(),
+            db_overflow_warn_threshold: DbWriter::overflow_warn_threshold(),
             issues,
+            warnings,
         }),
     )
 }
@@ -474,11 +504,7 @@ pub(crate) async fn get_fleet_ranked(
             let profit_factor = if gross_loss > 1e-9 {
                 gross_win / gross_loss
             } else {
-                if gross_win > 0.0 {
-                    99.0
-                } else {
-                    0.0
-                }
+                if gross_win > 0.0 { 99.0 } else { 0.0 }
             };
             let pf_capped = profit_factor.min(3.0);
             let composite = sharpe * (total as f64).sqrt() * pf_capped;
@@ -1228,8 +1254,8 @@ mod tests {
     use dashmap::DashMap;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1244,6 +1270,21 @@ mod tests {
         let stats = compute_fleet_stats(20, 5, 10.0);
         assert_eq!(stats.win_rate_pct, 25.0);
         assert_eq!(stats.avg_pnl_pct, 0.5);
+    }
+
+    #[test]
+    fn evaluate_db_saturation_health_marks_drop_budget_exhausted() {
+        let policy =
+            evaluate_db_saturation_health(DbWriter::dropped_batch_budget().saturating_add(1), 0);
+        assert!(policy.drop_budget_exhausted);
+        assert!(!policy.overflow_warn);
+    }
+
+    #[test]
+    fn evaluate_db_saturation_health_marks_overflow_warning_at_threshold() {
+        let policy = evaluate_db_saturation_health(0, DbWriter::overflow_warn_threshold());
+        assert!(!policy.drop_budget_exhausted);
+        assert!(policy.overflow_warn);
     }
 
     #[tokio::test]
@@ -1302,6 +1343,28 @@ mod tests {
         assert_eq!(
             resp.db_dropped_batches,
             crate::infrastructure::db::DbWriter::dropped_batches()
+        );
+        assert_eq!(
+            resp.db_overflowed_batches,
+            crate::infrastructure::db::DbWriter::overflowed_batches()
+        );
+        assert_eq!(
+            resp.db_dropped_batch_budget,
+            DbWriter::dropped_batch_budget()
+        );
+        assert_eq!(
+            resp.db_overflow_warn_threshold,
+            DbWriter::overflow_warn_threshold()
+        );
+        let expected =
+            evaluate_db_saturation_health(resp.db_dropped_batches, resp.db_overflowed_batches);
+        assert_eq!(
+            resp.issues.contains(&"db_drop_budget_exhausted"),
+            expected.drop_budget_exhausted
+        );
+        assert_eq!(
+            resp.warnings.contains(&"db_overflow_batches_high"),
+            expected.overflow_warn
         );
     }
 
