@@ -521,8 +521,22 @@ impl ShadowFleet {
 
     /// Return top-K configs by policy score among gate-enabled configs.
     pub fn top_policy_configs(&self, k: usize) -> Vec<PolicyConfigSnapshot> {
-        let mut rows = self.policy_snapshots();
-        rows.retain(|r| r.gate_enabled);
+        let mut rows: Vec<PolicyConfigSnapshot> = self
+            .traders
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, (config_id, _))| {
+                if self.disabled[idx] {
+                    return None;
+                }
+                let snapshot = self.policy[idx].snapshot(*config_id);
+                if snapshot.gate_enabled {
+                    Some(snapshot)
+                } else {
+                    None
+                }
+            })
+            .collect();
         rows.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -727,5 +741,36 @@ mod tests {
         let top = fleet.top_policy_configs(5);
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].config_id, cfg_a.config_id());
+    }
+
+    #[test]
+    fn top_policy_configs_excludes_disabled_configs() {
+        let cfg_a = TraderConfig {
+            spike_threshold_bps: 40.0,
+            ..TraderConfig::default()
+        };
+        let cfg_b = TraderConfig {
+            spike_threshold_bps: 80.0,
+            ..TraderConfig::default()
+        };
+        let mut fleet = ShadowFleet::new(&[cfg_a, cfg_b]);
+        let now_ms = crate::domain::screener::utils::now_ms();
+        for state in &mut fleet.policy {
+            state.window_6h.last_ts_ms = Some(now_ms);
+            state.window_6h.trades = 10.0;
+            state.window_6h.wins = 7.0;
+            state.window_6h.stop_loss_trades = 2.0;
+            state.window_6h.pnl_sum_pct = 1.0;
+        }
+
+        let disabled_id = fleet.traders[0].0;
+        fleet.disabled[0] = true;
+        fleet.active_count = fleet.active_count.saturating_sub(1);
+
+        let top = fleet.top_policy_configs(2);
+        assert!(
+            top.iter().all(|snapshot| snapshot.config_id != disabled_id),
+            "disabled configs must not be returned by top_policy_configs"
+        );
     }
 }
