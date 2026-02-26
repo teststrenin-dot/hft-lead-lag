@@ -11,6 +11,8 @@ pub(super) fn try_apply_fleet_patch(
     new_configs: Vec<TraderConfig>,
     plan: FleetPatchPlan,
 ) -> Result<FleetReloadReport, FleetPatchApplyError> {
+    validate_new_configs(&new_configs)?;
+
     let old_config_count = store.fleet_configs.load().len();
     let new_config_count = new_configs.len();
     let match_stats = collect_patch_match_stats(store, &plan, &new_configs);
@@ -82,6 +84,24 @@ pub(super) fn try_apply_fleet_patch(
         scope_symbols_requested: match_stats.scope_symbols_requested,
         scope_symbols_matched,
     })
+}
+
+fn validate_new_configs(new_configs: &[TraderConfig]) -> Result<(), FleetPatchApplyError> {
+    let mut ids = HashSet::with_capacity(new_configs.len());
+    for (index, cfg) in new_configs.iter().enumerate() {
+        if let Err(err) = cfg.validate() {
+            return Err(FleetPatchApplyError::InvalidConfig {
+                index,
+                field: err.field,
+                reason: err.reason,
+            });
+        }
+        let config_id = cfg.config_id();
+        if !ids.insert(config_id) {
+            return Err(FleetPatchApplyError::DuplicateConfigId { config_id });
+        }
+    }
+    Ok(())
 }
 
 fn collect_patch_match_stats(

@@ -46,7 +46,9 @@ use crate::infrastructure::db::{
 
 pub use self::shadow_fleet::PolicyConfigSnapshot;
 pub use self::shadow_trader::{ChartTrade, ShadowStats};
-pub use self::trader_config::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
+pub use self::trader_config::{
+    TraderConfig, TraderConfigValidationError, CONFIG_ID_CONTRACT_VERSION,
+};
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -174,6 +176,14 @@ pub enum FleetPatchApplyError {
         changed_ids_requested: usize,
         scope_symbols_requested: usize,
     },
+    InvalidConfig {
+        index: usize,
+        field: &'static str,
+        reason: &'static str,
+    },
+    DuplicateConfigId {
+        config_id: u64,
+    },
 }
 
 impl fmt::Display for FleetPatchApplyError {
@@ -195,6 +205,17 @@ impl fmt::Display for FleetPatchApplyError {
                 f,
                 "incremental patch changed_config_ids matched nothing (requested_ids={changed_ids_requested} scope_symbols_requested={scope_symbols_requested})"
             ),
+            Self::InvalidConfig {
+                index,
+                field,
+                reason,
+            } => write!(
+                f,
+                "invalid trader config at index {index}: field '{field}' {reason}"
+            ),
+            Self::DuplicateConfigId { config_id } => {
+                write!(f, "duplicate trader config_id in batch: {config_id}")
+            }
         }
     }
 }

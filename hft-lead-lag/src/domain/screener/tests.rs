@@ -512,6 +512,53 @@ fn incremental_with_mixed_old_and_new_ids_resets_symbol_for_new_only_id() {
 }
 
 #[test]
+fn fleet_patch_rejects_invalid_trader_config() {
+    let store = ScreenerStore::default();
+    let invalid = TraderConfig {
+        stop_loss_bps: 0.0,
+        ..TraderConfig::default()
+    };
+    let err = store
+        .try_apply_fleet_patch(
+            vec![invalid],
+            FleetPatchPlan::new(
+                FleetPatchMode::FullReplace,
+                Vec::<u64>::new(),
+                None::<Vec<String>>,
+            ),
+        )
+        .expect_err("invalid config must be rejected");
+    assert!(matches!(
+        err,
+        FleetPatchApplyError::InvalidConfig {
+            index: 0,
+            field: "stop_loss_bps",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn fleet_patch_rejects_duplicate_config_ids() {
+    let store = ScreenerStore::default();
+    let cfg = TraderConfig::default();
+    let err = store
+        .try_apply_fleet_patch(
+            vec![cfg, cfg],
+            FleetPatchPlan::new(
+                FleetPatchMode::FullReplace,
+                Vec::<u64>::new(),
+                None::<Vec<String>>,
+            ),
+        )
+        .expect_err("duplicate configs must be rejected");
+    assert!(matches!(
+        err,
+        FleetPatchApplyError::DuplicateConfigId { .. }
+    ));
+}
+
+#[test]
 fn portfolio_candidate_age_uses_first_tick_timestamp() {
     let store = ScreenerStore::default();
     let ts_ns = 1_700_000_000_000_000_000_i64;

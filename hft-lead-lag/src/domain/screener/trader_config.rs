@@ -38,6 +38,12 @@ pub struct TraderConfig {
     pub min_baseline_samples: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraderConfigValidationError {
+    pub field: &'static str,
+    pub reason: &'static str,
+}
+
 impl Default for TraderConfig {
     /// Defaults aligned with grid medians so bare `Default::default()`
     /// produces a representative mid-grid configuration.
@@ -61,6 +67,91 @@ impl Default for TraderConfig {
 }
 
 impl TraderConfig {
+    pub fn validate(&self) -> Result<(), TraderConfigValidationError> {
+        if !self.spike_threshold_bps.is_finite() || self.spike_threshold_bps <= 0.0 {
+            return Err(TraderConfigValidationError {
+                field: "spike_threshold_bps",
+                reason: "must be finite and > 0",
+            });
+        }
+        if !self.target_ratio.is_finite() || self.target_ratio <= 0.0 || self.target_ratio > 1.0 {
+            return Err(TraderConfigValidationError {
+                field: "target_ratio",
+                reason: "must be finite and in (0, 1]",
+            });
+        }
+        if !self.stop_loss_bps.is_finite() || self.stop_loss_bps <= 0.0 {
+            return Err(TraderConfigValidationError {
+                field: "stop_loss_bps",
+                reason: "must be finite and > 0",
+            });
+        }
+        if self.max_hold_ms <= 0 {
+            return Err(TraderConfigValidationError {
+                field: "max_hold_ms",
+                reason: "must be > 0",
+            });
+        }
+        if !self.max_spread_bps.is_finite() || self.max_spread_bps < 0.0 {
+            return Err(TraderConfigValidationError {
+                field: "max_spread_bps",
+                reason: "must be finite and >= 0",
+            });
+        }
+        if !self.trailing_decay_ratio.is_finite()
+            || self.trailing_decay_ratio <= 0.0
+            || self.trailing_decay_ratio > 1.0
+        {
+            return Err(TraderConfigValidationError {
+                field: "trailing_decay_ratio",
+                reason: "must be finite and in (0, 1]",
+            });
+        }
+        if self.baseline_window_ms <= 0 {
+            return Err(TraderConfigValidationError {
+                field: "baseline_window_ms",
+                reason: "must be > 0",
+            });
+        }
+        if self.fill_delay_ms < 0 {
+            return Err(TraderConfigValidationError {
+                field: "fill_delay_ms",
+                reason: "must be >= 0",
+            });
+        }
+        if self.cooldown_ms < 0 {
+            return Err(TraderConfigValidationError {
+                field: "cooldown_ms",
+                reason: "must be >= 0",
+            });
+        }
+        if self.warmup_ms < 0 {
+            return Err(TraderConfigValidationError {
+                field: "warmup_ms",
+                reason: "must be >= 0",
+            });
+        }
+        if self.quote_freshness_ms <= 0 {
+            return Err(TraderConfigValidationError {
+                field: "quote_freshness_ms",
+                reason: "must be > 0",
+            });
+        }
+        if !self.taker_fee.is_finite() || self.taker_fee < 0.0 || self.taker_fee >= 1.0 {
+            return Err(TraderConfigValidationError {
+                field: "taker_fee",
+                reason: "must be finite and in [0, 1)",
+            });
+        }
+        if self.min_baseline_samples == 0 {
+            return Err(TraderConfigValidationError {
+                field: "min_baseline_samples",
+                reason: "must be > 0",
+            });
+        }
+        Ok(())
+    }
+
     /// Unique ID for this parameter set (deterministic hash).
     pub fn config_id(&self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
@@ -112,5 +203,21 @@ mod tests {
     fn config_id_differs_from_legacy_unversioned_hash() {
         let cfg = TraderConfig::default();
         assert_ne!(cfg.config_id(), legacy_config_id(&cfg));
+    }
+
+    #[test]
+    fn default_config_is_valid() {
+        let cfg = TraderConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_stop_loss() {
+        let cfg = TraderConfig {
+            stop_loss_bps: 0.0,
+            ..TraderConfig::default()
+        };
+        let err = cfg.validate().expect_err("config should be invalid");
+        assert_eq!(err.field, "stop_loss_bps");
     }
 }
