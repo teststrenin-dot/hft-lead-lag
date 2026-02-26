@@ -68,8 +68,8 @@ use trial_batch_protocol::{
     build_trial_batch_patch_plan, load_trial_batch, load_trial_control, TrialAck, TrialBatch,
 };
 use trial_queue_io::{
-    archive_trial_batch_queue_file, build_trial_batch_error_ack, list_trial_batch_queue_files,
-    write_trial_ack,
+    archive_trial_batch_queue_file, build_trial_batch_error_ack,
+    count_trial_batch_quarantine_markers, list_trial_batch_queue_files, write_trial_ack,
 };
 #[cfg(test)]
 use trial_queue_io::{trial_batch_archive_dir, trial_batch_queue_dir};

@@ -82,7 +82,6 @@ pub struct BinanceMarketData {
     msg_rx: Option<mpsc::Receiver<StampedBytes>>,
     symbol_cache: SymbolCache,
     next_subscription_id: SubscriptionId,
-    api_key: Option<String>,
 }
 
 impl BinanceMarketData {
@@ -93,7 +92,6 @@ impl BinanceMarketData {
             msg_rx: None,
             symbol_cache: SymbolCache::new(),
             next_subscription_id: 1,
-            api_key: None,
         }
     }
 
@@ -118,9 +116,7 @@ impl BinanceMarketData {
         latest.into_values().collect()
     }
 
-    pub fn set_credentials(&mut self, api_key: String, _api_secret: String) {
-        self.api_key = Some(api_key);
-    }
+    pub fn set_credentials(&mut self, _api_key: String, _api_secret: String) {}
 
     fn build_book_ticker_subscription(symbols: &[&str]) -> String {
         let streams: Vec<String> = symbols

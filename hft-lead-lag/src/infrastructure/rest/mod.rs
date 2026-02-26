@@ -155,9 +155,7 @@ impl GateRestClient {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self {
-            client,
-        }
+        Self { client }
     }
 
     /// Get 24h tickers for all contracts

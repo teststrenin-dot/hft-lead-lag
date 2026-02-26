@@ -234,7 +234,10 @@ fn update_rejects_exchange_timestamp_regression_per_side() {
         ts_ns - 1_000_000,
     );
 
-    let after = store.symbols.get("BTCUSDT").expect("state must still exist");
+    let after = store
+        .symbols
+        .get("BTCUSDT")
+        .expect("state must still exist");
     let after_binance = after.binance.as_ref().expect("binance quote");
     assert_eq!(
         after_binance.ts_ms, before_binance.ts_ms,

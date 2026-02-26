@@ -72,6 +72,7 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
     let binance_connected = state.health.binance_connected.load(Ordering::Relaxed);
     let gate_connected = state.health.gate_connected.load(Ordering::Relaxed);
     let trial_queue_depth = state.health.trial_queue_depth.load(Ordering::Relaxed);
+    let trial_queue_quarantined = state.health.trial_queue_quarantined.load(Ordering::Relaxed);
     let trial_last_ack_ms = state.health.trial_last_ack_ms.load(Ordering::Relaxed);
     let trial_last_ack_error = state.health.trial_last_ack_error.load(Ordering::Relaxed);
     let trial_last_ack_age_ms = if trial_last_ack_ms > 0 {
@@ -123,6 +124,9 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
     if trial_queue_depth >= TRIAL_QUEUE_DEPTH_WARN_THRESHOLD {
         warnings.push("trial_queue_depth_high");
     }
+    if trial_queue_quarantined > 0 {
+        warnings.push("trial_queue_quarantined_present");
+    }
     if trial_last_ack_error {
         warnings.push("trial_last_ack_error");
     }
@@ -152,6 +156,7 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
             binance_last_tick_age_ms,
             gate_last_tick_age_ms,
             trial_queue_depth,
+            trial_queue_quarantined,
             trial_last_ack_age_ms,
             trial_last_ack_status,
             trial_active_run_id,

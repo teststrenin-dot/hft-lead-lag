@@ -29,9 +29,13 @@ fn record_trial_ack_health(health_state: &HealthState, ack: &TrialAck) {
 
 fn update_trial_queue_depth_health(health_state: &HealthState, config_dir: &Path) {
     let depth = list_trial_batch_queue_files(config_dir).len() as u64;
+    let quarantined = count_trial_batch_quarantine_markers(config_dir);
     health_state
         .trial_queue_depth
         .store(depth, Ordering::Relaxed);
+    health_state
+        .trial_queue_quarantined
+        .store(quarantined, Ordering::Relaxed);
 }
 
 async fn maybe_handle_trial_control(

@@ -42,6 +42,7 @@ pub struct HealthState {
     pub trial_last_ack_ms: AtomicI64,
     pub trial_last_ack_error: AtomicBool,
     pub trial_queue_depth: AtomicU64,
+    pub trial_queue_quarantined: AtomicU64,
 }
 
 impl HealthState {
@@ -54,6 +55,7 @@ impl HealthState {
             trial_last_ack_ms: AtomicI64::new(0),
             trial_last_ack_error: AtomicBool::new(false),
             trial_queue_depth: AtomicU64::new(0),
+            trial_queue_quarantined: AtomicU64::new(0),
         }
     }
 }

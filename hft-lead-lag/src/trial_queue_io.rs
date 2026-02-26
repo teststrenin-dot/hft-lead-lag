@@ -209,6 +209,23 @@ pub(super) fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+pub(super) fn count_trial_batch_quarantine_markers(config_dir: &Path) -> u64 {
+    let queue_dir = trial_batch_queue_dir(config_dir);
+    let entries = match std::fs::read_dir(queue_dir) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".archive-quarantine"))
+        })
+        .count() as u64
+}
+
 fn prune_trial_batch_archive_dir(archive_dir: &Path, max_files: usize) {
     let entries = match std::fs::read_dir(archive_dir) {
         Ok(entries) => entries,

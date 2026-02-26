@@ -64,6 +64,7 @@ pub(crate) struct HealthResponse {
     binance_last_tick_age_ms: i64,
     gate_last_tick_age_ms: i64,
     trial_queue_depth: u64,
+    trial_queue_quarantined: u64,
     trial_last_ack_age_ms: Option<i64>,
     trial_last_ack_status: &'static str,
     trial_active_run_id: Option<String>,

@@ -107,8 +107,13 @@ pub(super) fn build_trial_axes_breakdown(
                     format!("query: {error}"),
                 )
             })?
-            .filter_map(|row| row.ok())
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("row decode: {error}"),
+                )
+            })?
     } else {
         stmt.query_map([], map_row)
             .map_err(|error| {
@@ -117,8 +122,13 @@ pub(super) fn build_trial_axes_breakdown(
                     format!("query: {error}"),
                 )
             })?
-            .filter_map(|row| row.ok())
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("row decode: {error}"),
+                )
+            })?
     };
 
     Ok(TrialAxesBreakdown {
@@ -131,4 +141,60 @@ pub(super) fn build_trial_axes_breakdown(
         trailing_decay_ratio: aggregate_axis(&rows, 5, BUCKET[5]),
         baseline_window_ms: aggregate_axis(&rows, 6, BUCKET[6]),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_trial_axes_breakdown;
+
+    #[test]
+    fn trial_axes_returns_row_decode_error_for_invalid_numeric_row() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "
+            CREATE TABLE configs (
+                id INTEGER PRIMARY KEY,
+                spike_threshold_bps REAL NOT NULL,
+                target_ratio REAL NOT NULL,
+                stop_loss_bps REAL NOT NULL,
+                max_hold_ms INTEGER NOT NULL,
+                max_spread_bps REAL NOT NULL,
+                trailing_decay_ratio REAL NOT NULL,
+                baseline_window_ms INTEGER NOT NULL
+            );
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY,
+                config_id INTEGER NOT NULL,
+                run_id TEXT,
+                pnl_pct REAL
+            );
+            ",
+        )
+        .expect("create schema");
+        conn.execute(
+            "INSERT INTO configs (
+                id, spike_threshold_bps, target_ratio, stop_loss_bps,
+                max_hold_ms, max_spread_bps, trailing_decay_ratio, baseline_window_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                1_i64,
+                "bad-number",
+                0.8_f64,
+                10.0_f64,
+                5_000_i64,
+                2.0_f64,
+                0.5_f64,
+                30_000_i64
+            ],
+        )
+        .expect("insert malformed row");
+
+        let error = build_trial_axes_breakdown(&conn, None).expect_err("row decode must fail");
+        assert_eq!(error.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            error.1.contains("row decode:"),
+            "unexpected error payload: {}",
+            error.1
+        );
+    }
 }

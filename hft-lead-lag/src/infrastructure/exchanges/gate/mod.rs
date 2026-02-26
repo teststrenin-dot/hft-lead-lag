@@ -89,8 +89,6 @@ pub struct GateMarketData {
     /// API credentials
     api_key: Option<String>,
     api_secret: Option<String>,
-    /// Authentication status
-    is_authenticated: bool,
 }
 
 impl GateMarketData {
@@ -102,7 +100,6 @@ impl GateMarketData {
             next_subscription_id: 1,
             api_key: None,
             api_secret: None,
-            is_authenticated: false,
         }
     }
 
@@ -289,8 +286,6 @@ impl MarketDataStream for GateMarketData {
             None
         };
 
-        let is_auth = self.api_key.is_some() && self.api_secret.is_some();
-
         // Record subscriptions for reconnect replay
         let subs: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -420,7 +415,6 @@ impl MarketDataStream for GateMarketData {
 
         self.ws_tx = Some(ws_tx);
         self.msg_rx = Some(msg_rx);
-        self.is_authenticated = is_auth;
 
         info!(
             "Connected to Gate.io Futures WebSocket (msg_channel_capacity={})",

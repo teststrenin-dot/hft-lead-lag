@@ -145,6 +145,7 @@ async fn health_reports_drop_counters() {
         expected.overflow_warn
     );
     assert_eq!(resp.trial_queue_depth, 0);
+    assert_eq!(resp.trial_queue_quarantined, 0);
     assert_eq!(resp.trial_last_ack_status, "unknown");
     assert_eq!(resp.trial_active_run_id, None);
 }
@@ -170,6 +171,9 @@ async fn health_reports_trial_lifecycle_telemetry() {
         .trial_last_ack_error
         .store(true, Ordering::Relaxed);
     health_state.trial_queue_depth.store(12, Ordering::Relaxed);
+    health_state
+        .trial_queue_quarantined
+        .store(3, Ordering::Relaxed);
 
     let screener = ScreenerStore::default();
     screener.set_run_id(Some("run-health-telemetry".to_string()));
@@ -189,6 +193,7 @@ async fn health_reports_trial_lifecycle_telemetry() {
 
     let (_code, Json(resp)) = health(State(state)).await;
     assert_eq!(resp.trial_queue_depth, 12);
+    assert_eq!(resp.trial_queue_quarantined, 3);
     assert_eq!(resp.trial_last_ack_status, "error");
     assert_eq!(
         resp.trial_active_run_id.as_deref(),
@@ -196,6 +201,7 @@ async fn health_reports_trial_lifecycle_telemetry() {
     );
     assert!(resp.warnings.contains(&"trial_last_ack_error"));
     assert!(resp.warnings.contains(&"trial_queue_depth_high"));
+    assert!(resp.warnings.contains(&"trial_queue_quarantined_present"));
 }
 
 #[tokio::test]
