@@ -6,8 +6,7 @@
 //! - Order placement (fallback)
 
 use crate::domain::ExchangeResult;
-use crate::infrastructure::exchanges::common::HmacSha256;
-use reqwest::{header::HeaderMap, Client};
+use reqwest::Client;
 use serde::Deserialize;
 use tracing::debug;
 
@@ -147,8 +146,6 @@ impl Default for BinanceRestClient {
 #[derive(Clone)]
 pub struct GateRestClient {
     client: Client,
-    api_key: Option<String>,
-    api_secret: Option<String>,
 }
 
 impl GateRestClient {
@@ -160,14 +157,7 @@ impl GateRestClient {
 
         Self {
             client,
-            api_key: None,
-            api_secret: None,
         }
-    }
-
-    pub fn set_credentials(&mut self, api_key: String, api_secret: String) {
-        self.api_key = Some(api_key);
-        self.api_secret = Some(api_secret);
     }
 
     /// Get 24h tickers for all contracts
@@ -175,35 +165,9 @@ impl GateRestClient {
         let url = "https://api.gateio.ws/api/v4/futures/usdt/tickers";
         debug!("GET {}", url);
 
-        let mut headers = HeaderMap::new();
-
-        // Add auth headers if credentials available
-        if let (Some(key), Some(secret)) = (&self.api_key, &self.api_secret) {
-            use sha2::{Digest, Sha512};
-            use std::time::{SystemTime, UNIX_EPOCH};
-
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                .to_string();
-
-            let body_hash = hex::encode(Sha512::digest("".as_bytes()));
-            let sign_payload = format!(
-                "GET\n/api/v4/futures/usdt/tickers\n\n{}\n{}",
-                body_hash, timestamp
-            );
-            let signature = HmacSha256::sign_static(secret.as_bytes(), sign_payload.as_bytes());
-
-            headers.insert("KEY", key.parse().unwrap());
-            headers.insert("SIGN", signature.parse().unwrap());
-            headers.insert("Timestamp", timestamp.parse().unwrap());
-        }
-
         let response = self
             .client
             .get(url)
-            .headers(headers)
             .send()
             .await
             .map_err(|e| crate::domain::ExchangeError::Internal(e.to_string()))?;
