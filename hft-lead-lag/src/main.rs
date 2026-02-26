@@ -79,7 +79,11 @@ const MIN_VOLUME_USD: f64 = 2_500_000.0; // 2.5 million USD
 const SUBSCRIBE_DELAY_MS: u64 = 15;
 const RUNTIME_GRID_CONFIG_PATH: &str = "config/runtime-grid.toml";
 /// Symbols excluded from strategy — consistently unprofitable or structurally unsuitable.
-const STRATEGY_BLACKLIST: &[&str] = &["BTCUSDT", "ETHUSDT", "SOLUSDT", "DYDXUSDT"];
+const STRATEGY_BLACKLIST: &[&str] = &[
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "DYDXUSDT", "XRPUSDT", "XAGUSDT", "DOGEUSDT", "ADAUSDT",
+    "AVAXUSDT", "DOTUSDT", "XAUUSDT", "SUIUSDT", "LINKUSDT", "LTCUSDT", "BNBUSDT", "ATOMUSDT",
+    "AAVEUSDT",
+];
 const SIGNAL_CHECK_BUDGET_PER_TICK: usize = 256;
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;

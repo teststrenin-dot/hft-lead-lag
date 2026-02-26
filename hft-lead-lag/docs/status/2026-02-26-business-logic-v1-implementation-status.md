@@ -12,7 +12,7 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 ## 1) Objective
 | Item | Status | Evidence | Notes |
 |---|---|---|---|
-| Shadow fleet -> candidate gates -> portfolio transfer | `Partial` | `src/domain/screener/quote_ingest.rs:90`, `src/domain/screener/mod.rs:376` | Пайплайн есть, но есть restart gap по накопленной истории кандидатов. |
+| Shadow fleet -> candidate gates -> portfolio transfer | `Implemented` | `src/domain/screener/quote_ingest.rs:93`, `src/domain/screener/mod.rs:331`, `src/runtime_setup.rs:181` | Пайплайн и восстановление candidate-history после рестарта в runtime реализованы. |
 
 ## 2) Operating Model
 | Item | Status | Evidence | Notes |
@@ -43,7 +43,7 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 | Age > 5 min | `Implemented` | `src/application/services/portfolio_runtime.rs:55`, `src/domain/screener/mod.rs:418` | Возраст от `first_tick_ms`. |
 | Closed trades > 5 | `Implemented` | `src/application/services/portfolio_runtime.rs:56` | В `eligible`. |
 | Метрики по всему флоту | `Implemented` | `src/domain/screener/mod.rs:408` | Глобальная агрегация по всем символам в accumulators. |
-| Полная история (без rolling window) | `Partial` | `src/domain/screener/mod.rs:127`, `src/runtime_setup.rs:181` | Полная история в рамках uptime, но не восстанавливается в `trade_accumulators` после рестарта. |
+| Полная история (без rolling window) | `Implemented` | `src/infrastructure/db.rs:648`, `src/domain/screener/mod.rs:330`, `src/runtime_setup.rs:181` | История агрегируется из `trades` и восстанавливается в `trade_accumulators` после рестарта. |
 | avg pnl >= 0 | `Implemented` | `src/application/services/portfolio_runtime.rs:58` | В `eligible`. |
 | shortlist top-5 per portfolio | `Implemented` | `src/application/services/portfolio_runtime.rs:4`, `src/application/services/portfolio_runtime.rs:255` | `SHORTLIST_SIZE=5`. |
 | Нет overlap между активными символами портфелей | `Implemented` | `src/application/services/portfolio_runtime.rs:94` | Ownership map + split active sets. |
@@ -80,9 +80,18 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 | Dynamic hyperparameters policy | `Out of Scope (v1)` | `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md` | Намеренно отложено на v2. |
 
 ## Current Open Gaps (Priority)
-1. `P1`: restart durability for candidate history (`trade_accumulators` restore path отсутствует).
-2. `P1`: flush/snapshot ordering & durability semantics for portfolio snapshot writes.
-3. `P2`: rebalance invocation model (event-driven hot path vs dedicated 2-minute loop).
+1. `P2`: rebalance invocation model (event-driven hot path vs dedicated 2-minute loop).
+2. `P2`: явная runtime-связка `1 portfolio = 1 bot process` пока не реализована.
+3. `P2`: портфельная гонка пока аналитическая (нет money-rebalance/auto-promote winner path).
+4. `P3`: dynamic hyperparameters policy для нормализации к режиму рынка отложена (v2).
+
+## Что Нужно Сделать Для 100% Бизнес-Логики
+1. Вынести ребаланс в отдельный scheduler (`2m cadence`), чтобы он не зависел от плотности тиков и не деградировал при просадке потока.
+2. Реализовать явный runtime слой `portfolio -> bot` (изолированный execution loop, health, restart policy по каждому портфелю).
+3. Доделать переход «гонка -> действие»: winner selection и автоматический маршрут в execution mode (сейчас это только read-model/аналитика).
+4. Добавить money-rebalance policy (allocation, лимиты риска, handoff между портфелями), сейчас это `Planned`.
+5. Включить dynamic hyperparameters (adaptive thresholds/guards от распределений, а не от абсолютов), чтобы система была устойчива к regime shift.
+6. Закрыть это e2e-проверкой в runbook: restart, cooldown-resets, winner-promotion, и replay на исторических данных с KPI-acceptance.
 
 ## Tracking Update Rule
 - Обновлять этот файл после каждого раунда ревью и после каждого фикса `P0/P1`.
