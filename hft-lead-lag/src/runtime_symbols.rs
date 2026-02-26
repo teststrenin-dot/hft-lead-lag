@@ -73,7 +73,9 @@ pub(super) fn reconcile_volume_symbols(
     (binance_symbols, gate_symbols, outcome)
 }
 
-pub(super) fn select_runtime_symbols(common_symbols: &[String]) -> (Vec<String>, Vec<String>, bool) {
+pub(super) fn select_runtime_symbols(
+    common_symbols: &[String],
+) -> (Vec<String>, Vec<String>, bool) {
     if common_symbols.is_empty() {
         let fallback = fallback_symbols();
         (fallback.clone(), fallback, true)

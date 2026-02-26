@@ -239,13 +239,15 @@ mod tests {
     #[test]
     fn cached_only_enrichment_deduplicates_fetch_symbols() {
         let cache = Arc::new(DashMap::new());
-        let mut rows = vec![row("BTCUSDT"), row("BTCUSDT"), row("ETHUSDT"), row("ETHUSDT")];
+        let mut rows = vec![
+            row("BTCUSDT"),
+            row("BTCUSDT"),
+            row("ETHUSDT"),
+            row("ETHUSDT"),
+        ];
 
         let to_fetch = enrich_gate_natr_30m_cached_only(&mut rows, &cache);
 
-        assert_eq!(
-            to_fetch,
-            vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
-        );
+        assert_eq!(to_fetch, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     }
 }

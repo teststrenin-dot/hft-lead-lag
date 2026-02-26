@@ -396,12 +396,7 @@ async fn portfolio_guards_endpoint_reports_cooldown_state() {
     let screener = ScreenerStore::default();
     let base_ts = crate::domain::screener::utils::now_ms();
     for i in 0..5 {
-        screener.portfolio_observe_closed_trade_v1(
-            "ETHUSDT",
-            -0.05,
-            true,
-            base_ts + i * 1_000,
-        );
+        screener.portfolio_observe_closed_trade_v1("ETHUSDT", -0.05, true, base_ts + i * 1_000);
     }
 
     let state = Arc::new(HttpState {

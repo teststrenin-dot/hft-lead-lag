@@ -114,7 +114,11 @@ pub(super) fn build_trial_runner_command(
             }
             args.push("expand".to_string());
             args.push("--duration".to_string());
-            args.push(req.duration.unwrap_or(DEFAULT_EXPAND_DURATION_S).to_string());
+            args.push(
+                req.duration
+                    .unwrap_or(DEFAULT_EXPAND_DURATION_S)
+                    .to_string(),
+            );
             args.push("--cycles".to_string());
             args.push(cycles.to_string());
         }
@@ -157,7 +161,10 @@ pub(super) fn build_trial_runner_command(
                     .to_string(),
             );
             args.push("--min-pnl".to_string());
-            args.push(format!("{}", req.min_pnl.unwrap_or(DEFAULT_PROMOTE_MIN_PNL)));
+            args.push(format!(
+                "{}",
+                req.min_pnl.unwrap_or(DEFAULT_PROMOTE_MIN_PNL)
+            ));
         }
         _ => return Err(format!("Unsupported phase: {phase}")),
     }

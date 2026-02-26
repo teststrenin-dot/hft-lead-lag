@@ -1,13 +1,13 @@
 //! WebSocket server for streaming market data to clients
 
 use axum::{
-    Router,
     extract::{
-        State,
         ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
     },
     response::IntoResponse,
     routing::get,
+    Router,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -92,7 +92,10 @@ impl MarketDataServer {
     }
 
     /// Start serving on a pre-bound listener (fail-fast: bind in main, serve in task)
-    pub async fn serve(&self, listener: tokio::net::TcpListener) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn serve(
+        &self,
+        listener: tokio::net::TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let app = Router::new()
             .route("/ws", get(ws_upgrade))
             .with_state(self.tx.clone());

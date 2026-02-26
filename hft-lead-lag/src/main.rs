@@ -3,9 +3,7 @@
 //! This binary demonstrates the usage of the HFT lead-lag system
 //! with volume-filtered symbols.
 
-use hft_lead_lag::api::{
-    HealthState, MarketDataEvent, ScreenerStore,
-};
+use hft_lead_lag::api::{HealthState, MarketDataEvent, ScreenerStore};
 use hft_lead_lag::domain::screener::fleet_patch::{FleetPatchMode, FleetPatchPlan};
 use hft_lead_lag::domain::screener::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
 use hft_lead_lag::infrastructure::logging::init_centralized_logging;
@@ -17,57 +15,62 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-mod runtime_hot_reload;
-mod runtime_grid;
-mod runtime_symbols;
-mod runtime_setup;
-mod file_fingerprint;
-mod trial_batch_protocol;
-mod trial_batch_apply;
-mod trial_queue_io;
-mod event_loop_ingest;
 mod event_loop_core;
+mod event_loop_ingest;
 mod event_loop_runtime;
-use file_fingerprint::{
-    FileFingerprint, file_fingerprint_changed, hash_content_deterministic, read_file_fingerprint,
-};
-use event_loop_ingest::{
-    BatchIngestContext, process_exchange_batch, strategy_ticks_in_order,
-    updated_symbols_from_batch,
-};
+mod file_fingerprint;
+mod runtime_grid;
+mod runtime_hot_reload;
+mod runtime_setup;
+mod runtime_symbols;
+mod trial_batch_apply;
+mod trial_batch_protocol;
+mod trial_queue_io;
 use event_loop_core::{
-    EventLoopMetrics, EventLoopState, ExchangeSide, StrategyExchangeRouting,
-    resolve_strategy_exchange_routing,
+    resolve_strategy_exchange_routing, EventLoopMetrics, EventLoopState, ExchangeSide,
+    StrategyExchangeRouting,
 };
-use event_loop_runtime::{EventLoopRuntimeContext, run_event_loop};
 #[cfg(test)]
 use event_loop_ingest::ingest_latest_batch;
-use runtime_hot_reload::{spawn_runtime_grid_hot_reload, RuntimeGridHotReloadSpec};
-#[cfg(test)]
-use runtime_hot_reload::{drain_runtime_grid_reset_signals, runtime_grid_sleep_ms};
-use runtime_grid::{
-    RuntimeGridGeneration, ensure_runtime_grid_config_file, load_runtime_grid_generation_async,
+use event_loop_ingest::{
+    process_exchange_batch, strategy_ticks_in_order, updated_symbols_from_batch, BatchIngestContext,
+};
+use event_loop_runtime::{run_event_loop, EventLoopRuntimeContext};
+use file_fingerprint::{
+    file_fingerprint_changed, hash_content_deterministic, read_file_fingerprint, FileFingerprint,
 };
 #[cfg(test)]
 use runtime_grid::RuntimeGridConfig;
+use runtime_grid::{
+    ensure_runtime_grid_config_file, load_runtime_grid_generation_async, RuntimeGridGeneration,
+};
+#[cfg(test)]
+use runtime_hot_reload::{drain_runtime_grid_reset_signals, runtime_grid_sleep_ms};
+use runtime_hot_reload::{spawn_runtime_grid_hot_reload, RuntimeGridHotReloadSpec};
 use runtime_setup::{
     configure_and_connect_exchanges, drain_stale_ticks, init_screener_persistence,
     spawn_gate_natr_refresher, start_api_servers, subscribe_gate_symbols,
 };
-use runtime_symbols::{RuntimeUniverse, build_runtime_universe, fetch_volume_tickers};
+use runtime_symbols::{build_runtime_universe, fetch_volume_tickers, RuntimeUniverse};
 #[cfg(test)]
 use runtime_symbols::{
-    SymbolReconcileOutcome, compute_common_symbols, reconcile_volume_symbols, select_runtime_symbols,
+    compute_common_symbols, reconcile_volume_symbols, select_runtime_symbols,
+    SymbolReconcileOutcome,
 };
-use trial_batch_protocol::{
-    TrialAck, TrialBatch, build_trial_batch_patch_plan, load_trial_batch, load_trial_control,
+#[cfg(test)]
+use trial_batch_apply::validate_trial_batch_run_lease;
+use trial_batch_apply::{
+    apply_trial_batch, close_trial_run_meta_async, upsert_runtime_configs_async,
 };
 #[cfg(test)]
 use trial_batch_protocol::TrialBatchMode;
-use trial_batch_apply::{apply_trial_batch, close_trial_run_meta_async, upsert_runtime_configs_async};
-#[cfg(test)]
-use trial_batch_apply::validate_trial_batch_run_lease;
-use trial_queue_io::{archive_trial_batch_queue_file, build_trial_batch_error_ack, list_trial_batch_queue_files, write_trial_ack};
+use trial_batch_protocol::{
+    build_trial_batch_patch_plan, load_trial_batch, load_trial_control, TrialAck, TrialBatch,
+};
+use trial_queue_io::{
+    archive_trial_batch_queue_file, build_trial_batch_error_ack, list_trial_batch_queue_files,
+    write_trial_ack,
+};
 #[cfg(test)]
 use trial_queue_io::{trial_batch_archive_dir, trial_batch_queue_dir};
 

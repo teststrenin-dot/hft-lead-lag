@@ -1,5 +1,5 @@
 //! Domain layer - Core trading domain entities and exchange abstractions
-//! 
+//!
 //! This module contains:
 //! - Exchange trait definitions (ports)
 //! - Market data message types (zero-copy optimized)

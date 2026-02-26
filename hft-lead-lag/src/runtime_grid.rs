@@ -1,4 +1,4 @@
-use super::{FileFingerprint, TraderConfig, hash_content_deterministic};
+use super::{hash_content_deterministic, FileFingerprint, TraderConfig};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};

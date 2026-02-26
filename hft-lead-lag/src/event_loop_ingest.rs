@@ -1,4 +1,4 @@
-use super::{EventLoopMetrics, MarketDataEvent, ScreenerStore, rebuild_latest_map};
+use super::{rebuild_latest_map, EventLoopMetrics, MarketDataEvent, ScreenerStore};
 
 pub(super) fn strategy_ticks_in_order<'a>(
     strategy_symbols: &'a [&'a str],

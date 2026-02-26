@@ -41,8 +41,8 @@ fn aggregate_axis(rows: &[ConfigRow], idx: usize, step: f64) -> Vec<AxisValueSta
         entry.3 += row.avg_pnl * row.trades as f64; // weighted pnl sum
     }
     map.values()
-        .map(|&(configs_total, configs_with_trades, total_trades, pnl_sum, value)| {
-            AxisValueStats {
+        .map(
+            |&(configs_total, configs_with_trades, total_trades, pnl_sum, value)| AxisValueStats {
                 value,
                 configs_total,
                 configs_with_trades,
@@ -52,8 +52,8 @@ fn aggregate_axis(rows: &[ConfigRow], idx: usize, step: f64) -> Vec<AxisValueSta
                 } else {
                     0.0
                 },
-            }
-        })
+            },
+        )
         .collect()
 }
 

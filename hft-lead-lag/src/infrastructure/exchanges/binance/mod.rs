@@ -612,9 +612,7 @@ mod tests {
         let snapshot = snapshot_subscriptions(&subs);
         assert_eq!(snapshot.len(), SUBSCRIPTION_REGISTRY_MAX);
         assert!(
-            !snapshot
-                .iter()
-                .any(|msg| msg.contains(r#""id":0"#)),
+            !snapshot.iter().any(|msg| msg.contains(r#""id":0"#)),
             "oldest entries should be trimmed"
         );
     }

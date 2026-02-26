@@ -1,7 +1,7 @@
 use super::shadow_fleet::{FleetTickMeta, ShadowFleet};
 use super::state::Quote;
 use super::utils::TimeDomainSample;
-use super::{LAG_WINDOW_MS, ScreenerStore, now_ms};
+use super::{now_ms, ScreenerStore, LAG_WINDOW_MS};
 
 pub(super) fn update(
     store: &ScreenerStore,

@@ -1,11 +1,11 @@
 //! HTTP handler functions and response types.
 
-mod helpers;
 mod health_support;
+mod helpers;
 mod trial_axes_support;
 
-use axum::{extract::Query, extract::State, Json};
 use arc_swap::ArcSwap;
+use axum::{extract::Query, extract::State, Json};
 use dashmap::DashMap;
 use serde::Deserialize;
 use serde::Serialize;
@@ -20,26 +20,26 @@ use crate::application::services::{
 use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
 use crate::domain::screener::PolicyConfigSnapshot;
 use crate::domain::screener::{ScreenerRow, ScreenerStore};
+#[cfg(test)]
+use crate::infrastructure::db::DbWriter;
 use crate::infrastructure::db::{load_portfolio_guards_v1, load_portfolio_state_v1};
 use crate::infrastructure::enrichment::{self, CachedNatr};
 use crate::infrastructure::rest::{BinanceRestClient, GateRestClient};
-#[cfg(test)]
-use crate::infrastructure::db::DbWriter;
 
+#[cfg(test)]
+use self::health_support::{evaluate_db_saturation_health, FALLBACK_ROWS_TTL_MS};
+use self::health_support::{
+    health_response, maybe_spawn_fallback_rows_refresh, should_refresh_fallback_rows_cache,
+};
+use self::helpers::{
+    compute_fleet_stats, internal_error, open_readonly_conn, resolve_forward_run_id, to_snapshots,
+};
+use self::trial_axes_support::build_trial_axes_breakdown;
 use super::http_server::HealthState;
 use super::runner::{
     RunnerErrorKind, RunnerStartRequest, RunnerStartResponse, RunnerStatusResponse,
     RunnerStopResponse, RunnerUiConfig, TrialRunnerManager,
 };
-use self::helpers::{
-    compute_fleet_stats, internal_error, open_readonly_conn, resolve_forward_run_id, to_snapshots,
-};
-use self::health_support::{
-    health_response, maybe_spawn_fallback_rows_refresh, should_refresh_fallback_rows_cache,
-};
-use self::trial_axes_support::build_trial_axes_breakdown;
-#[cfg(test)]
-use self::health_support::{evaluate_db_saturation_health, FALLBACK_ROWS_TTL_MS};
 
 // ── Shared state ────────────────────────────────────────────────────
 

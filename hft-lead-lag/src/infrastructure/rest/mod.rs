@@ -7,7 +7,7 @@
 
 use crate::domain::ExchangeResult;
 use crate::infrastructure::exchanges::common::HmacSha256;
-use reqwest::{Client, header::HeaderMap};
+use reqwest::{header::HeaderMap, Client};
 use serde::Deserialize;
 use tracing::debug;
 

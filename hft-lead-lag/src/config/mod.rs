@@ -181,8 +181,7 @@ impl ConfigManager {
             });
         }
 
-        let trading_mode =
-            Self::parse_trading_mode(std::env::var("TRADING_MODE").ok().as_deref())?;
+        let trading_mode = Self::parse_trading_mode(std::env::var("TRADING_MODE").ok().as_deref())?;
 
         Ok(Self {
             config: Arc::new(config),
@@ -381,7 +380,9 @@ blacklist = []
     fn config_rejects_shadow_only_mode() {
         let _lock = env_test_lock();
         std::env::set_var("TRADING_MODE", "shadow_only");
-        let err = ConfigManager::from_env().err().expect("shadow_only must be rejected");
+        let err = ConfigManager::from_env()
+            .err()
+            .expect("shadow_only must be rejected");
         assert!(
             err.to_string().contains("Allowed values: paper"),
             "unexpected error: {err}"
@@ -393,7 +394,9 @@ blacklist = []
     fn config_rejects_unknown_mode() {
         let _lock = env_test_lock();
         std::env::set_var("TRADING_MODE", "papre");
-        let err = ConfigManager::from_env().err().expect("unknown mode must be rejected");
+        let err = ConfigManager::from_env()
+            .err()
+            .expect("unknown mode must be rejected");
         assert!(
             err.to_string().contains("Allowed values: paper"),
             "unexpected error: {err}"

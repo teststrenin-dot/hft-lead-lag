@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::fleet_patch::{FleetPatchMode, FleetPatchPlan, should_reset_symbol};
+use super::fleet_patch::{should_reset_symbol, FleetPatchMode, FleetPatchPlan};
 use super::{
     FleetPatchApplyError, FleetPatchMatchStats, FleetReloadReport, ScreenerStore, TraderConfig,
 };

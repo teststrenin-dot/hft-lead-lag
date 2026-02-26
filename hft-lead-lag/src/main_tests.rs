@@ -299,8 +299,7 @@ fn archive_trial_batch_queue_file_stashes_payload_when_archive_dir_unavailable()
     let queue_dir = trial_batch_queue_dir(&dir);
     fs::create_dir_all(&queue_dir).expect("create queue dir");
     let queued_file = queue_dir.join("run-stash-1.json");
-    fs::write(&queued_file, r#"{"run_id":"run-stash","configs":[]}"#)
-        .expect("write queued file");
+    fs::write(&queued_file, r#"{"run_id":"run-stash","configs":[]}"#).expect("write queued file");
 
     // Block `create_dir_all(config/trial-batches-archive/ok)` by placing a file
     // where the archive root directory should be.

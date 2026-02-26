@@ -1,4 +1,6 @@
-use super::{CONFIG_ID_CONTRACT_VERSION, EventLoopState, FleetPatchMode, FleetPatchPlan, TraderConfig};
+use super::{
+    EventLoopState, FleetPatchMode, FleetPatchPlan, TraderConfig, CONFIG_ID_CONTRACT_VERSION,
+};
 use serde::Deserialize;
 use std::path::Path;
 

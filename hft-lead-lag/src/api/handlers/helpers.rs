@@ -92,7 +92,9 @@ pub(super) fn to_snapshots(exchange: &'static str, tickers: Vec<Ticker24h>) -> V
         .collect()
 }
 
-pub(super) fn internal_error(error: crate::domain::ExchangeError) -> (axum::http::StatusCode, String) {
+pub(super) fn internal_error(
+    error: crate::domain::ExchangeError,
+) -> (axum::http::StatusCode, String) {
     (
         axum::http::StatusCode::BAD_GATEWAY,
         format!("exchange error: {}", error),

@@ -1,5 +1,5 @@
 //! Lead-Lag Strategy Service
-//! 
+//!
 //! Implements the core HFT lead-lag trading logic:
 //! - Detects price leadership between exchanges
 //! - Executes arbitrage when spread exceeds threshold
@@ -8,10 +8,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::domain::{
-    BookTicker, ExchangeId,
-    messages::ticks_to_decimal,
-};
+use crate::domain::{messages::ticks_to_decimal, BookTicker, ExchangeId};
 
 /// Lead-lag signal
 #[derive(Debug, Clone)]
@@ -88,9 +85,9 @@ impl Default for LeadLagStrategyConfig {
         Self {
             primary_exchange: ExchangeId::BinanceFutures,
             hedge_exchange: ExchangeId::GateFutures,
-            min_entry_spread_bps: 30.0, // 0.30%
+            min_entry_spread_bps: 30.0,  // 0.30%
             target_exit_spread_bps: 1.0, // 0.01%
-            max_position_age_ms: 5000, // 5 seconds
+            max_position_age_ms: 5000,   // 5 seconds
             order_qty_usd: 10.0,
             symbols: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
         }
@@ -185,8 +182,8 @@ impl LeadLagStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use crate::domain::messages::decimal_to_ticks;
+    use bytes::Bytes;
 
     #[test]
     fn default_config_uses_30bps_entry_threshold() {
