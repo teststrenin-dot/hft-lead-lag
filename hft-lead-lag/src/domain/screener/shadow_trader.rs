@@ -461,23 +461,36 @@ impl ShadowTrader {
 
         let threshold = self.config.spike_threshold_bps;
 
-        // Long: current ask-gap exceeds baseline by threshold
+        let mut long_signal = None;
         if ask_ready && gate.ask > 0.0 {
             let current_gap = ((binance.ask - gate.ask) / gate.ask) * 10_000.0;
             let signal = current_gap - baseline_ask_gap;
             if signal >= threshold {
-                return Some((Direction::Long, signal));
+                long_signal = Some(signal);
             }
         }
-        // Short: current bid-gap exceeds baseline by threshold
+
+        let mut short_signal = None;
         if bid_ready && gate.bid > 0.0 {
             let current_gap = ((gate.bid - binance.bid) / gate.bid) * 10_000.0;
             let signal = current_gap - baseline_bid_gap;
             if signal >= threshold {
-                return Some((Direction::Short, signal));
+                short_signal = Some(signal);
             }
         }
-        None
+
+        match (long_signal, short_signal) {
+            (Some(long_bps), Some(short_bps)) => {
+                if short_bps > long_bps {
+                    Some((Direction::Short, short_bps))
+                } else {
+                    Some((Direction::Long, long_bps))
+                }
+            }
+            (Some(long_bps), None) => Some((Direction::Long, long_bps)),
+            (None, Some(short_bps)) => Some((Direction::Short, short_bps)),
+            (None, None) => None,
+        }
     }
 
     // -- Fill exit & bookkeeping ---------------------------------------------
@@ -791,6 +804,28 @@ mod tests {
         assert!(
             (gap_bps - 60.0).abs() < 1.0,
             "expected ~60 bps, got {gap_bps}"
+        );
+    }
+
+    #[test]
+    fn entry_signal_prefers_stronger_direction_when_both_sides_trigger() {
+        let trader = make_trader(|c| {
+            c.spike_threshold_bps = 10.0;
+            c.warmup_ms = 0;
+            c.min_baseline_samples = 5;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+        // Long signal: +20 bps (ask branch), short signal: +40 bps (bid branch).
+        let bn = quote(99.60, 100.20, 50_100);
+        let gt = quote(100.0, 100.0, 50_100);
+
+        let result = trader.detect_gap(50_100, &bn, &gt, &samples);
+        assert!(result.is_some());
+        let (dir, gap_bps) = result.unwrap();
+        assert_eq!(dir, Direction::Short);
+        assert!(
+            (gap_bps - 40.0).abs() < 1.0,
+            "expected ~40 bps short signal, got {gap_bps}"
         );
     }
 
