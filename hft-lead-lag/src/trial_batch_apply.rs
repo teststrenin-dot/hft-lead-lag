@@ -123,18 +123,33 @@ pub(super) async fn apply_trial_batch(
             return TrialAck::error(run_id, e, submission_id);
         }
     };
+    if let Err(e) = screener.validate_fleet_patch(&batch.configs, &patch_plan) {
+        warn!("trial-batch: patch rejected during pre-validation: {e}");
+        return TrialAck::error(run_id, e.to_string(), submission_id);
+    }
     let mode = patch_plan.mode;
     let runtime_configs = batch.configs.clone();
+    let previous_configs = screener.fleet_configs();
+    if let Err(e) = upsert_runtime_configs_async(db_path.clone(), runtime_configs).await {
+        let msg = format!("runtime config durability failed before apply: {e}");
+        warn!("trial-batch: {msg}");
+        return TrialAck::error(run_id, msg, submission_id);
+    }
+
     let report = match screener.try_apply_fleet_patch(batch.configs, patch_plan) {
         Ok(report) => report,
         Err(e) => {
-            warn!("trial-batch: patch rejected: {e}");
+            warn!("trial-batch: patch rejected after durable config write: {e}");
+            if let Err(rollback_err) =
+                upsert_runtime_configs_async(db_path.clone(), previous_configs.to_vec()).await
+            {
+                warn!(
+                    "trial-batch: failed to roll back runtime config durability after apply reject: {rollback_err}"
+                );
+            }
             return TrialAck::error(run_id, e.to_string(), submission_id);
         }
     };
-    if let Err(e) = upsert_runtime_configs_async(db_path.clone(), runtime_configs).await {
-        warn!("trial-batch: db upsert failed after patch apply: {e}");
-    }
     let applied_at_ms = EventLoopState::now_ms();
     if let Some(previous_run_id) = previous_run_id.as_ref() {
         if previous_run_id != &run_id {

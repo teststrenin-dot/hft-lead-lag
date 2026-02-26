@@ -676,6 +676,15 @@ impl ScreenerStore {
         fleet_reload::try_apply_fleet_patch(self, new_configs, plan)
     }
 
+    /// Validate a fleet patch without mutating runtime state.
+    pub fn validate_fleet_patch(
+        &self,
+        new_configs: &[TraderConfig],
+        plan: &FleetPatchPlan,
+    ) -> Result<(), FleetPatchApplyError> {
+        fleet_reload::validate_fleet_patch(self, new_configs, plan)
+    }
+
     /// Apply fleet patch or panic in internal/test call sites where error
     /// propagation is not expected.
     pub fn apply_fleet_patch(

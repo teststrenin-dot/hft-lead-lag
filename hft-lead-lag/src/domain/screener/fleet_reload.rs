@@ -11,29 +11,9 @@ pub(super) fn try_apply_fleet_patch(
     new_configs: Vec<TraderConfig>,
     plan: FleetPatchPlan,
 ) -> Result<FleetReloadReport, FleetPatchApplyError> {
-    validate_new_configs(&new_configs)?;
-
     let old_config_count = store.fleet_configs.load().len();
     let new_config_count = new_configs.len();
-    let match_stats = collect_patch_match_stats(store, &plan, &new_configs);
-    if matches!(plan.mode, FleetPatchMode::Incremental) {
-        if !plan.has_changed_configs() {
-            return Err(FleetPatchApplyError::IncrementalMissingChangedConfigIds);
-        }
-        if !match_stats.has_any_match() {
-            return Err(FleetPatchApplyError::IncrementalNoMatchedChangedConfigIds {
-                changed_ids_requested: match_stats.changed_ids_requested,
-                scope_symbols_requested: match_stats.scope_symbols_requested,
-            });
-        }
-        if match_stats.has_new_only_changed_ids && !plan.has_symbol_scope() {
-            return Err(
-                FleetPatchApplyError::IncrementalNewConfigIdsRequireSymbolScope {
-                    changed_ids_requested: match_stats.changed_ids_requested,
-                },
-            );
-        }
-    }
+    let match_stats = validate_patch(store, &new_configs, &plan)?;
     store.fleet_configs.store(Arc::new(new_configs));
 
     let mut symbols_reset = 0usize;
@@ -84,6 +64,42 @@ pub(super) fn try_apply_fleet_patch(
         scope_symbols_requested: match_stats.scope_symbols_requested,
         scope_symbols_matched,
     })
+}
+
+pub(super) fn validate_fleet_patch(
+    store: &ScreenerStore,
+    new_configs: &[TraderConfig],
+    plan: &FleetPatchPlan,
+) -> Result<(), FleetPatchApplyError> {
+    validate_patch(store, new_configs, plan).map(|_| ())
+}
+
+fn validate_patch(
+    store: &ScreenerStore,
+    new_configs: &[TraderConfig],
+    plan: &FleetPatchPlan,
+) -> Result<FleetPatchMatchStats, FleetPatchApplyError> {
+    validate_new_configs(new_configs)?;
+    let match_stats = collect_patch_match_stats(store, plan, new_configs);
+    if matches!(plan.mode, FleetPatchMode::Incremental) {
+        if !plan.has_changed_configs() {
+            return Err(FleetPatchApplyError::IncrementalMissingChangedConfigIds);
+        }
+        if !match_stats.has_any_match() {
+            return Err(FleetPatchApplyError::IncrementalNoMatchedChangedConfigIds {
+                changed_ids_requested: match_stats.changed_ids_requested,
+                scope_symbols_requested: match_stats.scope_symbols_requested,
+            });
+        }
+        if match_stats.has_new_only_changed_ids && !plan.has_symbol_scope() {
+            return Err(
+                FleetPatchApplyError::IncrementalNewConfigIdsRequireSymbolScope {
+                    changed_ids_requested: match_stats.changed_ids_requested,
+                },
+            );
+        }
+    }
+    Ok(match_stats)
 }
 
 fn validate_new_configs(new_configs: &[TraderConfig]) -> Result<(), FleetPatchApplyError> {

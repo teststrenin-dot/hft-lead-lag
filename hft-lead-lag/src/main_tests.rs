@@ -636,6 +636,58 @@ async fn apply_trial_batch_reject_does_not_upsert_runtime_configs() {
     let _ = fs::remove_file(format!("{}-shm", db_path.display()));
 }
 
+#[tokio::test]
+async fn apply_trial_batch_returns_error_when_runtime_config_durability_fails() {
+    let screener = ScreenerStore::default();
+    let before_configs = screener.fleet_configs();
+    let before_config_id = before_configs
+        .first()
+        .expect("default config should exist")
+        .config_id();
+    let next_cfg = TraderConfig {
+        spike_threshold_bps: 77.0,
+        ..TraderConfig::default()
+    };
+
+    let batch = TrialBatch {
+        run_id: "run-durability-fail".to_string(),
+        configs: vec![next_cfg],
+        mode: None,
+        changed_config_ids: None,
+        symbols: None,
+        config_id_contract_version: Some(CONFIG_ID_CONTRACT_VERSION),
+        submission_id: Some("sub-durability-fail".to_string()),
+        allow_run_id_takeover: false,
+    };
+
+    // Directory path is not a valid sqlite file target for open_db().
+    let ack = apply_trial_batch(&screener, std::env::temp_dir(), batch).await;
+    assert_eq!(ack.status, "error");
+    assert!(
+        ack.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("durability"),
+        "unexpected error: {:?}",
+        ack.error
+    );
+
+    let after_configs = screener.fleet_configs();
+    let after_config_id = after_configs
+        .first()
+        .expect("config should still exist")
+        .config_id();
+    assert_eq!(
+        after_config_id, before_config_id,
+        "failed durability must not mutate in-memory runtime configs"
+    );
+    assert_eq!(
+        screener.current_run_id(),
+        None,
+        "run_id must not advance on durability failure"
+    );
+}
+
 fn prime_symbol_fleet(screener: &ScreenerStore, symbol: &str, exchange_ts_ns: i64) {
     screener.update(
         symbol,
