@@ -69,6 +69,9 @@ fn resolve_lead_lag_config(
             .trigger_spread_bps
             .clamp(MIN_TRIGGER_SPREAD_BPS, MAX_TRIGGER_SPREAD_BPS);
         config.max_position_age_ms = file_config.max_position_age_ms;
+        if let Some(max_quote_skew_ms) = file_config.max_quote_skew_ms {
+            config.max_quote_skew_ms = max_quote_skew_ms;
+        }
     }
     config
 }

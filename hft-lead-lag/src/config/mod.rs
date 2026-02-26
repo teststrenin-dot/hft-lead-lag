@@ -41,6 +41,8 @@ pub struct LeadLagConfig {
     pub max_position_age_ms: u64,
     /// Symbols to trade
     pub symbols: Vec<String>,
+    /// Optional override for max allowed local quote skew between exchanges.
+    pub max_quote_skew_ms: Option<u64>,
 }
 
 /// Exchange identifier for config

@@ -421,10 +421,6 @@ impl ShadowTrader {
         gate: &Quote,
         samples: &PriceSamples,
     ) -> Option<(Direction, f64)> {
-        if samples.len() < self.config.min_baseline_samples {
-            return None;
-        }
-
         let cutoff = ts_ms - self.config.baseline_window_ms;
 
         // Compute baseline gap over window (not all samples)
@@ -446,12 +442,18 @@ impl ShadowTrader {
         if ask_count == 0 && bid_count == 0 {
             return None;
         }
-        let baseline_ask_gap = if ask_count > 0 {
+        let min_baseline_samples = self.config.min_baseline_samples as u32;
+        let ask_ready = ask_count >= min_baseline_samples;
+        let bid_ready = bid_count >= min_baseline_samples;
+        if !ask_ready && !bid_ready {
+            return None;
+        }
+        let baseline_ask_gap = if ask_ready {
             ask_gap_sum / ask_count as f64
         } else {
             0.0
         };
-        let baseline_bid_gap = if bid_count > 0 {
+        let baseline_bid_gap = if bid_ready {
             bid_gap_sum / bid_count as f64
         } else {
             0.0
@@ -460,7 +462,7 @@ impl ShadowTrader {
         let threshold = self.config.spike_threshold_bps;
 
         // Long: current ask-gap exceeds baseline by threshold
-        if gate.ask > 0.0 {
+        if ask_ready && gate.ask > 0.0 {
             let current_gap = ((binance.ask - gate.ask) / gate.ask) * 10_000.0;
             let signal = current_gap - baseline_ask_gap;
             if signal >= threshold {
@@ -468,7 +470,7 @@ impl ShadowTrader {
             }
         }
         // Short: current bid-gap exceeds baseline by threshold
-        if gate.bid > 0.0 {
+        if bid_ready && gate.bid > 0.0 {
             let current_gap = ((gate.bid - binance.bid) / gate.bid) * 10_000.0;
             let signal = current_gap - baseline_bid_gap;
             if signal >= threshold {
@@ -733,6 +735,40 @@ mod tests {
         let samples = stable_samples(19, 100.0, 100.0, 50_000);
         let bn = quote(100.0, 100.0, 50_000);
         let gt = quote(100.0, 100.0, 50_000);
+        assert!(trader.detect_gap(50_100, &bn, &gt, &samples).is_none());
+    }
+
+    #[test]
+    fn baseline_needs_min_samples_inside_window() {
+        let trader = make_trader(|c| {
+            c.spike_threshold_bps = 50.0;
+            c.min_baseline_samples = 5;
+            c.baseline_window_ms = 500;
+            c.warmup_ms = 0;
+        });
+        let mut samples = PriceSamples::default();
+        // Old baseline points (outside active window) should not satisfy min sample gate.
+        for i in 0..8 {
+            samples.push(PriceSample {
+                ts_ms: 49_000 + i * 10,
+                gate_bid: 100.0,
+                gate_ask: 100.0,
+                binance_bid: 100.0,
+                binance_ask: 100.0,
+            });
+        }
+        // Only 2 points in active window.
+        for i in 0..2 {
+            samples.push(PriceSample {
+                ts_ms: 49_900 + i * 100,
+                gate_bid: 100.0,
+                gate_ask: 100.0,
+                binance_bid: 100.0,
+                binance_ask: 100.0,
+            });
+        }
+        let bn = quote(100.60, 100.60, 50_100);
+        let gt = quote(100.0, 100.0, 50_100);
         assert!(trader.detect_gap(50_100, &bn, &gt, &samples).is_none());
     }
 

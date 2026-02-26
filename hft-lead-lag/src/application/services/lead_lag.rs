@@ -158,6 +158,9 @@ pub struct LeadLagStrategyConfig {
     pub order_qty_usd: f64,
     /// Symbols to trade
     pub symbols: Vec<String>,
+    /// Maximum allowed local receive skew between primary and hedge quotes (ms).
+    /// If exceeded, signal is suppressed as stale cross-exchange pair.
+    pub max_quote_skew_ms: u64,
 }
 
 impl Default for LeadLagStrategyConfig {
@@ -170,6 +173,7 @@ impl Default for LeadLagStrategyConfig {
             max_position_age_ms: 5000,   // 5 seconds
             order_qty_usd: 10.0,
             symbols: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
+            max_quote_skew_ms: 1_000,
         }
     }
 }
@@ -228,6 +232,17 @@ impl LeadLagStrategy {
 
         let primary = primary_books.get(symbol)?;
         let hedge = hedge_books.get(symbol)?;
+
+        if primary.local_ts_ns <= 0 || hedge.local_ts_ns <= 0 {
+            return None;
+        }
+
+        let max_quote_skew_ns = self.config.max_quote_skew_ms.saturating_mul(1_000_000);
+        if max_quote_skew_ns > 0
+            && primary.local_ts_ns.abs_diff(hedge.local_ts_ns) > max_quote_skew_ns
+        {
+            return None;
+        }
 
         // Binance(primary) is the oracle. If hedge quote is newer, skip this cycle:
         // we do not trade when lead source is unclear.
@@ -428,5 +443,36 @@ mod tests {
             .await
             .expect("clock offset on hedge must not suppress valid primary-led signal");
         assert!(signal.spread_bps > 50.0);
+    }
+
+    #[tokio::test]
+    async fn check_signal_ignores_when_quotes_are_too_far_apart_in_local_time() {
+        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+            min_entry_spread_bps: 50.0,
+            symbols: vec!["BTCUSDT".to_string()],
+            ..Default::default()
+        });
+
+        // Large local receive skew means one side is stale for this decision.
+        strategy
+            .update_primary_book(ticker_with_local(
+                "BTCUSDT",
+                110.0,
+                111.0,
+                2_000_000_000,
+                10_000_000_000,
+            ))
+            .await;
+        strategy
+            .update_hedge_book(ticker_with_local(
+                "BTCUSDT",
+                100.0,
+                101.0,
+                100_000_000,
+                100_000_000,
+            ))
+            .await;
+
+        assert!(strategy.check_signal("BTCUSDT").await.is_none());
     }
 }
