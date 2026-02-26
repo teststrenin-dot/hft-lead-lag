@@ -110,7 +110,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("HFT Lead-Lag system starting");
 
     // Load configuration from environment
-    let config_manager = ConfigManager::from_env();
+    let config_manager = ConfigManager::from_env()?;
+    info!(
+        "Runtime execution mode: {}",
+        config_manager.trading_mode().as_str()
+    );
 
     let (binance_tickers, gate_tickers) = fetch_volume_tickers(MIN_VOLUME_USD).await;
     let universe = build_runtime_universe(

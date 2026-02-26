@@ -90,6 +90,20 @@ impl Default for StrategyRuntimeConfig {
     }
 }
 
+/// Runtime execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradingMode {
+    Paper,
+}
+
+impl TradingMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Paper => "paper",
+        }
+    }
+}
+
 /// Full application configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -122,11 +136,25 @@ impl Default for AppConfig {
 /// Configuration manager
 pub struct ConfigManager {
     config: Arc<AppConfig>,
+    trading_mode: TradingMode,
 }
 
 impl ConfigManager {
+    fn parse_trading_mode(raw: Option<&str>) -> Result<TradingMode, std::io::Error> {
+        let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+            return Ok(TradingMode::Paper);
+        };
+        if raw.eq_ignore_ascii_case("paper") {
+            return Ok(TradingMode::Paper);
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Unsupported TRADING_MODE='{raw}'. Allowed values: paper"),
+        ))
+    }
+
     /// Create config from environment variables
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, std::io::Error> {
         // Try loading config.toml first, fall back to defaults
         let mut config = std::fs::read_to_string("config/config.toml")
             .ok()
@@ -153,17 +181,26 @@ impl ConfigManager {
             });
         }
 
-        Self {
+        let trading_mode =
+            Self::parse_trading_mode(std::env::var("TRADING_MODE").ok().as_deref())?;
+
+        Ok(Self {
             config: Arc::new(config),
-        }
+            trading_mode,
+        })
     }
 
-    /// Load config from TOML file
+    /// Load config from TOML file.
+    ///
+    /// This path is deterministic and does not read `TRADING_MODE` from env.
+    /// Runtime entrypoints that need env-based mode selection should use
+    /// `ConfigManager::from_env()`.
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
         let config: AppConfig = toml::from_str(&content)?;
         Ok(Self {
             config: Arc::new(config),
+            trading_mode: TradingMode::Paper,
         })
     }
 
@@ -206,6 +243,11 @@ impl ConfigManager {
     pub fn strategy_kind(&self) -> StrategyKind {
         self.config.strategy.active
     }
+
+    /// Get runtime execution mode.
+    pub fn trading_mode(&self) -> TradingMode {
+        self.trading_mode
+    }
 }
 
 #[cfg(test)]
@@ -213,14 +255,26 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env test lock")
+    }
 
     #[test]
     fn test_config_from_env() {
+        let _lock = env_test_lock();
+        std::env::remove_var("TRADING_MODE");
         std::env::set_var("BINANCE_API_KEY", "test_key");
         std::env::set_var("BINANCE_API_SECRET", "test_secret");
 
-        let config = ConfigManager::from_env();
+        let config = ConfigManager::from_env().expect("load config from env");
         assert!(config.binance_credentials().is_some());
+        std::env::remove_var("BINANCE_API_KEY");
+        std::env::remove_var("BINANCE_API_SECRET");
     }
 
     fn write_temp_config(name: &str, content: &str) -> PathBuf {
@@ -234,6 +288,7 @@ mod tests {
 
     #[test]
     fn config_defaults_to_lead_lag_strategy_when_field_is_missing() {
+        let _lock = env_test_lock();
         let path = write_temp_config(
             "default-strategy",
             r#"
@@ -256,6 +311,7 @@ blacklist = []
 
     #[test]
     fn config_reads_explicit_strategy_selection() {
+        let _lock = env_test_lock();
         let path = write_temp_config(
             "explicit-strategy",
             r#"
@@ -277,5 +333,71 @@ active = "dislocation_reversion"
         assert_eq!(manager.strategy_kind(), StrategyKind::DislocationReversion);
 
         fs::remove_file(path).expect("cleanup temp config");
+    }
+
+    #[test]
+    fn from_file_ignores_trading_mode_env() {
+        let _lock = env_test_lock();
+        std::env::set_var("TRADING_MODE", "shadow_only");
+        let path = write_temp_config(
+            "from-file-ignores-env-mode",
+            r#"
+[binance]
+enabled = true
+blacklist = []
+
+[gate]
+enabled = true
+blacklist = []
+"#,
+        );
+
+        let manager =
+            ConfigManager::from_file(path.to_str().expect("utf-8 temp path")).expect("load config");
+        assert_eq!(manager.trading_mode().as_str(), "paper");
+
+        std::env::remove_var("TRADING_MODE");
+        fs::remove_file(path).expect("cleanup temp config");
+    }
+
+    #[test]
+    fn config_defaults_to_paper_runtime_mode() {
+        let _lock = env_test_lock();
+        std::env::remove_var("TRADING_MODE");
+        let config = ConfigManager::from_env().expect("load config from env");
+        assert_eq!(config.trading_mode().as_str(), "paper");
+    }
+
+    #[test]
+    fn config_accepts_explicit_paper_mode() {
+        let _lock = env_test_lock();
+        std::env::set_var("TRADING_MODE", "paper");
+        let config = ConfigManager::from_env().expect("load config from env");
+        assert_eq!(config.trading_mode().as_str(), "paper");
+        std::env::remove_var("TRADING_MODE");
+    }
+
+    #[test]
+    fn config_rejects_shadow_only_mode() {
+        let _lock = env_test_lock();
+        std::env::set_var("TRADING_MODE", "shadow_only");
+        let err = ConfigManager::from_env().err().expect("shadow_only must be rejected");
+        assert!(
+            err.to_string().contains("Allowed values: paper"),
+            "unexpected error: {err}"
+        );
+        std::env::remove_var("TRADING_MODE");
+    }
+
+    #[test]
+    fn config_rejects_unknown_mode() {
+        let _lock = env_test_lock();
+        std::env::set_var("TRADING_MODE", "papre");
+        let err = ConfigManager::from_env().err().expect("unknown mode must be rejected");
+        assert!(
+            err.to_string().contains("Allowed values: paper"),
+            "unexpected error: {err}"
+        );
+        std::env::remove_var("TRADING_MODE");
     }
 }
