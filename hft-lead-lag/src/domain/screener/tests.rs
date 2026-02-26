@@ -189,6 +189,68 @@ fn update_partial_book_with_existing_portfolio_stats_does_not_block() {
 }
 
 #[test]
+fn update_rejects_dirty_spread_and_does_not_create_state() {
+    let store = ScreenerStore::default();
+    let ts_ns = 1_700_000_000_000_000_000_i64;
+
+    store.update("BTCUSDT", "binance", 100.1, 100.0, ts_ns, ts_ns);
+
+    assert!(
+        store.symbols.get("BTCUSDT").is_none(),
+        "ask < bid must be rejected before symbol state allocation"
+    );
+}
+
+#[test]
+fn update_rejects_exchange_timestamp_regression_per_side() {
+    let store = ScreenerStore::default();
+    let ts_ns = 1_700_000_000_000_000_000_i64;
+
+    store.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
+    store.update(
+        "BTCUSDT",
+        "gate",
+        100.0,
+        100.1,
+        ts_ns + 1_000_000,
+        ts_ns + 1_000_000,
+    );
+
+    let before_binance = {
+        let before = store
+            .symbols
+            .get("BTCUSDT")
+            .expect("state must exist after valid updates");
+        before.binance.as_ref().expect("binance quote").clone()
+    };
+
+    // Older exchange timestamp for the same side must be ignored.
+    store.update(
+        "BTCUSDT",
+        "binance",
+        101.0,
+        101.1,
+        ts_ns - 1_000_000,
+        ts_ns - 1_000_000,
+    );
+
+    let after = store.symbols.get("BTCUSDT").expect("state must still exist");
+    let after_binance = after.binance.as_ref().expect("binance quote");
+    assert_eq!(
+        after_binance.ts_ms, before_binance.ts_ms,
+        "older binance quote timestamp must not overwrite last accepted timestamp"
+    );
+    assert_eq!(
+        after_binance.bid, before_binance.bid,
+        "older binance quote must not overwrite bid"
+    );
+    assert_eq!(
+        after_binance.ask, before_binance.ask,
+        "older binance quote must not overwrite ask"
+    );
+}
+
+#[test]
 fn rows_sorted_marks_live_ws_source_and_update_time() {
     let store = ScreenerStore::default();
     let ts_ns = 1_700_000_000_000_000_000_i64;

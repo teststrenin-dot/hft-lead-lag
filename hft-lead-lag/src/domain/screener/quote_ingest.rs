@@ -89,6 +89,9 @@ pub(super) fn update(
     if !bid.is_finite() || !ask.is_finite() || bid <= 0.0 || ask <= 0.0 {
         return;
     }
+    if ask < bid {
+        return;
+    }
 
     let clocks = TimeDomainSample::from_raw(timestamp_ns, local_receive_ts_ns, now_ms());
     let adjusted_exchange_ts_ms =

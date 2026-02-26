@@ -74,8 +74,19 @@ impl SymbolState {
         ws_drift: Option<f64>,
         ingress_ws_drift: Option<f64>,
     ) -> bool {
+        if quote.ask < quote.bid {
+            return false;
+        }
+
         match exchange {
             "binance" => {
+                if self
+                    .binance
+                    .as_ref()
+                    .is_some_and(|previous| quote.ts_ms < previous.ts_ms)
+                {
+                    return false;
+                }
                 self.binance = Some(quote);
                 if let Some(v) = ws_drift {
                     self.drifts.binance = Some(v);
@@ -85,6 +96,13 @@ impl SymbolState {
                 }
             }
             "gate" => {
+                if self
+                    .gate
+                    .as_ref()
+                    .is_some_and(|previous| quote.ts_ms < previous.ts_ms)
+                {
+                    return false;
+                }
                 self.gate = Some(quote);
                 if let Some(v) = ws_drift {
                     self.drifts.gate = Some(v);
