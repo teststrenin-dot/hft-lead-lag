@@ -344,6 +344,58 @@ async fn trial_runs_expose_patch_level_metadata() {
 }
 
 #[tokio::test]
+async fn forward_runs_expose_patch_level_metadata() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!("forward-runs-meta-{unique}.db"));
+    let conn = crate::infrastructure::db::open_db(&db_path).expect("open db");
+    crate::infrastructure::db::upsert_trial_run_meta(
+        &conn,
+        "forward-1",
+        12,
+        1001,
+        2,
+        crate::infrastructure::db::TrialPatchMeta::default(),
+    )
+    .expect("upsert forward run");
+    drop(conn);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: Arc::new(HealthState::new()),
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: db_path.clone(),
+    });
+
+    let Json(runs) = get_forward_runs(State(state)).await.expect("forward runs");
+    let run = runs
+        .iter()
+        .find(|r| r.run_id == "forward-1")
+        .expect("run present");
+    assert_eq!(run.apply_mode, "full_replace");
+    assert_eq!(run.symbols_reset, 0);
+    assert_eq!(run.changed_ids_requested, 0);
+    assert_eq!(run.matched_changed_ids_old, 0);
+    assert_eq!(run.matched_changed_ids_new, 0);
+    assert_eq!(run.unmatched_changed_ids, 0);
+    assert_eq!(run.scope_symbols_requested, 0);
+    assert_eq!(run.scope_symbols_matched, 0);
+
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{}-wal", db_path.display()));
+    let _ = fs::remove_file(format!("{}-shm", db_path.display()));
+}
+
+#[tokio::test]
 async fn portfolio_active_endpoint_returns_a_and_b_slots() {
     let health_state = Arc::new(HealthState::new());
     let state = Arc::new(HttpState {

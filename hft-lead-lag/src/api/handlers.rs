@@ -524,12 +524,64 @@ pub(crate) struct SymbolBestConfig {
     avg_pnl_pct: f64,
 }
 
+fn decode_symbol_best_config_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolBestConfig> {
+    let total: i64 = row.get(9)?;
+    let wins: i64 = row.get(10)?;
+    let total_pnl: f64 = row.get(11)?;
+    let stats = compute_fleet_stats(total, wins, total_pnl);
+    Ok(SymbolBestConfig {
+        symbol: row.get(0)?,
+        config_id: row.get(1)?,
+        spike_threshold_bps: row.get(2)?,
+        target_ratio: row.get(3)?,
+        stop_loss_bps: row.get(4)?,
+        max_hold_ms: row.get(5)?,
+        max_spread_bps: row.get(6)?,
+        trailing_decay_ratio: row.get(7)?,
+        baseline_window_ms: row.get(8)?,
+        total_trades: total,
+        wins,
+        win_rate_pct: stats.win_rate_pct,
+        total_pnl_pct: total_pnl,
+        avg_pnl_pct: stats.avg_pnl_pct,
+    })
+}
+
+fn load_symbol_best_configs<P: rusqlite::Params>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: P,
+) -> Result<Vec<SymbolBestConfig>, (axum::http::StatusCode, String)> {
+    let mut stmt = conn.prepare(sql).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("sql: {e}"),
+        )
+    })?;
+
+    let rows = stmt
+        .query_map(params, decode_symbol_best_config_row)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("query: {e}"),
+            )
+        })?;
+
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("row decode: {e}"),
+        )
+    })
+}
+
 pub(crate) async fn get_fleet_by_symbol(
     State(state): State<Arc<HttpState>>,
 ) -> Result<Json<Vec<SymbolBestConfig>>, (axum::http::StatusCode, String)> {
     let conn = open_readonly_conn(&state)?;
-
-    let mut stmt = conn.prepare(
+    let result = load_symbol_best_configs(
+        &conn,
         "WITH ranked AS (
             SELECT t.symbol, c.id as config_id,
                    c.spike_threshold_bps, c.target_ratio,
@@ -548,45 +600,9 @@ pub(crate) async fn get_fleet_by_symbol(
                stop_loss_bps, max_hold_ms, max_spread_bps, trailing_decay_ratio,
                baseline_window_ms, total, wins, total_pnl
         FROM ranked WHERE rn = 1
-        ORDER BY total_pnl / total DESC"
-    ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            let total: i64 = row.get(9)?;
-            let wins: i64 = row.get(10)?;
-            let total_pnl: f64 = row.get(11)?;
-            let stats = compute_fleet_stats(total, wins, total_pnl);
-            Ok(SymbolBestConfig {
-                symbol: row.get(0)?,
-                config_id: row.get(1)?,
-                spike_threshold_bps: row.get(2)?,
-                target_ratio: row.get(3)?,
-                stop_loss_bps: row.get(4)?,
-                max_hold_ms: row.get(5)?,
-                max_spread_bps: row.get(6)?,
-                trailing_decay_ratio: row.get(7)?,
-                baseline_window_ms: row.get(8)?,
-                total_trades: total,
-                wins,
-                win_rate_pct: stats.win_rate_pct,
-                total_pnl_pct: total_pnl,
-                avg_pnl_pct: stats.avg_pnl_pct,
-            })
-        })
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("query: {e}"),
-            )
-        })?;
-
-    let result: Vec<SymbolBestConfig> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("row decode: {e}"),
-        )
-    })?;
+        ORDER BY total_pnl / total DESC",
+        [],
+    )?;
     Ok(Json(result))
 }
 
@@ -745,96 +761,97 @@ pub(crate) struct TrialRunSummary {
     scope_symbols_matched: i64,
 }
 
-pub(crate) async fn get_trial_runs(
-    State(state): State<Arc<HttpState>>,
-) -> Result<Json<Vec<TrialRunSummary>>, (axum::http::StatusCode, String)> {
-    let conn = open_readonly_conn(&state)?;
+fn decode_trial_run_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrialRunSummary> {
+    let total: i64 = row.get(3)?;
+    let wins: i64 = row.get(4)?;
+    let total_pnl: f64 = row.get(5)?;
+    Ok(TrialRunSummary {
+        run_id: row.get(0)?,
+        submitted_config_count: row.get(1)?,
+        config_count: row.get(2)?,
+        total_trades: total,
+        wins,
+        win_rate_pct: if total > 0 {
+            (wins as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        },
+        avg_pnl_pct: if total > 0 {
+            total_pnl / total as f64
+        } else {
+            0.0
+        },
+        total_pnl_pct: total_pnl,
+        first_trade_ms: row.get(6)?,
+        last_trade_ms: row.get(7)?,
+        apply_mode: row.get(8)?,
+        symbols_reset: row.get(9)?,
+        changed_ids_requested: row.get(10)?,
+        matched_changed_ids_old: row.get(11)?,
+        matched_changed_ids_new: row.get(12)?,
+        unmatched_changed_ids: row.get(13)?,
+        scope_symbols_requested: row.get(14)?,
+        scope_symbols_matched: row.get(15)?,
+    })
+}
 
-    let mut stmt = conn
-        .prepare(
-            "WITH runs AS (
-                SELECT run_id
-                FROM trial_runs_meta
-                WHERE run_id LIKE 'scout-%' OR run_id LIKE 'expand-%'
-                UNION
-                SELECT DISTINCT run_id
-                FROM trades
-                WHERE run_id LIKE 'scout-%' OR run_id LIKE 'expand-%'
-            ),
-            trade_stats AS (
-                SELECT t.run_id,
-                       COUNT(DISTINCT t.config_id) as config_count,
-                       COUNT(*) as total_trades,
-                       SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                       SUM(t.pnl_pct) as total_pnl,
-                       MIN(t.entry_ts_ms) as first_trade,
-                       MAX(t.exit_ts_ms) as last_trade
-                FROM trades t
-                WHERE t.run_id LIKE 'scout-%' OR t.run_id LIKE 'expand-%'
-                GROUP BY t.run_id
-            )
-            SELECT r.run_id,
-                   m.submitted_config_count as submitted_config_count,
-                   COALESCE(s.config_count, 0) as config_count,
-                   COALESCE(s.total_trades, 0) as total_trades,
-                   COALESCE(s.wins, 0) as wins,
-                   COALESCE(s.total_pnl, 0.0) as total_pnl,
-                   COALESCE(s.first_trade, m.applied_at_ms, 0) as first_trade,
-                   COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) as last_trade,
-                   COALESCE(m.apply_mode, 'full_replace') as apply_mode,
-                   COALESCE(m.symbols_reset, 0) as symbols_reset,
-                   COALESCE(m.changed_ids_requested, 0) as changed_ids_requested,
-                   COALESCE(m.matched_changed_ids_old, 0) as matched_changed_ids_old,
-                   COALESCE(m.matched_changed_ids_new, 0) as matched_changed_ids_new,
-                   COALESCE(m.unmatched_changed_ids, 0) as unmatched_changed_ids,
-                   COALESCE(m.scope_symbols_requested, 0) as scope_symbols_requested,
-                   COALESCE(m.scope_symbols_matched, 0) as scope_symbols_matched
-            FROM runs r
-            LEFT JOIN trade_stats s ON s.run_id = r.run_id
-            LEFT JOIN trial_runs_meta m ON m.run_id = r.run_id
-            ORDER BY COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) DESC",
+fn load_trial_run_summaries(
+    conn: &rusqlite::Connection,
+    run_filter_sql: &str,
+) -> Result<Vec<TrialRunSummary>, (axum::http::StatusCode, String)> {
+    let sql = format!(
+        "WITH runs AS (
+            SELECT run_id
+            FROM trial_runs_meta
+            WHERE {run_filter_sql}
+            UNION
+            SELECT DISTINCT run_id
+            FROM trades
+            WHERE {run_filter_sql}
+        ),
+        trade_stats AS (
+            SELECT t.run_id,
+                   COUNT(DISTINCT t.config_id) as config_count,
+                   COUNT(*) as total_trades,
+                   SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                   SUM(t.pnl_pct) as total_pnl,
+                   MIN(t.entry_ts_ms) as first_trade,
+                   MAX(t.exit_ts_ms) as last_trade
+            FROM trades t
+            WHERE {run_filter_sql}
+            GROUP BY t.run_id
         )
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("sql: {e}"),
-            )
-        })?;
+        SELECT r.run_id,
+               m.submitted_config_count as submitted_config_count,
+               COALESCE(s.config_count, 0) as config_count,
+               COALESCE(s.total_trades, 0) as total_trades,
+               COALESCE(s.wins, 0) as wins,
+               COALESCE(s.total_pnl, 0.0) as total_pnl,
+               COALESCE(s.first_trade, m.applied_at_ms, 0) as first_trade,
+               COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) as last_trade,
+               COALESCE(m.apply_mode, 'full_replace') as apply_mode,
+               COALESCE(m.symbols_reset, 0) as symbols_reset,
+               COALESCE(m.changed_ids_requested, 0) as changed_ids_requested,
+               COALESCE(m.matched_changed_ids_old, 0) as matched_changed_ids_old,
+               COALESCE(m.matched_changed_ids_new, 0) as matched_changed_ids_new,
+               COALESCE(m.unmatched_changed_ids, 0) as unmatched_changed_ids,
+               COALESCE(m.scope_symbols_requested, 0) as scope_symbols_requested,
+               COALESCE(m.scope_symbols_matched, 0) as scope_symbols_matched
+        FROM runs r
+        LEFT JOIN trade_stats s ON s.run_id = r.run_id
+        LEFT JOIN trial_runs_meta m ON m.run_id = r.run_id
+        ORDER BY COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) DESC"
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("sql: {e}"),
+        )
+    })?;
 
     let rows = stmt
-        .query_map([], |row| {
-            let total: i64 = row.get(3)?;
-            let wins: i64 = row.get(4)?;
-            let total_pnl: f64 = row.get(5)?;
-            Ok(TrialRunSummary {
-                run_id: row.get(0)?,
-                submitted_config_count: row.get(1)?,
-                config_count: row.get(2)?,
-                total_trades: total,
-                wins,
-                win_rate_pct: if total > 0 {
-                    (wins as f64 / total as f64) * 100.0
-                } else {
-                    0.0
-                },
-                avg_pnl_pct: if total > 0 {
-                    total_pnl / total as f64
-                } else {
-                    0.0
-                },
-                total_pnl_pct: total_pnl,
-                first_trade_ms: row.get(6)?,
-                last_trade_ms: row.get(7)?,
-                apply_mode: row.get(8)?,
-                symbols_reset: row.get(9)?,
-                changed_ids_requested: row.get(10)?,
-                matched_changed_ids_old: row.get(11)?,
-                matched_changed_ids_new: row.get(12)?,
-                unmatched_changed_ids: row.get(13)?,
-                scope_symbols_requested: row.get(14)?,
-                scope_symbols_matched: row.get(15)?,
-            })
-        })
+        .query_map([], decode_trial_run_summary_row)
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -842,12 +859,20 @@ pub(crate) async fn get_trial_runs(
             )
         })?;
 
-    let result: Vec<TrialRunSummary> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("row decode: {e}"),
         )
-    })?;
+    })
+}
+
+pub(crate) async fn get_trial_runs(
+    State(state): State<Arc<HttpState>>,
+) -> Result<Json<Vec<TrialRunSummary>>, (axum::http::StatusCode, String)> {
+    let conn = open_readonly_conn(&state)?;
+    let result =
+        load_trial_run_summaries(&conn, "run_id LIKE 'scout-%' OR run_id LIKE 'expand-%'")?;
     Ok(Json(result))
 }
 
@@ -855,101 +880,7 @@ pub(crate) async fn get_forward_runs(
     State(state): State<Arc<HttpState>>,
 ) -> Result<Json<Vec<TrialRunSummary>>, (axum::http::StatusCode, String)> {
     let conn = open_readonly_conn(&state)?;
-
-    let mut stmt = conn
-        .prepare(
-            "WITH runs AS (
-                SELECT run_id FROM trial_runs_meta WHERE run_id LIKE 'forward-%'
-                UNION
-                SELECT DISTINCT run_id FROM trades WHERE run_id LIKE 'forward-%'
-            ),
-            trade_stats AS (
-                SELECT t.run_id,
-                       COUNT(DISTINCT t.config_id) as config_count,
-                       COUNT(*) as total_trades,
-                       SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                       SUM(t.pnl_pct) as total_pnl,
-                       MIN(t.entry_ts_ms) as first_trade,
-                       MAX(t.exit_ts_ms) as last_trade
-                FROM trades t
-                WHERE t.run_id LIKE 'forward-%'
-                GROUP BY t.run_id
-            )
-            SELECT r.run_id,
-                   m.submitted_config_count as submitted_config_count,
-                   COALESCE(s.config_count, 0) as config_count,
-                   COALESCE(s.total_trades, 0) as total_trades,
-                   COALESCE(s.wins, 0) as wins,
-                   COALESCE(s.total_pnl, 0.0) as total_pnl,
-                   COALESCE(s.first_trade, m.applied_at_ms, 0) as first_trade,
-                   COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) as last_trade,
-                   COALESCE(m.apply_mode, 'full_replace') as apply_mode,
-                   COALESCE(m.symbols_reset, 0) as symbols_reset,
-                   COALESCE(m.changed_ids_requested, 0) as changed_ids_requested,
-                   COALESCE(m.matched_changed_ids_old, 0) as matched_changed_ids_old,
-                   COALESCE(m.matched_changed_ids_new, 0) as matched_changed_ids_new,
-                   COALESCE(m.unmatched_changed_ids, 0) as unmatched_changed_ids,
-                   COALESCE(m.scope_symbols_requested, 0) as scope_symbols_requested,
-                   COALESCE(m.scope_symbols_matched, 0) as scope_symbols_matched
-            FROM runs r
-            LEFT JOIN trade_stats s ON s.run_id = r.run_id
-            LEFT JOIN trial_runs_meta m ON m.run_id = r.run_id
-            ORDER BY COALESCE(s.last_trade, m.closed_at_ms, m.applied_at_ms, 0) DESC",
-        )
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("sql: {e}"),
-            )
-        })?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            let total: i64 = row.get(3)?;
-            let wins: i64 = row.get(4)?;
-            let total_pnl: f64 = row.get(5)?;
-            Ok(TrialRunSummary {
-                run_id: row.get(0)?,
-                submitted_config_count: row.get(1)?,
-                config_count: row.get(2)?,
-                total_trades: total,
-                wins,
-                win_rate_pct: if total > 0 {
-                    (wins as f64 / total as f64) * 100.0
-                } else {
-                    0.0
-                },
-                avg_pnl_pct: if total > 0 {
-                    total_pnl / total as f64
-                } else {
-                    0.0
-                },
-                total_pnl_pct: total_pnl,
-                first_trade_ms: row.get(6)?,
-                last_trade_ms: row.get(7)?,
-                apply_mode: row.get(8)?,
-                symbols_reset: row.get(9)?,
-                changed_ids_requested: row.get(10)?,
-                matched_changed_ids_old: row.get(11)?,
-                matched_changed_ids_new: row.get(12)?,
-                unmatched_changed_ids: row.get(13)?,
-                scope_symbols_requested: row.get(14)?,
-                scope_symbols_matched: row.get(15)?,
-            })
-        })
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("query: {e}"),
-            )
-        })?;
-
-    let result: Vec<TrialRunSummary> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("row decode: {e}"),
-        )
-    })?;
+    let result = load_trial_run_summaries(&conn, "run_id LIKE 'forward-%'")?;
     Ok(Json(result))
 }
 
@@ -965,8 +896,8 @@ pub(crate) async fn get_forward_by_symbol(
     let conn = open_readonly_conn(&state)?;
 
     let run_id = resolve_forward_run_id(&conn, query.run_id.as_deref())?;
-
-    let mut stmt = conn.prepare(
+    let result = load_symbol_best_configs(
+        &conn,
         "WITH ranked AS (
             SELECT t.symbol, c.id as config_id,
                    c.spike_threshold_bps, c.target_ratio,
@@ -986,45 +917,9 @@ pub(crate) async fn get_forward_by_symbol(
                stop_loss_bps, max_hold_ms, max_spread_bps, trailing_decay_ratio,
                baseline_window_ms, total, wins, total_pnl
         FROM ranked WHERE rn = 1
-        ORDER BY total_pnl / total DESC"
-    ).map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("sql: {e}")))?;
-
-    let rows = stmt
-        .query_map(rusqlite::params![run_id], |row| {
-            let total: i64 = row.get(9)?;
-            let wins: i64 = row.get(10)?;
-            let total_pnl: f64 = row.get(11)?;
-            let stats = compute_fleet_stats(total, wins, total_pnl);
-            Ok(SymbolBestConfig {
-                symbol: row.get(0)?,
-                config_id: row.get(1)?,
-                spike_threshold_bps: row.get(2)?,
-                target_ratio: row.get(3)?,
-                stop_loss_bps: row.get(4)?,
-                max_hold_ms: row.get(5)?,
-                max_spread_bps: row.get(6)?,
-                trailing_decay_ratio: row.get(7)?,
-                baseline_window_ms: row.get(8)?,
-                total_trades: total,
-                wins,
-                win_rate_pct: stats.win_rate_pct,
-                total_pnl_pct: total_pnl,
-                avg_pnl_pct: stats.avg_pnl_pct,
-            })
-        })
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("query: {e}"),
-            )
-        })?;
-
-    let result: Vec<SymbolBestConfig> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("row decode: {e}"),
-        )
-    })?;
+        ORDER BY total_pnl / total DESC",
+        rusqlite::params![run_id],
+    )?;
     Ok(Json(result))
 }
 
