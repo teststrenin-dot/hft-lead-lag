@@ -799,11 +799,20 @@ impl DbWriter {
                     "all async queues saturated; applying producer backpressure",
                     n,
                 );
-                if self.backpressure_tx.blocking_send(command).is_err() {
-                    let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                    warn!(
-                        "db writer backpressure queue closed, dropping {command_label} (total dropped: {dropped})"
-                    );
+                match self.backpressure_tx.try_send(command) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                        warn!(
+                            "db writer backpressure queue full, dropping {command_label} (total dropped: {dropped})"
+                        );
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
+                        warn!(
+                            "db writer backpressure queue closed, dropping {command_label} (total dropped: {dropped})"
+                        );
+                    }
                 }
             }
             EnqueueOutcome::DroppedClosed => {
@@ -1786,6 +1795,61 @@ mod tests {
             matches!(outcome, EnqueueOutcome::NeedsBackpressure(DbCommand::Trades { trades, .. }) if trades.len() == 1 && trades[0].symbol == "ADAUSDT")
         );
         assert_eq!(DROPPED_BATCHES.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn enqueue_command_backpressure_path_is_runtime_safe() {
+        DROPPED_BATCHES.store(0, Ordering::Relaxed);
+        OVERFLOWED_BATCHES.store(0, Ordering::Relaxed);
+
+        let (tx, _rx) = mpsc::channel::<DbCommand>(1);
+        let (overflow_tx, _overflow_rx) = mpsc::channel::<DbCommand>(1);
+        let (retry_tx, _retry_rx) = mpsc::channel::<DbCommand>(1);
+        let (spillover_tx, _spillover_rx) = mpsc::channel::<DbCommand>(1);
+        let (backpressure_tx, mut backpressure_rx) = mpsc::channel::<DbCommand>(1);
+
+        tx.try_send(DbCommand::Trades {
+            seq: 1,
+            trades: vec![sample_trade("BTCUSDT")],
+        })
+        .expect("pre-fill primary channel");
+        overflow_tx
+            .try_send(DbCommand::Trades {
+                seq: 2,
+                trades: vec![sample_trade("ETHUSDT")],
+            })
+            .expect("pre-fill overflow channel");
+        retry_tx
+            .try_send(DbCommand::Trades {
+                seq: 3,
+                trades: vec![sample_trade("SOLUSDT")],
+            })
+            .expect("pre-fill retry channel");
+        spillover_tx
+            .try_send(DbCommand::Trades {
+                seq: 4,
+                trades: vec![sample_trade("XRPUSDT")],
+            })
+            .expect("pre-fill spillover channel");
+
+        let writer = DbWriter {
+            tx,
+            overflow_tx,
+            retry_tx,
+            spillover_tx,
+            backpressure_tx,
+            next_seq: Arc::new(AtomicU64::new(0)),
+        };
+
+        // Must not panic when called from async runtime.
+        writer.send(vec![sample_trade("ADAUSDT")]);
+
+        let command = backpressure_rx
+            .try_recv()
+            .expect("backpressure queue should receive saturated command");
+        assert!(
+            matches!(command, DbCommand::Trades { trades, .. } if trades.len() == 1 && trades[0].symbol == "ADAUSDT")
+        );
     }
 
     #[tokio::test]

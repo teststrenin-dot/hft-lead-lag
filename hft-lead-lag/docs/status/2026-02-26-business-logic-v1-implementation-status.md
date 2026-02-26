@@ -97,6 +97,6 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 - Обновлять этот файл после каждого раунда ревью и после каждого фикса `P0/P1`.
 - Для изменения статуса пункта обязательно указывать код-референс в колонке `Evidence`.
 
-## Delivery Roadmap
+## Business Logic Roadmap
 - Чекпоинты реализации вынесены в отдельный документ:
-  - `docs/status/2026-02-26-business-logic-v1-checkpoints.md`
+  - `docs/status/2026-02-26-business-logic-roadmap.md`
