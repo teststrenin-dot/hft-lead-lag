@@ -213,7 +213,7 @@ impl EventLoopState {
         result: Result<hft_lead_lag::domain::BookTicker, hft_lead_lag::domain::ExchangeError>,
         drained: Vec<hft_lead_lag::domain::BookTicker>,
         screener: &ScreenerStore,
-        ws_tx: &tokio::sync::broadcast::Sender<MarketDataEvent>,
+        ws_tx: Option<&tokio::sync::broadcast::Sender<MarketDataEvent>>,
     ) -> Result<Vec<String>, hft_lead_lag::domain::ExchangeError> {
         let ticker = result?;
         let updated_symbols = updated_symbols_from_batch(&ticker, &drained);

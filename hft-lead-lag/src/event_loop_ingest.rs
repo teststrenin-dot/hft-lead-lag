@@ -41,13 +41,15 @@ pub(super) fn ingest_latest_batch<F: Fn() -> i64>(
             ticker.exchange_ts_ns,
             ticker.local_ts_ns,
         );
-        let _ = ctx.ws_tx.send(MarketDataEvent {
-            symbol: symbol.clone(),
-            exchange: ctx.exchange,
-            bid,
-            ask,
-            timestamp_ns: ticker.exchange_ts_ns,
-        });
+        if let Some(ws_tx) = ctx.ws_tx {
+            let _ = ws_tx.send(MarketDataEvent {
+                symbol: symbol.clone(),
+                exchange: ctx.exchange,
+                bid,
+                ask,
+                timestamp_ns: ticker.exchange_ts_ns,
+            });
+        }
     }
 }
 
@@ -57,7 +59,7 @@ pub(super) struct BatchIngestContext<'a, F: Fn() -> i64> {
     pub(super) metrics: &'a mut EventLoopMetrics,
     pub(super) now_ms: &'a F,
     pub(super) screener: &'a ScreenerStore,
-    pub(super) ws_tx: &'a tokio::sync::broadcast::Sender<MarketDataEvent>,
+    pub(super) ws_tx: Option<&'a tokio::sync::broadcast::Sender<MarketDataEvent>>,
 }
 
 pub(super) fn process_exchange_batch<F: Fn() -> i64>(

@@ -41,14 +41,14 @@ struct ExchangeTickContext<'a, 's> {
     strategy_exchange_routing: StrategyExchangeRouting,
     screener: &'a ScreenerStore,
     health_state: &'a HealthState,
-    ws_tx: &'a tokio::sync::broadcast::Sender<MarketDataEvent>,
+    ws_tx: Option<&'a tokio::sync::broadcast::Sender<MarketDataEvent>>,
 }
 
 pub(super) struct EventLoopRuntimeContext<'a> {
     pub(super) strategy_exchange_routing: StrategyExchangeRouting,
     pub(super) screener: &'a ScreenerStore,
     pub(super) health_state: &'a HealthState,
-    pub(super) ws_tx: &'a tokio::sync::broadcast::Sender<MarketDataEvent>,
+    pub(super) ws_tx: Option<&'a tokio::sync::broadcast::Sender<MarketDataEvent>>,
 }
 
 pub(super) async fn run_event_loop(

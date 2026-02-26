@@ -1,6 +1,7 @@
 # Business Logic v1 — Implementation Status Tracker
 
 Date: 2026-02-26
+Last sync: commits up to `ad041ca`
 Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 
 ## Status Legend
@@ -25,7 +26,7 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 ## 3) Portfolio Topology
 | Item | Status | Evidence | Notes |
 |---|---|---|---|
-| Ровно 2 портфеля (`A`, `B`) | `Implemented` | `src/application/services/portfolio_runtime.rs:10`, `src/domain/screener/mod.rs:276` | Слоты A/B всегда присутствуют. |
+| Динамический набор портфелей (`PORTFOLIO_IDS`, fallback на `A/B`) | `Implemented` | `src/main.rs:126`, `src/main.rs:180`, `src/application/services/portfolio_runtime.rs:57`, `src/domain/screener/mod.rs:321` | Количество и имена портфелей задаются через env; при пустом/некорректном вводе используется дефолт `A/B`. |
 | 1 портфель = 1 бот | `Partial` | `src/application/services/portfolio_runtime.rs:10` | Логическая модель есть, явной runtime-привязки «бот-процесс на портфель» нет. |
 | Размер портфеля 0..4 | `Implemented` | `src/application/services/portfolio_runtime.rs:5`, `src/application/services/portfolio_runtime.rs:156` | `MAX_ACTIVE_SYMBOLS=4`, допускается 0. |
 

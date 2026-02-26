@@ -1,6 +1,7 @@
 # Project Math Model — HFT Lead-Lag
 
 Date: 2026-02-26
+Last sync: commits up to `ad041ca`
 Scope: математика и формулы, реально используемые в runtime.
 
 ## 0) Units and Conventions
@@ -301,6 +302,13 @@ Scheduler cadence (portfolio rebalance):
 ```text
 event_loop_tick_every = 120_000 ms
 rebalance_allowed if now_ms - last_rebalance_ms >= 120_000
+```
+
+Portfolio cardinality (topology constraint):
+```text
+N_portfolios = len(configured_portfolio_ids), default = 2 (A,B)
+max_shortlist_capacity = N_portfolios * 5
+max_active_capacity = N_portfolios * 4
 ```
 
 Evidence:

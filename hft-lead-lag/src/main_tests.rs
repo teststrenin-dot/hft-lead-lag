@@ -886,7 +886,7 @@ async fn event_loop_state_process_exchange_result_updates_binance_map() {
             Ok(test_ticker("BTCUSDT", 100_000_000)),
             vec![test_ticker("ETHUSDT", 110_000_000)],
             &screener,
-            &ws_tx,
+            Some(&ws_tx),
         )
         .expect("exchange result should parse");
 
@@ -912,7 +912,7 @@ async fn event_loop_state_process_exchange_result_propagates_error() {
         )),
         Vec::new(),
         &screener,
-        &ws_tx,
+        Some(&ws_tx),
     );
 
     assert!(matches!(
@@ -977,7 +977,7 @@ fn process_exchange_batch_preserves_cached_symbols_and_ingests_only_updates() {
         metrics: &mut metrics,
         now_ms: &now_ms,
         screener: &screener,
-        ws_tx: &ws_tx,
+        ws_tx: Some(&ws_tx),
     };
 
     process_exchange_batch(
@@ -1139,7 +1139,7 @@ fn ingest_latest_batch_is_noop_for_empty_map() {
         metrics: &mut metrics,
         now_ms: &now_ms,
         screener: &screener,
-        ws_tx: &ws_tx,
+        ws_tx: Some(&ws_tx),
     };
 
     ingest_latest_batch(&latest, &mut ctx);
@@ -1168,7 +1168,7 @@ fn ingest_latest_batch_updates_counter_metrics_screener_and_ws() {
         metrics: &mut metrics,
         now_ms: &now_ms,
         screener: &screener,
-        ws_tx: &ws_tx,
+        ws_tx: Some(&ws_tx),
     };
 
     ingest_latest_batch(&latest, &mut ctx);
@@ -1205,7 +1205,7 @@ fn process_exchange_batch_rebuilds_and_ingests_latest_state() {
         metrics: &mut metrics,
         now_ms: &now_ms,
         screener: &screener,
-        ws_tx: &ws_tx,
+        ws_tx: Some(&ws_tx),
     };
 
     process_exchange_batch(
@@ -1263,7 +1263,7 @@ fn process_exchange_batch_with_single_tick_updates_once() {
         metrics: &mut metrics,
         now_ms: &now_ms,
         screener: &screener,
-        ws_tx: &ws_tx,
+        ws_tx: Some(&ws_tx),
     };
 
     process_exchange_batch(

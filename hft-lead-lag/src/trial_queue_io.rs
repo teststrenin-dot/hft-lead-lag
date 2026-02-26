@@ -203,7 +203,9 @@ pub(super) fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
     files.sort_by(|left, right| {
         match (queue_order_timestamp(left), queue_order_timestamp(right)) {
             (Some(left_ts), Some(right_ts)) => left_ts.cmp(&right_ts).then_with(|| left.cmp(right)),
-            _ => left.cmp(right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.cmp(right),
         }
     });
     files

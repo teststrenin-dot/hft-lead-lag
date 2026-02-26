@@ -86,6 +86,7 @@ const STRATEGY_BLACKLIST: &[&str] = &[
 ];
 const SIGNAL_CHECK_BUDGET_PER_TICK: usize = 256;
 const PORTFOLIO_IDS_ENV: &str = "PORTFOLIO_IDS";
+const ENABLE_SCREENER_CHART_PIPELINE: bool = false;
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
 
@@ -231,7 +232,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         },
     );
     spawn_gate_natr_refresher(screener.clone(), common_symbols.clone());
-    let ws_tx = start_api_servers(MIN_VOLUME_USD, screener.clone(), health_state.clone()).await?;
+    let ws_tx = start_api_servers(
+        MIN_VOLUME_USD,
+        screener.clone(),
+        health_state.clone(),
+        ENABLE_SCREENER_CHART_PIPELINE,
+    )
+    .await?;
 
     // Subscribe to screener symbols for live WS ticks.
     let (binance_subscribed, binance_subscribe_errors) = match binance
@@ -282,7 +289,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             strategy_exchange_routing,
             screener: &screener,
             health_state: health_state.as_ref(),
-            ws_tx: &ws_tx,
+            ws_tx: ws_tx.as_ref(),
         },
     )
     .await

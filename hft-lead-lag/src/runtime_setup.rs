@@ -264,8 +264,11 @@ pub(super) async fn start_api_servers(
     min_volume_usd: f64,
     screener: ScreenerStore,
     health_state: Arc<HealthState>,
-) -> Result<tokio::sync::broadcast::Sender<MarketDataEvent>, Box<dyn std::error::Error + Send + Sync>>
-{
+    enable_screener_chart_pipeline: bool,
+) -> Result<
+    Option<tokio::sync::broadcast::Sender<MarketDataEvent>>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let http_server = HttpServer::with_runtime(
         HttpServerConfig::default(),
         min_volume_usd,
@@ -275,21 +278,27 @@ pub(super) async fn start_api_servers(
     let http_listener = tokio::net::TcpListener::bind(http_server.bind_address()).await?;
     info!("HTTP server bound on {}", http_server.bind_address());
 
-    let ws_server = MarketDataServer::new(WsServerConfig::default());
-    let ws_tx = ws_server.transmitter();
-    let ws_listener = tokio::net::TcpListener::bind(ws_server.bind_address()).await?;
-    info!("WS server bound on {}", ws_server.bind_address());
-
     tokio::spawn(async move {
         if let Err(e) = http_server.serve(http_listener).await {
             error!("HTTP server failed: {}", e);
         }
     });
-    tokio::spawn(async move {
-        if let Err(e) = ws_server.serve(ws_listener).await {
-            error!("WS server failed: {}", e);
-        }
-    });
+
+    let ws_tx = if enable_screener_chart_pipeline {
+        let ws_server = MarketDataServer::new(WsServerConfig::default());
+        let ws_tx = ws_server.transmitter();
+        let ws_listener = tokio::net::TcpListener::bind(ws_server.bind_address()).await?;
+        info!("WS server bound on {}", ws_server.bind_address());
+        tokio::spawn(async move {
+            if let Err(e) = ws_server.serve(ws_listener).await {
+                error!("WS server failed: {}", e);
+            }
+        });
+        Some(ws_tx)
+    } else {
+        info!("WS server disabled: screener chart pipeline is off");
+        None
+    };
 
     Ok(ws_tx)
 }
