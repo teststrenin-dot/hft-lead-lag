@@ -521,6 +521,14 @@ fn portfolio_rebalance_cadence_and_no_overlap_active_symbols() {
     let b_first = first
         .get(&crate::application::services::PortfolioId::B)
         .expect("portfolio B");
+    assert!(
+        !a_first.active_symbols.is_empty(),
+        "portfolio A must receive active symbols when enough candidates exist"
+    );
+    assert!(
+        !b_first.active_symbols.is_empty(),
+        "portfolio B must receive active symbols when enough candidates exist"
+    );
 
     let overlap_first: Vec<&String> = a_first
         .active_symbols
@@ -601,10 +609,16 @@ fn stop_loss_streak_triggers_cooldown_exclusion_until_expiry() {
 
     store.maybe_rebalance_portfolios(600_000);
     let baseline = store.portfolio_assignment_v1();
-    let baseline_a = baseline
-        .get(&crate::application::services::PortfolioId::A)
-        .expect("portfolio A");
-    assert!(baseline_a.active_symbols.iter().any(|s| s == "XRPUSDT"));
+    let baseline_has_symbol = baseline.values().any(|state| {
+        state
+            .active_symbols
+            .iter()
+            .any(|symbol| symbol == "XRPUSDT")
+    });
+    assert!(
+        baseline_has_symbol,
+        "symbol must be assigned before cooldown trigger"
+    );
 
     for ts in [800_000_i64, 820_000, 840_000, 860_000, 880_000] {
         store.observe_closed_trade_for_portfolio("XRPUSDT", -0.05, true, ts);
@@ -612,21 +626,27 @@ fn stop_loss_streak_triggers_cooldown_exclusion_until_expiry() {
 
     store.maybe_rebalance_portfolios(900_000);
     let during = store.portfolio_assignment_v1();
-    let during_a = during
-        .get(&crate::application::services::PortfolioId::A)
-        .expect("portfolio A");
+    let during_has_symbol = during.values().any(|state| {
+        state
+            .active_symbols
+            .iter()
+            .any(|symbol| symbol == "XRPUSDT")
+    });
     assert!(
-        !during_a.active_symbols.iter().any(|s| s == "XRPUSDT"),
+        !during_has_symbol,
         "symbol must be excluded while cooldown active"
     );
 
     store.maybe_rebalance_portfolios(1_200_001);
     let after = store.portfolio_assignment_v1();
-    let after_a = after
-        .get(&crate::application::services::PortfolioId::A)
-        .expect("portfolio A");
+    let after_has_symbol = after.values().any(|state| {
+        state
+            .active_symbols
+            .iter()
+            .any(|symbol| symbol == "XRPUSDT")
+    });
     assert!(
-        after_a.active_symbols.iter().any(|s| s == "XRPUSDT"),
+        after_has_symbol,
         "symbol should be eligible again after cooldown expiry"
     );
 }

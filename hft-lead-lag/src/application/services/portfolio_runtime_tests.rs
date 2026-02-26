@@ -1,6 +1,7 @@
 use super::portfolio_runtime::{
     eligible, rank_candidates, PortfolioEngineV1, PortfolioId, SymbolGuardStateV1, SymbolStatsV1,
 };
+use std::collections::HashSet;
 
 fn stats(
     symbol: &str,
@@ -99,6 +100,48 @@ fn portfolio_runtime_assign_without_overlap_enforces_top5_and_max4() {
         .filter(|sym| b_state.active_symbols.contains(*sym))
         .collect();
     assert!(overlap.is_empty(), "active symbols must not overlap");
+}
+
+#[test]
+fn portfolio_runtime_assign_without_overlap_balances_identical_candidate_pool() {
+    let engine = PortfolioEngineV1::new();
+    let pool = vec![
+        stats("S1", 6, 10, 6, 4, 0.10),
+        stats("S2", 6, 10, 6, 4, 0.10),
+        stats("S3", 6, 10, 6, 4, 0.10),
+        stats("S4", 6, 10, 6, 4, 0.10),
+        stats("S5", 6, 10, 6, 4, 0.10),
+        stats("S6", 6, 10, 6, 4, 0.10),
+    ];
+
+    let assigned = engine.assign_without_overlap(&pool, &pool, 0);
+    let a_state = assigned.get(&PortfolioId::A).expect("state A");
+    let b_state = assigned.get(&PortfolioId::B).expect("state B");
+    assert_eq!(a_state.shortlist.len(), 5);
+    assert_eq!(b_state.shortlist.len(), 5);
+    assert!(
+        !a_state.active_symbols.is_empty() && !b_state.active_symbols.is_empty(),
+        "identical pools must not starve one portfolio"
+    );
+
+    let overlap: Vec<&String> = a_state
+        .active_symbols
+        .iter()
+        .filter(|sym| b_state.active_symbols.contains(*sym))
+        .collect();
+    assert!(overlap.is_empty(), "active symbols must not overlap");
+
+    let union: HashSet<String> = a_state
+        .active_symbols
+        .iter()
+        .chain(b_state.active_symbols.iter())
+        .cloned()
+        .collect();
+    assert_eq!(
+        union.len(),
+        5,
+        "all shortlisted symbols must be assigned to exactly one portfolio"
+    );
 }
 
 #[test]

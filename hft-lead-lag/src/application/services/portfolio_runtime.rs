@@ -101,19 +101,41 @@ impl PortfolioEngineV1 {
         let shortlist_b = self.build_shortlist(portfolio_b_candidates, now_ms);
 
         let mut ownership: HashMap<String, (PortfolioId, SymbolStatsV1)> = HashMap::new();
+        let mut owner_counts: HashMap<PortfolioId, usize> =
+            HashMap::from([(PortfolioId::A, 0_usize), (PortfolioId::B, 0_usize)]);
 
         for (portfolio_id, shortlist) in [
             (PortfolioId::A, &shortlist_a),
             (PortfolioId::B, &shortlist_b),
         ] {
             for stats in shortlist {
-                match ownership.get(&stats.symbol) {
+                match ownership.get(&stats.symbol).cloned() {
                     None => {
                         ownership.insert(stats.symbol.clone(), (portfolio_id, stats.clone()));
+                        *owner_counts.entry(portfolio_id).or_default() += 1;
                     }
-                    Some((_, current)) => {
-                        if rank_tuple_cmp(stats, current) == Ordering::Less {
+                    Some((current_owner, current)) => {
+                        let should_take = match rank_tuple_cmp(stats, &current) {
+                            Ordering::Less => true,
+                            Ordering::Equal => {
+                                let candidate_count =
+                                    owner_counts.get(&portfolio_id).copied().unwrap_or(0);
+                                let current_count =
+                                    owner_counts.get(&current_owner).copied().unwrap_or(0);
+                                // Deterministic tie-break: keep active sets balanced.
+                                candidate_count < current_count
+                            }
+                            Ordering::Greater => false,
+                        };
+
+                        if should_take {
                             ownership.insert(stats.symbol.clone(), (portfolio_id, stats.clone()));
+                            if current_owner != portfolio_id {
+                                if let Some(count) = owner_counts.get_mut(&current_owner) {
+                                    *count = count.saturating_sub(1);
+                                }
+                                *owner_counts.entry(portfolio_id).or_default() += 1;
+                            }
                         }
                     }
                 }
