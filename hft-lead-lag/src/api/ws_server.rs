@@ -12,7 +12,6 @@ use axum::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
-use tracing::info;
 
 use crate::infrastructure::rest::{BinanceRestClient, GateRestClient};
 
@@ -43,7 +42,6 @@ pub struct MarketDataEvent {
 pub struct WsServerConfig {
     pub bind_address: String,
     pub port: u16,
-    pub max_clients: usize,
 }
 
 impl Default for WsServerConfig {
@@ -51,7 +49,6 @@ impl Default for WsServerConfig {
         Self {
             bind_address: "0.0.0.0".to_string(),
             port: 8181,
-            max_clients: 100,
         }
     }
 }
@@ -74,21 +71,9 @@ impl MarketDataServer {
         self.tx.clone()
     }
 
-    /// Publish market data event
-    pub fn publish(&self, event: MarketDataEvent) {
-        let _ = self.tx.send(event);
-    }
-
     /// Get bind address
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.config.bind_address, self.config.port)
-    }
-
-    /// Start WebSocket server for market data broadcasting
-    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = tokio::net::TcpListener::bind(self.bind_address()).await?;
-        info!("Market data server listening on {}", self.bind_address());
-        self.serve(listener).await
     }
 
     /// Start serving on a pre-bound listener (fail-fast: bind in main, serve in task)

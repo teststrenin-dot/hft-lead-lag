@@ -9,7 +9,6 @@ use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use std::sync::Arc;
-use tracing::info;
 
 use crate::domain::screener::ScreenerStore;
 
@@ -75,19 +74,6 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub fn new(config: HttpServerConfig) -> Self {
-        Self::with_min_volume(config, 10_000_000.0)
-    }
-
-    pub fn with_min_volume(config: HttpServerConfig, min_volume_usd: f64) -> Self {
-        Self::with_runtime(
-            config,
-            min_volume_usd,
-            ScreenerStore::default(),
-            Arc::new(HealthState::new()),
-        )
-    }
-
     pub fn with_runtime(
         config: HttpServerConfig,
         min_volume_usd: f64,
@@ -104,13 +90,6 @@ impl HttpServer {
 
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.config.bind_address, self.config.port)
-    }
-
-    /// Start the HTTP API server
-    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = tokio::net::TcpListener::bind(self.bind_address()).await?;
-        info!("HTTP server listening on {}", self.bind_address());
-        self.serve(listener).await
     }
 
     /// Start serving on a pre-bound listener (fail-fast: bind in main, serve in task)
