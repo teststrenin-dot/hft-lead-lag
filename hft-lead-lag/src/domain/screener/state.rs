@@ -191,6 +191,7 @@ impl SymbolState {
             &self.price_samples,
             window_ms,
             self.gate_natr_30m_pct,
+            None,
         );
     }
 }

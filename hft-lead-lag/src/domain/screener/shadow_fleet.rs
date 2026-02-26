@@ -445,6 +445,7 @@ impl ShadowFleet {
                 samples,
                 window_ms,
                 meta.gate_natr_30m_pct_at_entry,
+                meta.run_id,
             );
 
             let session_n = trader.session_trades();
@@ -453,14 +454,21 @@ impl ShadowFleet {
             if session_n > prev_n {
                 let new_count = session_n - prev_n;
                 let deque = trader.completed_trades();
+                let run_ids = trader.completed_trade_run_ids();
                 let start = deque.len().saturating_sub(new_count);
                 let sym = meta.symbol.to_string();
-                for trade in deque.iter().skip(start) {
+                for trade_idx in start..deque.len() {
+                    let trade = &deque[trade_idx];
+                    let trade_run_id = run_ids
+                        .get(trade_idx)
+                        .cloned()
+                        .flatten()
+                        .or_else(|| meta.run_id.map(|s| s.to_string()));
                     self.policy[idx].observe_trade(trade);
                     self.pending_trades.push_back(FleetTrade {
                         config_id: *config_id,
                         symbol: sym.clone(),
-                        run_id: meta.run_id.map(|s| s.to_string()),
+                        run_id: trade_run_id,
                         trade: trade.clone(),
                     });
                 }
@@ -550,6 +558,7 @@ impl ShadowFleet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::screener::price_samples::PriceSample;
     use crate::domain::screener::shadow_trader::Direction;
 
     fn approx_eq(left: f64, right: f64, eps: f64) {
@@ -772,5 +781,103 @@ mod tests {
             top.iter().all(|snapshot| snapshot.config_id != disabled_id),
             "disabled configs must not be returned by top_policy_configs"
         );
+    }
+
+    #[test]
+    fn fleet_trade_run_id_is_bound_to_entry_not_close_tick_context() {
+        let cfg = TraderConfig {
+            spike_threshold_bps: 10.0,
+            target_ratio: 0.9,
+            stop_loss_bps: 999.0,
+            max_hold_ms: 1,
+            max_spread_bps: 0.0,
+            trailing_decay_ratio: 0.5,
+            baseline_window_ms: 10_000,
+            fill_delay_ms: 0,
+            cooldown_ms: 0,
+            warmup_ms: 0,
+            quote_freshness_ms: 1_000,
+            taker_fee: 0.000_5,
+            min_baseline_samples: 2,
+        };
+        let mut fleet = ShadowFleet::new(&[cfg]);
+
+        let mut samples = PriceSamples::default();
+        for i in 0..5 {
+            samples.push(PriceSample {
+                ts_ms: 900 + i * 10,
+                gate_bid: 100.0,
+                gate_ask: 100.0,
+                binance_bid: 100.0,
+                binance_ask: 100.0,
+            });
+        }
+        let bn = Quote {
+            bid: 100.2,
+            ask: 100.2,
+            ts_ms: 1_000,
+        };
+        let gt = Quote {
+            bid: 100.0,
+            ask: 100.0,
+            ts_ms: 1_000,
+        };
+        let window_ms = 120_000;
+
+        // Entry created and filled under run-old.
+        fleet.tick_all(
+            1_000,
+            &bn,
+            &gt,
+            &samples,
+            window_ms,
+            FleetTickMeta {
+                symbol: "BTCUSDT",
+                gate_natr_30m_pct_at_entry: 0.0,
+                run_id: Some("run-old"),
+            },
+        );
+        fleet.tick_all(
+            1_001,
+            &bn,
+            &gt,
+            &samples,
+            window_ms,
+            FleetTickMeta {
+                symbol: "BTCUSDT",
+                gate_natr_30m_pct_at_entry: 0.0,
+                run_id: Some("run-old"),
+            },
+        );
+
+        // Exit happens later under run-new context, but trade must keep run-old.
+        fleet.tick_all(
+            1_003,
+            &bn,
+            &gt,
+            &samples,
+            window_ms,
+            FleetTickMeta {
+                symbol: "BTCUSDT",
+                gate_natr_30m_pct_at_entry: 0.0,
+                run_id: Some("run-new"),
+            },
+        );
+        fleet.tick_all(
+            1_004,
+            &bn,
+            &gt,
+            &samples,
+            window_ms,
+            FleetTickMeta {
+                symbol: "BTCUSDT",
+                gate_natr_30m_pct_at_entry: 0.0,
+                run_id: Some("run-new"),
+            },
+        );
+
+        let drained = fleet.drain_trades();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].run_id.as_deref(), Some("run-old"));
     }
 }

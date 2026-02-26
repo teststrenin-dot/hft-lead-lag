@@ -33,6 +33,7 @@ struct OpenPosition {
     spike_bps: f64,
     gate_spread_at_entry_bps: f64,
     gate_natr_30m_pct_at_entry: f64,
+    run_id: Option<String>,
     /// Highest unrealized profit seen (bps) — for trailing take-profit.
     peak_unrealized_bps: f64,
     /// True once unrealized reaches breakeven threshold (spike * target_ratio).
@@ -76,6 +77,7 @@ enum PendingOrder {
         spike_bps: f64,
         gate_spread_at_entry_bps: f64,
         gate_natr_30m_pct_at_entry: f64,
+        run_id: Option<String>,
     },
     Exit {
         fire_ts_ms: i64,
@@ -158,6 +160,7 @@ pub struct ShadowTrader {
     position: Option<OpenPosition>,
     pending: Option<PendingOrder>,
     completed_trades: VecDeque<ClosedTrade>,
+    completed_trade_run_ids: VecDeque<Option<String>>,
     session_total_pnl_pct: f64,
     session_trades: usize,
     session_wins: usize,
@@ -180,6 +183,7 @@ impl ShadowTrader {
             position: None,
             pending: None,
             completed_trades: VecDeque::new(),
+            completed_trade_run_ids: VecDeque::new(),
             session_total_pnl_pct: 0.0,
             session_trades: 0,
             session_wins: 0,
@@ -196,6 +200,10 @@ impl ShadowTrader {
 
     pub fn completed_trades(&self) -> &VecDeque<ClosedTrade> {
         &self.completed_trades
+    }
+
+    pub fn completed_trade_run_ids(&self) -> &VecDeque<Option<String>> {
+        &self.completed_trade_run_ids
     }
 
     pub fn session_trades(&self) -> usize {
@@ -216,7 +224,7 @@ impl ShadowTrader {
         samples: &PriceSamples,
         window_ms: i64,
     ) {
-        self.tick_with_context(ts_ms, binance, gate, samples, window_ms, 0.0);
+        self.tick_with_context(ts_ms, binance, gate, samples, window_ms, 0.0, None);
     }
 
     pub fn tick_with_context(
@@ -227,6 +235,7 @@ impl ShadowTrader {
         samples: &PriceSamples,
         window_ms: i64,
         gate_natr_30m_pct_at_entry: f64,
+        run_id: Option<&str>,
     ) {
         if self.start_ts_ms.is_none() {
             self.start_ts_ms = Some(ts_ms);
@@ -252,7 +261,14 @@ impl ShadowTrader {
             return;
         }
         self.try_exit(ts_ms, gate);
-        self.try_entry(ts_ms, binance, gate, samples, gate_natr_30m_pct_at_entry);
+        self.try_entry(
+            ts_ms,
+            binance,
+            gate,
+            samples,
+            gate_natr_30m_pct_at_entry,
+            run_id,
+        );
     }
 
     // -- Fill pending orders -------------------------------------------------
@@ -278,6 +294,7 @@ impl ShadowTrader {
                 spike_bps,
                 gate_spread_at_entry_bps,
                 gate_natr_30m_pct_at_entry,
+                run_id,
                 ..
             } => {
                 let gate_price = match direction {
@@ -291,6 +308,7 @@ impl ShadowTrader {
                     spike_bps,
                     gate_spread_at_entry_bps,
                     gate_natr_30m_pct_at_entry,
+                    run_id,
                     peak_unrealized_bps: 0.0,
                     breakeven_activated: false,
                 });
@@ -374,6 +392,7 @@ impl ShadowTrader {
         gate: &Quote,
         samples: &PriceSamples,
         gate_natr_30m_pct_at_entry: f64,
+        run_id: Option<&str>,
     ) {
         if self.position.is_some() || self.pending.is_some() || ts_ms < self.cooldown_until_ms {
             return;
@@ -405,6 +424,7 @@ impl ShadowTrader {
                 spike_bps: gap_bps,
                 gate_spread_at_entry_bps: spread_bps,
                 gate_natr_30m_pct_at_entry,
+                run_id: run_id.map(|value| value.to_string()),
             });
         }
     }
@@ -535,6 +555,7 @@ impl ShadowTrader {
             hold_ms,
             early_stop_churn,
         });
+        self.completed_trade_run_ids.push_back(pos.run_id.clone());
         self.session_total_pnl_pct += pnl_pct;
         self.session_trades += 1;
         if pnl_pct > 0.0 {
@@ -548,6 +569,7 @@ impl ShadowTrader {
                 break;
             }
             self.completed_trades.pop_front();
+            self.completed_trade_run_ids.pop_front();
         }
     }
 
@@ -1130,6 +1152,7 @@ mod tests {
             peak_unrealized_bps: peak_bps,
             gate_spread_at_entry_bps: 0.0,
             gate_natr_30m_pct_at_entry: 0.0,
+            run_id: None,
         }
     }
 
