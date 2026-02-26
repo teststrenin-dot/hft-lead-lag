@@ -5,10 +5,69 @@
 //! - Executes arbitrage when spread exceeds threshold
 //! - Manages position lifecycle
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 use crate::domain::{messages::ticks_to_decimal, BookTicker, ExchangeId};
+
+const OFFSET_WINDOW_SAMPLES: usize = 256;
+const OFFSET_RECOMPUTE_INTERVAL: u32 = 64;
+const MAX_OFFSET_SAMPLE_ABS_NS: i64 = 6 * 60 * 60 * 1_000_000_000;
+
+#[derive(Debug, Clone)]
+struct ExchangeClockOffset {
+    samples: VecDeque<i64>,
+    cached_median_ns: i64,
+    pending_updates: u32,
+}
+
+impl Default for ExchangeClockOffset {
+    fn default() -> Self {
+        Self {
+            samples: VecDeque::with_capacity(OFFSET_WINDOW_SAMPLES),
+            cached_median_ns: 0,
+            pending_updates: 0,
+        }
+    }
+}
+
+impl ExchangeClockOffset {
+    fn observe(&mut self, local_ts_ns: i64, exchange_ts_ns: i64) {
+        if local_ts_ns <= 0 || exchange_ts_ns <= 0 {
+            return;
+        }
+        let sample = local_ts_ns.saturating_sub(exchange_ts_ns);
+        if sample.abs() > MAX_OFFSET_SAMPLE_ABS_NS {
+            return;
+        }
+
+        self.samples.push_back(sample);
+        while self.samples.len() > OFFSET_WINDOW_SAMPLES {
+            self.samples.pop_front();
+        }
+
+        self.pending_updates = self.pending_updates.saturating_add(1);
+        if self.samples.len() == 1 || self.pending_updates >= OFFSET_RECOMPUTE_INTERVAL {
+            self.recompute_median();
+            self.pending_updates = 0;
+        }
+    }
+
+    fn corrected_exchange_ts_ns(&self, exchange_ts_ns: i64) -> i64 {
+        exchange_ts_ns.saturating_add(self.cached_median_ns)
+    }
+
+    fn recompute_median(&mut self) {
+        if self.samples.is_empty() {
+            self.cached_median_ns = 0;
+            return;
+        }
+        let mut sorted: Vec<i64> = self.samples.iter().copied().collect();
+        sorted.sort_unstable();
+        self.cached_median_ns = sorted[sorted.len() / 2];
+    }
+}
 
 /// Lead-lag signal
 #[derive(Debug, Clone)]
@@ -29,8 +88,29 @@ pub struct LeadLagSignal {
     pub lagger_ask_ticks: i64,
     /// Spread in basis points
     pub spread_bps: f64,
+    /// Direction selected by winning spread branch.
+    pub direction: SignalDirection,
+    /// `spread(primary.bid, hedge.ask)` branch (up-dislocation).
+    pub bid_ask_bps: f64,
+    /// `spread(hedge.bid, primary.ask)` branch (down-dislocation).
+    pub ask_bid_bps: f64,
     /// Timestamp of signal (ns)
     pub timestamp_ns: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalDirection {
+    LongLagger,
+    ShortLagger,
+}
+
+impl SignalDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LongLagger => "LONG_LAGGER",
+            Self::ShortLagger => "SHORT_LAGGER",
+        }
+    }
 }
 
 impl LeadLagSignal {
@@ -103,6 +183,8 @@ pub struct LeadLagStrategy {
     primary_books: Arc<RwLock<std::collections::HashMap<String, BookTicker>>>,
     /// Latest book tickers from hedge exchange
     hedge_books: Arc<RwLock<std::collections::HashMap<String, BookTicker>>>,
+    primary_clock_offset: Arc<Mutex<ExchangeClockOffset>>,
+    hedge_clock_offset: Arc<Mutex<ExchangeClockOffset>>,
 }
 
 impl LeadLagStrategy {
@@ -112,12 +194,18 @@ impl LeadLagStrategy {
             positions: Arc::new(RwLock::new(Vec::new())),
             primary_books: Arc::new(RwLock::new(std::collections::HashMap::new())),
             hedge_books: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            primary_clock_offset: Arc::new(Mutex::new(ExchangeClockOffset::default())),
+            hedge_clock_offset: Arc::new(Mutex::new(ExchangeClockOffset::default())),
         }
     }
 
     /// Update primary exchange book ticker
     pub async fn update_primary_book(&self, ticker: BookTicker) {
         let symbol = String::from_utf8_lossy(&ticker.symbol).to_string();
+        self.primary_clock_offset
+            .lock()
+            .expect("primary clock offset mutex poisoned")
+            .observe(ticker.local_ts_ns, ticker.exchange_ts_ns);
         let mut books = self.primary_books.write().await;
         books.insert(symbol, ticker);
     }
@@ -125,6 +213,10 @@ impl LeadLagStrategy {
     /// Update hedge exchange book ticker
     pub async fn update_hedge_book(&self, ticker: BookTicker) {
         let symbol = String::from_utf8_lossy(&ticker.symbol).to_string();
+        self.hedge_clock_offset
+            .lock()
+            .expect("hedge clock offset mutex poisoned")
+            .observe(ticker.local_ts_ns, ticker.exchange_ts_ns);
         let mut books = self.hedge_books.write().await;
         books.insert(symbol, ticker);
     }
@@ -139,7 +231,18 @@ impl LeadLagStrategy {
 
         // Binance(primary) is the oracle. If hedge quote is newer, skip this cycle:
         // we do not trade when lead source is unclear.
-        if primary.exchange_ts_ns < hedge.exchange_ts_ns {
+        let primary_corrected_ts_ns = self
+            .primary_clock_offset
+            .lock()
+            .expect("primary clock offset mutex poisoned")
+            .corrected_exchange_ts_ns(primary.exchange_ts_ns);
+        let hedge_corrected_ts_ns = self
+            .hedge_clock_offset
+            .lock()
+            .expect("hedge clock offset mutex poisoned")
+            .corrected_exchange_ts_ns(hedge.exchange_ts_ns);
+
+        if primary_corrected_ts_ns < hedge_corrected_ts_ns {
             return None;
         }
 
@@ -148,7 +251,11 @@ impl LeadLagStrategy {
         // 2) ask/bid leg:  hedge.bid    vs primary.ask (down-dislocation)
         let bid_ask_bps = directional_spread_bps(primary.bid_price_ticks, hedge.ask_price_ticks);
         let ask_bid_bps = directional_spread_bps(hedge.bid_price_ticks, primary.ask_price_ticks);
-        let spread_bps = bid_ask_bps.max(ask_bid_bps);
+        let (spread_bps, direction) = if bid_ask_bps >= ask_bid_bps {
+            (bid_ask_bps, SignalDirection::LongLagger)
+        } else {
+            (ask_bid_bps, SignalDirection::ShortLagger)
+        };
 
         if spread_bps >= self.config.min_entry_spread_bps {
             Some(LeadLagSignal {
@@ -160,6 +267,9 @@ impl LeadLagStrategy {
                 lagger_bid_ticks: hedge.bid_price_ticks,
                 lagger_ask_ticks: hedge.ask_price_ticks,
                 spread_bps,
+                direction,
+                bid_ask_bps,
+                ask_bid_bps,
                 timestamp_ns: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64,
             })
         } else {
@@ -198,6 +308,16 @@ mod tests {
     }
 
     fn ticker(symbol: &str, bid: f64, ask: f64, exchange_ts_ns: i64) -> BookTicker {
+        ticker_with_local(symbol, bid, ask, exchange_ts_ns, exchange_ts_ns)
+    }
+
+    fn ticker_with_local(
+        symbol: &str,
+        bid: f64,
+        ask: f64,
+        exchange_ts_ns: i64,
+        local_ts_ns: i64,
+    ) -> BookTicker {
         BookTicker::new(
             Bytes::copy_from_slice(symbol.as_bytes()),
             decimal_to_ticks(bid),
@@ -205,7 +325,7 @@ mod tests {
             1,
             1,
             exchange_ts_ns,
-            exchange_ts_ns,
+            local_ts_ns,
         )
     }
 
@@ -245,6 +365,7 @@ mod tests {
             .await
             .expect("bid/ask leg should trigger");
         assert!(signal.spread_bps > 50.0);
+        assert_eq!(signal.direction, SignalDirection::LongLagger);
         assert_eq!(signal.leader, ExchangeId::BinanceFutures);
         assert_eq!(signal.lagger, ExchangeId::GateFutures);
     }
@@ -268,7 +389,44 @@ mod tests {
             .await
             .expect("ask/bid leg should trigger");
         assert!(signal.spread_bps > 20.0);
+        assert_eq!(signal.direction, SignalDirection::ShortLagger);
         assert_eq!(signal.leader, ExchangeId::BinanceFutures);
         assert_eq!(signal.lagger, ExchangeId::GateFutures);
+    }
+
+    #[tokio::test]
+    async fn check_signal_does_not_drop_primary_when_hedge_clock_is_ahead() {
+        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+            min_entry_spread_bps: 50.0,
+            symbols: vec!["BTCUSDT".to_string()],
+            ..Default::default()
+        });
+
+        // Hedge exchange clock is +1h ahead, but local receive order still shows
+        // primary as fresher for this decision cycle.
+        strategy
+            .update_hedge_book(ticker_with_local(
+                "BTCUSDT",
+                100.0,
+                101.0,
+                3_601_900_000_000,
+                1_900_000_000,
+            ))
+            .await;
+        strategy
+            .update_primary_book(ticker_with_local(
+                "BTCUSDT",
+                110.0,
+                111.0,
+                2_000_000_000,
+                2_000_000_000,
+            ))
+            .await;
+
+        let signal = strategy
+            .check_signal("BTCUSDT")
+            .await
+            .expect("clock offset on hedge must not suppress valid primary-led signal");
+        assert!(signal.spread_bps > 50.0);
     }
 }

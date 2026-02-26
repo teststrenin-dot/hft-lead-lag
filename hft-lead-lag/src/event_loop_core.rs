@@ -298,11 +298,14 @@ impl EventLoopState {
             if let Some(signal) = strategy.check_signal(&symbol).await {
                 self.signal_count += 1;
                 info!(
-                    "{} signal #{}: {} | spread={:.2}bps | {}",
+                    "{} signal #{}: {} | spread={:.2}bps | dir={} | bid_ask={:.2}bps ask_bid={:.2}bps | {}",
                     signal.strategy,
                     self.signal_count,
                     signal.symbol,
                     signal.spread_bps,
+                    signal.direction,
+                    signal.bid_ask_bps,
+                    signal.ask_bid_bps,
                     signal.context
                 );
             }

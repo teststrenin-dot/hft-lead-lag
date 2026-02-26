@@ -3,6 +3,9 @@ use super::{
     RuntimeStrategy, ScreenerStore, StrategyExchangeRouting,
 };
 use hft_lead_lag::MarketDataStream;
+use std::time::Duration;
+
+const PORTFOLIO_REBALANCE_SCHEDULER_INTERVAL_MS: u64 = 2 * 60 * 1000;
 
 async fn handle_exchange_tick(
     state: &mut EventLoopState,
@@ -56,6 +59,10 @@ pub(super) async fn run_event_loop(
     runtime_context: EventLoopRuntimeContext<'_>,
 ) -> ! {
     let mut state = EventLoopState::new();
+    let mut portfolio_rebalance_interval = tokio::time::interval(Duration::from_millis(
+        PORTFOLIO_REBALANCE_SCHEDULER_INTERVAL_MS,
+    ));
+    portfolio_rebalance_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let strategy_symbol_set: std::collections::HashSet<&str> =
         strategy_symbols.iter().map(String::as_str).collect();
     let tick_context = ExchangeTickContext {
@@ -91,6 +98,12 @@ pub(super) async fn run_event_loop(
 
             _ = state.signal_interval.tick() => {
                 state.handle_signal_tick(strategy).await;
+            }
+
+            _ = portfolio_rebalance_interval.tick() => {
+                runtime_context
+                    .screener
+                    .portfolio_scheduler_tick_v1(EventLoopState::now_ms());
             }
         }
     }

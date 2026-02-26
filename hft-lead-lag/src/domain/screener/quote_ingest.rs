@@ -16,6 +16,7 @@ fn update_symbol_state_and_drain_trades(
     bid: f64,
     ask: f64,
     clocks: TimeDomainSample,
+    adjusted_exchange_ts_ms: i64,
 ) -> QuoteUpdateResult {
     let mut state = store.symbols.entry(symbol.to_string()).or_default();
     let state = state.value_mut();
@@ -24,7 +25,7 @@ fn update_symbol_state_and_drain_trades(
     let quote = Quote {
         bid,
         ask,
-        ts_ms: clocks.exchange_event_ts_ms,
+        ts_ms: adjusted_exchange_ts_ms,
     };
 
     if !state.ingest_quote(exchange, quote, ws_drift, ingress_ws_drift) {
@@ -34,21 +35,21 @@ fn update_symbol_state_and_drain_trades(
     state.first_tick_ms = Some(
         state
             .first_tick_ms
-            .map(|ts| ts.min(clocks.exchange_event_ts_ms))
-            .unwrap_or(clocks.exchange_event_ts_ms),
+            .map(|ts| ts.min(adjusted_exchange_ts_ms))
+            .unwrap_or(adjusted_exchange_ts_ms),
     );
 
     if state.binance.is_none() || state.gate.is_none() {
-        state.updated_at_ms = clocks.exchange_event_ts_ms;
+        state.updated_at_ms = adjusted_exchange_ts_ms;
         state.leader_exchange = exchange;
         state.lag_ms = 0.0;
         return QuoteUpdateResult::PartialBookOnly;
     }
 
-    state.updated_at_ms = clocks.exchange_event_ts_ms;
-    state.update_lag(clocks.exchange_event_ts_ms, LAG_WINDOW_MS);
-    state.update_cycles(clocks.exchange_event_ts_ms, store.window_ms);
-    state.tick_shadow(clocks.exchange_event_ts_ms, store.window_ms);
+    state.updated_at_ms = adjusted_exchange_ts_ms;
+    state.update_lag(adjusted_exchange_ts_ms, LAG_WINDOW_MS);
+    state.update_cycles(adjusted_exchange_ts_ms, store.window_ms);
+    state.tick_shadow(adjusted_exchange_ts_ms, store.window_ms);
 
     // Fleet: lazy-init on first tick, then tick all + drain trades to db.
     let (binance_ref, gate_ref) = match (state.binance.as_ref(), state.gate.as_ref()) {
@@ -62,7 +63,7 @@ fn update_symbol_state_and_drain_trades(
     let run_id_arc = store.current_run_id.load();
     let run_id_ref = run_id_arc.as_deref();
     fleet.tick_all(
-        clocks.exchange_event_ts_ms,
+        adjusted_exchange_ts_ms,
         binance_ref,
         gate_ref,
         &state.price_samples,
@@ -90,18 +91,26 @@ pub(super) fn update(
     }
 
     let clocks = TimeDomainSample::from_raw(timestamp_ns, local_receive_ts_ns, now_ms());
+    let adjusted_exchange_ts_ms =
+        store.corrected_exchange_ts_ms(exchange, clocks.exchange_event_ts_ms, clocks.ingress_ts_ms);
     store.prune_symbol_catalog_if_needed(clocks.decision_ts_ms);
 
-    let drained_trades =
-        match update_symbol_state_and_drain_trades(store, symbol, exchange, bid, ask, clocks) {
-            QuoteUpdateResult::Rejected => return,
-            QuoteUpdateResult::PartialBookOnly => {
-                store.maybe_rebalance_portfolios(clocks.exchange_event_ts_ms);
-                store.mark_rows_cache_dirty();
-                return;
-            }
-            QuoteUpdateResult::Ready(trades) => trades,
-        };
+    let drained_trades = match update_symbol_state_and_drain_trades(
+        store,
+        symbol,
+        exchange,
+        bid,
+        ask,
+        clocks,
+        adjusted_exchange_ts_ms,
+    ) {
+        QuoteUpdateResult::Rejected => return,
+        QuoteUpdateResult::PartialBookOnly => {
+            store.mark_rows_cache_dirty();
+            return;
+        }
+        QuoteUpdateResult::Ready(trades) => trades,
+    };
 
     for ft in &drained_trades {
         store.observe_closed_trade_for_portfolio(
@@ -119,6 +128,5 @@ pub(super) fn update(
         // Without a writer attached, drop drained trades to keep fleet queue bounded.
     }
 
-    store.maybe_rebalance_portfolios(clocks.exchange_event_ts_ms);
     store.mark_rows_cache_dirty();
 }

@@ -18,6 +18,9 @@ pub struct StrategySignal {
     pub strategy: &'static str,
     pub symbol: String,
     pub spread_bps: f64,
+    pub direction: &'static str,
+    pub bid_ask_bps: f64,
+    pub ask_bid_bps: f64,
     pub context: String,
 }
 
@@ -114,7 +117,17 @@ impl From<LeadLagSignal> for StrategySignal {
             strategy: "lead_lag_classic",
             symbol: signal.symbol,
             spread_bps: signal.spread_bps,
-            context: format!("leader={} lagger={}", signal.leader, signal.lagger),
+            direction: signal.direction.as_str(),
+            bid_ask_bps: signal.bid_ask_bps,
+            ask_bid_bps: signal.ask_bid_bps,
+            context: format!(
+                "leader={} lagger={} direction={} bid_ask={:.2} ask_bid={:.2}",
+                signal.leader,
+                signal.lagger,
+                signal.direction.as_str(),
+                signal.bid_ask_bps,
+                signal.ask_bid_bps
+            ),
         }
     }
 }
@@ -163,7 +176,10 @@ mod tests {
         assert_eq!(signal.strategy, "lead_lag_classic");
         assert_eq!(signal.symbol, "BTCUSDT");
         assert!(signal.spread_bps > 1.0);
+        assert_eq!(signal.direction, "LONG_LAGGER");
+        assert!(signal.bid_ask_bps >= signal.ask_bid_bps);
         assert!(signal.context.contains("leader="));
+        assert!(signal.context.contains("direction="));
     }
 
     #[test]

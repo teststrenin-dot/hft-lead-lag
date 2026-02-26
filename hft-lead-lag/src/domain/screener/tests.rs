@@ -144,10 +144,10 @@ fn update_drains_pending_fleet_trades_even_without_db_writer() {
 #[test]
 fn update_partial_book_with_existing_portfolio_stats_does_not_block() {
     let store = ScreenerStore::default();
-    // Pre-create candidate stats so rebalance path reads this symbol from accumulators.
+    // Pre-create candidate stats so update path traverses accumulators,
+    // but rebalance now runs only from dedicated scheduler ticks.
     store.observe_closed_trade_for_portfolio("BTCUSDT", 0.10, false, 1_000);
     let ts_ns = 1_700_000_100_000_000_000_i64;
-    let update_ts_ms = ts_ns / 1_000_000;
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let store_clone = store.clone();
 
@@ -158,8 +158,8 @@ fn update_partial_book_with_existing_portfolio_stats_does_not_block() {
 
     done_rx
         .recv_timeout(std::time::Duration::from_millis(500))
-        .expect("update() must not block on partial-book rebalance path");
-    assert_eq!(store.portfolio_last_rebalance_ms(), Some(update_ts_ms));
+        .expect("update() must not block on partial-book path");
+    assert_eq!(store.portfolio_last_rebalance_ms(), None);
 }
 
 #[test]
@@ -183,6 +183,45 @@ fn rows_sorted_marks_live_ws_source_and_update_time() {
     assert_eq!(row.data_source, "ws_live");
     assert!(!row.is_fallback);
     assert!(row.last_update_ms > 0);
+}
+
+#[test]
+fn rows_sorted_uses_exchange_offset_correction_for_leader_and_lag() {
+    let store = ScreenerStore::default();
+    let base_ms = 1_700_000_000_000_i64;
+    let gate_clock_ahead_ms = 3_600_000_i64; // +1h
+
+    // Gate quote arrives first locally, but exchange clock is far ahead.
+    store.update(
+        "BTCUSDT",
+        "gate",
+        100.0,
+        100.1,
+        (base_ms + 10 + gate_clock_ahead_ms) * 1_000_000,
+        (base_ms + 10) * 1_000_000,
+    );
+    // Binance quote arrives later locally; with offset correction it should be leader.
+    store.update(
+        "BTCUSDT",
+        "binance",
+        100.0,
+        100.1,
+        (base_ms + 20) * 1_000_000,
+        (base_ms + 20) * 1_000_000,
+    );
+
+    let rows = store.rows_sorted();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(
+        row.leader_exchange, "binance",
+        "leader must follow corrected timeline, not raw cross-exchange clock skew"
+    );
+    assert!(
+        row.lag_ms < 100.0,
+        "lag should stay near local receive delta, got {}ms",
+        row.lag_ms
+    );
 }
 
 #[test]

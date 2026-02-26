@@ -7,6 +7,7 @@
 //! - `utils`          — percentile math, timestamp normalisation
 
 mod catalog_cache;
+mod clock_offset;
 pub mod cycle_tracker;
 pub mod fleet_patch;
 mod fleet_reload;
@@ -140,6 +141,7 @@ pub struct ScreenerStore {
     fleet_configs: Arc<ArcSwap<Vec<TraderConfig>>>,
     db_writer: Option<DbWriter>,
     current_run_id: Arc<ArcSwap<Option<String>>>,
+    clock_offsets: Arc<Mutex<clock_offset::ExchangeClockOffsets>>,
     last_catalog_prune_ms: Arc<AtomicI64>,
     rows_cache: Arc<ArcSwap<Vec<ScreenerRow>>>,
     rows_cache_last_rebuild_ms: Arc<AtomicI64>,
@@ -226,6 +228,7 @@ impl ScreenerStore {
             fleet_configs: Arc::new(ArcSwap::from_pointee(generate_grid())),
             db_writer: None,
             current_run_id: Arc::new(ArcSwap::from_pointee(None)),
+            clock_offsets: Arc::new(Mutex::new(clock_offset::ExchangeClockOffsets::default())),
             last_catalog_prune_ms: Arc::new(AtomicI64::new(0)),
             rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
             rows_cache_last_rebuild_ms: Arc::new(AtomicI64::new(0)),
@@ -258,6 +261,18 @@ impl ScreenerStore {
 
     pub fn current_run_id(&self) -> Option<String> {
         (**self.current_run_id.load()).clone()
+    }
+
+    pub(super) fn corrected_exchange_ts_ms(
+        &self,
+        exchange: &str,
+        exchange_ts_ms: i64,
+        ingress_ts_ms: i64,
+    ) -> i64 {
+        self.clock_offsets
+            .lock()
+            .expect("clock offset mutex poisoned")
+            .corrected_exchange_ms(exchange, exchange_ts_ms, ingress_ts_ms)
     }
 
     /// Latest portfolio assignment snapshot (v1 runtime).
@@ -446,6 +461,12 @@ impl ScreenerStore {
         if let (Some((states, guards)), Some(writer)) = (maybe_snapshot, self.db_writer.clone()) {
             writer.send_portfolio_snapshot_v1(states, guards);
         }
+    }
+
+    /// Trigger portfolio rebalance scheduler tick (v1).
+    /// Cadence gate is enforced internally (`2m`) and does not depend on tick flow.
+    pub fn portfolio_scheduler_tick_v1(&self, now_ms: i64) {
+        self.maybe_rebalance_portfolios(now_ms);
     }
 
     #[cfg(test)]
