@@ -4,8 +4,8 @@
 //! flushes every 5s — zero impact on trading hot path.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use rusqlite::{params, Connection, OpenFlags};
 use tokio::sync::mpsc;
@@ -487,17 +487,23 @@ pub struct PortfolioGuardRecordV1 {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortfolioCandidateHistoryRecordV1 {
+    pub symbol: String,
+    pub closed_trades: u32,
+    pub profitable_trades: u32,
+    pub losing_trades: u32,
+    pub pnl_sum_pct: f64,
+    pub first_trade_ts_ms: Option<i64>,
+}
+
 fn encode_symbols_json(symbols: &[String]) -> rusqlite::Result<String> {
     serde_json::to_string(symbols).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
 }
 
 fn decode_symbols_json(value: String) -> rusqlite::Result<Vec<String>> {
     serde_json::from_str(&value).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            Box::new(e),
-        )
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })
 }
 
@@ -520,6 +526,51 @@ pub fn replace_portfolio_state_v1(
                 row.portfolio_id,
                 shortlist_json,
                 active_json,
+                row.updated_at_ms
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn replace_portfolio_snapshot_v1(
+    conn: &Connection,
+    states: &[PortfolioStateRecordV1],
+    guards: &[PortfolioGuardRecordV1],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM portfolio_state_v1", [])?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO portfolio_state_v1 (
+                portfolio_id, shortlist_json, active_symbols_json, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for row in states {
+            let shortlist_json = encode_symbols_json(&row.shortlist)?;
+            let active_json = encode_symbols_json(&row.active_symbols)?;
+            stmt.execute(params![
+                row.portfolio_id,
+                shortlist_json,
+                active_json,
+                row.updated_at_ms
+            ])?;
+        }
+    }
+    tx.execute("DELETE FROM portfolio_symbol_guard_v1", [])?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO portfolio_symbol_guard_v1 (
+                symbol, streak_count, first_streak_ts_ms, cooldown_until_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for row in guards {
+            stmt.execute(params![
+                row.symbol,
+                row.streak_count as i64,
+                row.first_streak_ts_ms,
+                row.cooldown_until_ms,
                 row.updated_at_ms
             ])?;
         }
@@ -573,7 +624,9 @@ pub fn load_portfolio_state_v1(conn: &Connection) -> rusqlite::Result<Vec<Portfo
     rows.collect()
 }
 
-pub fn load_portfolio_guards_v1(conn: &Connection) -> rusqlite::Result<Vec<PortfolioGuardRecordV1>> {
+pub fn load_portfolio_guards_v1(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<PortfolioGuardRecordV1>> {
     let mut stmt = conn.prepare(
         "SELECT symbol, streak_count, first_streak_ts_ms, cooldown_until_ms, updated_at_ms
          FROM portfolio_symbol_guard_v1
@@ -587,6 +640,37 @@ pub fn load_portfolio_guards_v1(conn: &Connection) -> rusqlite::Result<Vec<Portf
             first_streak_ts_ms: row.get(2)?,
             cooldown_until_ms: row.get(3)?,
             updated_at_ms: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn load_portfolio_candidate_history_v1(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<PortfolioCandidateHistoryRecordV1>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            symbol,
+            COUNT(*) AS closed_trades,
+            SUM(CASE WHEN pnl_pct > 0.0 THEN 1 ELSE 0 END) AS profitable_trades,
+            SUM(CASE WHEN pnl_pct < 0.0 THEN 1 ELSE 0 END) AS losing_trades,
+            COALESCE(SUM(pnl_pct), 0.0) AS pnl_sum_pct,
+            MIN(entry_ts_ms) AS first_trade_ts_ms
+         FROM trades
+         GROUP BY symbol
+         ORDER BY symbol ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let closed_trades_i64: i64 = row.get(1)?;
+        let profitable_trades_i64: i64 = row.get(2)?;
+        let losing_trades_i64: i64 = row.get(3)?;
+        Ok(PortfolioCandidateHistoryRecordV1 {
+            symbol: row.get(0)?,
+            closed_trades: closed_trades_i64.max(0) as u32,
+            profitable_trades: profitable_trades_i64.max(0) as u32,
+            losing_trades: losing_trades_i64.max(0) as u32,
+            pnl_sum_pct: row.get(4)?,
+            first_trade_ts_ms: row.get(5)?,
         })
     })?;
     rows.collect()
@@ -741,7 +825,11 @@ impl DbWriter {
         guards: Vec<PortfolioGuardRecordV1>,
     ) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let command = DbCommand::PortfolioSnapshotV1 { seq, states, guards };
+        let command = DbCommand::PortfolioSnapshotV1 {
+            seq,
+            states,
+            guards,
+        };
         let outcome = try_enqueue_command(
             &self.tx,
             &self.overflow_tx,
@@ -824,18 +912,19 @@ impl DbWriter {
     }
 }
 
-fn flush_buffer_and_complete(
-    conn: &Connection,
-    buf: &mut Vec<FleetTrade>,
-    observed_max_seq: u64,
-    pending_flushes: &mut Vec<(u64, tokio::sync::oneshot::Sender<()>)>,
-) {
+fn flush_trade_buffer(conn: &Connection, buf: &mut Vec<FleetTrade>) {
     if !buf.is_empty() {
         match flush_trades(conn, buf) {
             Ok(_) => buf.clear(),
             Err(e) => warn!("db flush error (retaining {} trades): {e}", buf.len()),
         }
     }
+}
+
+fn complete_ready_flushes(
+    observed_max_seq: u64,
+    pending_flushes: &mut Vec<(u64, tokio::sync::oneshot::Sender<()>)>,
+) {
     let mut idx = 0usize;
     while idx < pending_flushes.len() {
         if pending_flushes[idx].0 <= observed_max_seq {
@@ -916,6 +1005,7 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
             tokio::time::interval(tokio::time::Duration::from_secs(FLUSH_INTERVAL_SECS));
         let mut observed_max_seq: u64 = 0;
         let mut pending_flushes: Vec<(u64, tokio::sync::oneshot::Sender<()>)> = Vec::new();
+        let mut latest_portfolio_snapshot_seq: u64 = 0;
 
         loop {
             tokio::select! {
@@ -925,36 +1015,29 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
                             observed_max_seq = observed_max_seq.max(seq);
                             buf.extend(trades);
                             if !pending_flushes.is_empty() {
-                                flush_buffer_and_complete(
-                                    &conn,
-                                    &mut buf,
-                                    observed_max_seq,
-                                    &mut pending_flushes,
-                                );
+                                flush_trade_buffer(&conn, &mut buf);
+                                complete_ready_flushes(observed_max_seq, &mut pending_flushes);
                             }
                         }
                         Some(DbCommand::PortfolioSnapshotV1 { seq, states, guards }) => {
                             observed_max_seq = observed_max_seq.max(seq);
-                            flush_buffer_and_complete(
-                                &conn,
-                                &mut buf,
-                                observed_max_seq,
-                                &mut pending_flushes,
-                            );
-                            if let Err(e) = replace_portfolio_state_v1(&conn, &states) {
-                                warn!("db portfolio snapshot state flush error: {e}");
+                            flush_trade_buffer(&conn, &mut buf);
+                            if seq <= latest_portfolio_snapshot_seq {
+                                warn!(
+                                    "db writer ignoring stale portfolio snapshot seq={} latest={}",
+                                    seq,
+                                    latest_portfolio_snapshot_seq
+                                );
+                            } else {
+                                match replace_portfolio_snapshot_v1(&conn, &states, &guards) {
+                                    Ok(_) => latest_portfolio_snapshot_seq = seq,
+                                    Err(e) => warn!("db portfolio snapshot flush error: {e}"),
+                                }
                             }
-                            if let Err(e) = replace_portfolio_guards_v1(&conn, &guards) {
-                                warn!("db portfolio snapshot guards flush error: {e}");
-                            }
+                            complete_ready_flushes(observed_max_seq, &mut pending_flushes);
                         }
                         Some(DbCommand::Flush { target_seq, done }) => {
-                            flush_buffer_and_complete(
-                                &conn,
-                                &mut buf,
-                                observed_max_seq,
-                                &mut pending_flushes,
-                            );
+                            flush_trade_buffer(&conn, &mut buf);
                             if observed_max_seq >= target_seq {
                                 let _ = done.send(());
                             } else {
@@ -965,19 +1048,18 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
                     }
                 }
                 _ = interval.tick() => {
-                    flush_buffer_and_complete(
-                        &conn,
-                        &mut buf,
-                        observed_max_seq,
-                        &mut pending_flushes,
-                    );
+                    flush_trade_buffer(&conn, &mut buf);
+                    complete_ready_flushes(observed_max_seq, &mut pending_flushes);
                 }
             }
         }
         // Flush remaining on shutdown.
         if !buf.is_empty() {
             if let Err(e) = flush_trades(&conn, &buf) {
-                warn!("db flush error during shutdown (dropping {} trades): {e}", buf.len());
+                warn!(
+                    "db flush error during shutdown (dropping {} trades): {e}",
+                    buf.len()
+                );
             }
         }
         for (_, done) in pending_flushes.drain(..) {
@@ -1076,6 +1158,19 @@ mod tests {
                 early_stop_churn: false,
             },
         }
+    }
+
+    fn sample_trade_with(
+        symbol: &str,
+        pnl_pct: f64,
+        entry_ts_ms: i64,
+        exit_ts_ms: i64,
+    ) -> FleetTrade {
+        let mut trade = sample_trade(symbol);
+        trade.trade.pnl_pct = pnl_pct;
+        trade.trade.entry_ts_ms = entry_ts_ms;
+        trade.trade.ts_ms = exit_ts_ms;
+        trade
     }
 
     #[test]
@@ -1391,7 +1486,10 @@ mod tests {
             )
             .and_then(|mut stmt| stmt.exists([]))
             .expect("portfolio_symbol_guard_v1 exists query");
-        assert!(has_guard_table, "portfolio_symbol_guard_v1 table must exist");
+        assert!(
+            has_guard_table,
+            "portfolio_symbol_guard_v1 table must exist"
+        );
 
         for column in [
             "portfolio_id",
@@ -1414,10 +1512,15 @@ mod tests {
             "updated_at_ms",
         ] {
             let has_col: bool = conn
-                .prepare("SELECT 1 FROM pragma_table_info('portfolio_symbol_guard_v1') WHERE name=?1")
+                .prepare(
+                    "SELECT 1 FROM pragma_table_info('portfolio_symbol_guard_v1') WHERE name=?1",
+                )
                 .and_then(|mut stmt| stmt.exists([column]))
                 .expect("portfolio_symbol_guard_v1 column exists query");
-            assert!(has_col, "portfolio_symbol_guard_v1.{column} column must exist");
+            assert!(
+                has_col,
+                "portfolio_symbol_guard_v1.{column} column must exist"
+            );
         }
 
         drop(conn);
@@ -1468,9 +1571,51 @@ mod tests {
         replace_portfolio_guards_v1(&conn, &guard_rows).expect("replace portfolio_symbol_guard_v1");
 
         let loaded_state = load_portfolio_state_v1(&conn).expect("load portfolio_state_v1");
-        let loaded_guards = load_portfolio_guards_v1(&conn).expect("load portfolio_symbol_guard_v1");
+        let loaded_guards =
+            load_portfolio_guards_v1(&conn).expect("load portfolio_symbol_guard_v1");
         assert_eq!(loaded_state, state_rows);
         assert_eq!(loaded_guards, guard_rows);
+
+        drop(conn);
+        cleanup_temp_db(&path);
+    }
+
+    #[test]
+    fn load_portfolio_candidate_history_v1_aggregates_trade_history() {
+        let path = temp_db_path("portfolio-candidate-history-v1");
+        let conn = open_db(&path).expect("open db");
+        upsert_configs(&conn, &[TraderConfig::default()]).expect("seed config row");
+        flush_trades(
+            &conn,
+            &[
+                sample_trade_with("BTCUSDT", 0.5, 100, 200),
+                sample_trade_with("BTCUSDT", -0.2, 300, 400),
+                sample_trade_with("ETHUSDT", 0.0, 500, 600),
+            ],
+        )
+        .expect("flush sample trades");
+
+        let rows = load_portfolio_candidate_history_v1(&conn).expect("load candidate history");
+        assert_eq!(rows.len(), 2);
+        let btc = rows
+            .iter()
+            .find(|row| row.symbol == "BTCUSDT")
+            .expect("BTCUSDT aggregate");
+        assert_eq!(btc.closed_trades, 2);
+        assert_eq!(btc.profitable_trades, 1);
+        assert_eq!(btc.losing_trades, 1);
+        assert!((btc.pnl_sum_pct - 0.3).abs() < 1e-12);
+        assert_eq!(btc.first_trade_ts_ms, Some(100));
+
+        let eth = rows
+            .iter()
+            .find(|row| row.symbol == "ETHUSDT")
+            .expect("ETHUSDT aggregate");
+        assert_eq!(eth.closed_trades, 1);
+        assert_eq!(eth.profitable_trades, 0);
+        assert_eq!(eth.losing_trades, 0);
+        assert!((eth.pnl_sum_pct - 0.0).abs() < 1e-12);
+        assert_eq!(eth.first_trade_ts_ms, Some(500));
 
         drop(conn);
         cleanup_temp_db(&path);
@@ -1522,7 +1667,7 @@ mod tests {
             seq: 1,
             trades: vec![sample_trade("BTCUSDT")],
         })
-            .expect("pre-fill primary channel");
+        .expect("pre-fill primary channel");
 
         let outcome = try_enqueue_command(
             &tx,
@@ -1556,7 +1701,7 @@ mod tests {
             seq: 1,
             trades: vec![sample_trade("BTCUSDT")],
         })
-            .expect("pre-fill primary channel");
+        .expect("pre-fill primary channel");
         overflow_tx
             .try_send(DbCommand::Trades {
                 seq: 2,
@@ -1593,7 +1738,7 @@ mod tests {
             seq: 1,
             trades: vec![sample_trade("BTCUSDT")],
         })
-            .expect("pre-fill primary channel");
+        .expect("pre-fill primary channel");
         overflow_tx
             .try_send(DbCommand::Trades {
                 seq: 2,
@@ -1636,7 +1781,7 @@ mod tests {
             seq: 1,
             trades: vec![sample_trade("BTCUSDT")],
         })
-            .expect("pre-fill primary channel");
+        .expect("pre-fill primary channel");
         overflow_tx
             .try_send(DbCommand::Trades {
                 seq: 2,
@@ -1704,6 +1849,92 @@ mod tests {
         assert_eq!(
             rows, 1,
             "flush_all must wait for trades staged in backpressure pipeline"
+        );
+
+        drop(conn);
+        drop(writer);
+        cleanup_temp_db(&path);
+    }
+
+    #[tokio::test]
+    async fn writer_ignores_stale_portfolio_snapshot_sequence() {
+        let path = temp_db_path("portfolio-snapshot-seq-guard");
+        let conn = open_db(&path).expect("open db");
+        drop(conn);
+
+        let writer = spawn_writer(&path);
+        writer.next_seq.store(3, Ordering::Release);
+
+        let newer_states = vec![
+            PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec!["NEW".to_string()],
+                active_symbols: vec!["NEW".to_string()],
+                updated_at_ms: 2,
+            },
+            PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: Vec::new(),
+                active_symbols: Vec::new(),
+                updated_at_ms: 2,
+            },
+        ];
+        let stale_states = vec![
+            PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec!["OLD".to_string()],
+                active_symbols: vec!["OLD".to_string()],
+                updated_at_ms: 1,
+            },
+            PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: Vec::new(),
+                active_symbols: Vec::new(),
+                updated_at_ms: 1,
+            },
+        ];
+
+        writer
+            .tx
+            .send(DbCommand::PortfolioSnapshotV1 {
+                seq: 2,
+                states: newer_states,
+                guards: Vec::new(),
+            })
+            .await
+            .expect("enqueue newer snapshot");
+        writer
+            .backpressure_tx
+            .send(DbCommand::PortfolioSnapshotV1 {
+                seq: 1,
+                states: stale_states,
+                guards: Vec::new(),
+            })
+            .await
+            .expect("enqueue stale snapshot");
+        writer
+            .backpressure_tx
+            .send(DbCommand::Trades {
+                seq: 3,
+                trades: Vec::new(),
+            })
+            .await
+            .expect("enqueue completion marker");
+
+        timeout(Duration::from_secs(2), writer.flush_all())
+            .await
+            .expect("flush_all timed out");
+
+        let conn = open_db(&path).expect("open db");
+        let rows = load_portfolio_state_v1(&conn).expect("load portfolio_state_v1");
+        let a = rows
+            .iter()
+            .find(|row| row.portfolio_id == "A")
+            .expect("portfolio A row");
+        assert_eq!(
+            a.active_symbols,
+            vec!["NEW".to_string()],
+            "older snapshot must not override newer persisted state"
         );
 
         drop(conn);

@@ -1,14 +1,12 @@
-use super::{
-    ConfigManager, EventLoopState, HealthState, SUBSCRIBE_DELAY_MS,
-};
+use super::{ConfigManager, EventLoopState, HealthState, SUBSCRIBE_DELAY_MS};
 use hft_lead_lag::api::{
     HttpServer, HttpServerConfig, MarketDataEvent, MarketDataServer, ScreenerStore, WsServerConfig,
 };
 use hft_lead_lag::infrastructure::rest::GateRestClient;
 use hft_lead_lag::{BinanceMarketData, GateMarketData, MarketDataStream};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 const GATE_NATR_PERIOD_30M: usize = 30;
@@ -180,11 +178,18 @@ pub(super) fn init_screener_persistence(
     hft_lead_lag::infrastructure::db::upsert_configs(&conn, fleet_configs.as_ref())?;
     let persisted_portfolios = hft_lead_lag::infrastructure::db::load_portfolio_state_v1(&conn)?;
     let persisted_guards = hft_lead_lag::infrastructure::db::load_portfolio_guards_v1(&conn)?;
-    if !persisted_portfolios.is_empty() || !persisted_guards.is_empty() {
-        screener.restore_portfolio_runtime_v1_from_db_rows(
-            &persisted_portfolios,
-            &persisted_guards,
+    let persisted_candidate_history =
+        hft_lead_lag::infrastructure::db::load_portfolio_candidate_history_v1(&conn)?;
+    if !persisted_candidate_history.is_empty() {
+        screener.restore_portfolio_candidate_history_v1_from_db_rows(&persisted_candidate_history);
+        info!(
+            "Restored portfolio candidate history: symbols={}",
+            persisted_candidate_history.len()
         );
+    }
+    if !persisted_portfolios.is_empty() || !persisted_guards.is_empty() {
+        screener
+            .restore_portfolio_runtime_v1_from_db_rows(&persisted_portfolios, &persisted_guards);
         info!(
             "Restored portfolio runtime snapshot: states={} guards={}",
             persisted_portfolios.len(),

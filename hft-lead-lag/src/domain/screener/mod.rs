@@ -19,8 +19,10 @@ pub mod state;
 pub mod trader_config;
 pub mod utils;
 
-use std::fmt;
 use std::collections::BTreeMap;
+use std::fmt;
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -37,7 +39,9 @@ use self::utils::now_ms;
 use crate::application::services::{
     PortfolioEngineV1, PortfolioId, PortfolioStateV1, SymbolGuardStateV1, SymbolStatsV1,
 };
-use crate::infrastructure::db::{DbWriter, PortfolioGuardRecordV1, PortfolioStateRecordV1};
+use crate::infrastructure::db::{
+    DbWriter, PortfolioCandidateHistoryRecordV1, PortfolioGuardRecordV1, PortfolioStateRecordV1,
+};
 
 pub use self::shadow_fleet::PolicyConfigSnapshot;
 pub use self::shadow_trader::{ChartTrade, ShadowStats};
@@ -88,10 +92,11 @@ struct TradeAccumulator {
     profitable_trades: u32,
     losing_trades: u32,
     pnl_sum_pct: f64,
+    first_observed_ts_ms: Option<i64>,
 }
 
 impl TradeAccumulator {
-    fn observe(&mut self, pnl_pct: f64) {
+    fn observe(&mut self, pnl_pct: f64, ts_ms: i64) {
         self.closed_trades = self.closed_trades.saturating_add(1);
         if pnl_pct > 0.0 {
             self.profitable_trades = self.profitable_trades.saturating_add(1);
@@ -99,6 +104,11 @@ impl TradeAccumulator {
             self.losing_trades = self.losing_trades.saturating_add(1);
         }
         self.pnl_sum_pct += pnl_pct;
+        self.first_observed_ts_ms = Some(
+            self.first_observed_ts_ms
+                .map(|existing| existing.min(ts_ms))
+                .unwrap_or(ts_ms),
+        );
     }
 
     fn avg_pnl_pct(self) -> f64 {
@@ -134,6 +144,8 @@ pub struct ScreenerStore {
     rows_cache: Arc<ArcSwap<Vec<ScreenerRow>>>,
     rows_cache_last_rebuild_ms: Arc<AtomicI64>,
     rows_cache_dirty: Arc<AtomicBool>,
+    #[cfg(test)]
+    candidate_stats_build_count: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -218,6 +230,8 @@ impl ScreenerStore {
             rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
             rows_cache_last_rebuild_ms: Arc::new(AtomicI64::new(0)),
             rows_cache_dirty: Arc::new(AtomicBool::new(true)),
+            #[cfg(test)]
+            candidate_stats_build_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -271,8 +285,10 @@ impl ScreenerStore {
             .lock()
             .expect("portfolio runtime mutex poisoned");
 
-        let state_by_id: std::collections::HashMap<&str, &PortfolioStateRecordV1> =
-            states.iter().map(|row| (row.portfolio_id.as_str(), row)).collect();
+        let state_by_id: std::collections::HashMap<&str, &PortfolioStateRecordV1> = states
+            .iter()
+            .map(|row| (row.portfolio_id.as_str(), row))
+            .collect();
         runtime.latest_assignment = [(PortfolioId::A, "A"), (PortfolioId::B, "B")]
             .into_iter()
             .map(|(portfolio_id, label)| {
@@ -310,6 +326,29 @@ impl ScreenerStore {
             .max();
     }
 
+    /// Restore per-symbol cumulative trade history used for candidate stats.
+    pub fn restore_portfolio_candidate_history_v1_from_db_rows(
+        &self,
+        rows: &[PortfolioCandidateHistoryRecordV1],
+    ) {
+        self.trade_accumulators.clear();
+        for row in rows {
+            if row.closed_trades == 0 {
+                continue;
+            }
+            self.trade_accumulators.insert(
+                row.symbol.clone(),
+                TradeAccumulator {
+                    closed_trades: row.closed_trades,
+                    profitable_trades: row.profitable_trades.min(row.closed_trades),
+                    losing_trades: row.losing_trades.min(row.closed_trades),
+                    pnl_sum_pct: row.pnl_sum_pct,
+                    first_observed_ts_ms: row.first_trade_ts_ms,
+                },
+            );
+        }
+    }
+
     /// Snapshot guard/cooldown state per symbol used by portfolio runtime.
     pub fn portfolio_guard_states_v1(&self) -> Vec<(String, SymbolGuardStateV1)> {
         self.portfolio_runtime
@@ -338,7 +377,7 @@ impl ScreenerStore {
             .entry(symbol.to_string())
             .or_default()
             .value_mut()
-            .observe(pnl_pct);
+            .observe(pnl_pct, ts_ms);
 
         let maybe_snapshot = {
             let mut runtime = self
@@ -374,6 +413,18 @@ impl ScreenerStore {
     }
 
     pub(super) fn maybe_rebalance_portfolios(&self, now_ms: i64) {
+        {
+            let runtime = self
+                .portfolio_runtime
+                .lock()
+                .expect("portfolio runtime mutex poisoned");
+            if let Some(last_ms) = runtime.last_rebalance_ms {
+                if now_ms.saturating_sub(last_ms) < PORTFOLIO_REBALANCE_INTERVAL_MS {
+                    return;
+                }
+            }
+        }
+
         let candidates = self.global_candidate_stats(now_ms);
         let maybe_snapshot = {
             let mut runtime = self
@@ -405,7 +456,16 @@ impl ScreenerStore {
         self.maybe_rebalance_portfolios(now_ms);
     }
 
+    #[cfg(test)]
+    pub fn portfolio_candidate_build_count_v1(&self) -> u64 {
+        self.candidate_stats_build_count.load(Ordering::Relaxed)
+    }
+
     fn global_candidate_stats(&self, now_ms: i64) -> Vec<SymbolStatsV1> {
+        #[cfg(test)]
+        self.candidate_stats_build_count
+            .fetch_add(1, Ordering::Relaxed);
+
         let mut out = Vec::new();
         for entry in self.trade_accumulators.iter() {
             let symbol = entry.key();
@@ -414,6 +474,7 @@ impl ScreenerStore {
                 .symbols
                 .get(symbol.as_str())
                 .and_then(|state| state.first_tick_ms)
+                .or(acc.first_observed_ts_ms)
                 .unwrap_or(now_ms);
             let age_minutes_from_first_tick = now_ms
                 .saturating_sub(first_tick_ms)
@@ -620,7 +681,6 @@ impl Default for ScreenerStore {
         Self::new(TEN_MINUTES_MS)
     }
 }
-
 
 #[cfg(test)]
 mod tests;

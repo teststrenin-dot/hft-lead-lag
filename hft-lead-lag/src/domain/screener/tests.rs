@@ -1,7 +1,6 @@
 use super::{
     shadow_fleet::{FleetTrade, ShadowFleet},
-    FleetPatchApplyError, FleetPatchMode, FleetPatchPlan, ScreenerStore, SymbolState,
-    TraderConfig,
+    FleetPatchApplyError, FleetPatchMode, FleetPatchPlan, ScreenerStore, SymbolState, TraderConfig,
 };
 use crate::domain::screener::shadow_trader::{ClosedTrade, Direction};
 
@@ -493,6 +492,42 @@ fn portfolio_candidate_stats_accumulate_full_history() {
 }
 
 #[test]
+fn portfolio_candidate_history_restore_bootstraps_stats_without_live_ticks() {
+    let store = ScreenerStore::default();
+    store.restore_portfolio_candidate_history_v1_from_db_rows(&[
+        crate::infrastructure::db::PortfolioCandidateHistoryRecordV1 {
+            symbol: "BTCUSDT".to_string(),
+            closed_trades: 8,
+            profitable_trades: 4,
+            losing_trades: 1,
+            pnl_sum_pct: 0.24,
+            first_trade_ts_ms: Some(0),
+        },
+    ]);
+
+    let stats = store.portfolio_candidate_stats_v1(600_000);
+    let btc = stats
+        .iter()
+        .find(|row| row.symbol == "BTCUSDT")
+        .expect("candidate stats for BTCUSDT");
+    assert_eq!(btc.closed_trades, 8);
+    assert_eq!(btc.profitable_trades, 4);
+    assert_eq!(btc.losing_trades, 1);
+    assert!((btc.avg_pnl_pct - 0.03).abs() < 1e-12);
+    assert_eq!(btc.age_minutes_from_first_tick, 10);
+
+    store.maybe_rebalance_portfolios(600_000);
+    let assignment = store.portfolio_assignment_v1();
+    let assigned = assignment.values().any(|state| {
+        state
+            .active_symbols
+            .iter()
+            .any(|symbol| symbol == "BTCUSDT")
+    });
+    assert!(assigned, "restored symbol must be eligible for assignment");
+}
+
+#[test]
 fn portfolio_rebalance_cadence_and_no_overlap_active_symbols() {
     let store = ScreenerStore::default();
     for symbol in ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT"] {
@@ -545,6 +580,31 @@ fn portfolio_rebalance_cadence_and_no_overlap_active_symbols() {
         store.portfolio_last_rebalance_ms(),
         Some(600_000),
         "rebalance must not run before 2 minutes"
+    );
+}
+
+#[test]
+fn portfolio_rebalance_cadence_skips_candidate_build_when_not_due() {
+    let store = ScreenerStore::default();
+    store.symbols.insert(
+        "BTCUSDT".to_string(),
+        SymbolState {
+            first_tick_ms: Some(0),
+            ..SymbolState::default()
+        },
+    );
+    for idx in 0..8 {
+        store.observe_closed_trade_for_portfolio("BTCUSDT", 0.1, false, 1_000 + idx * 1_000);
+    }
+
+    store.maybe_rebalance_portfolios(600_000);
+    assert_eq!(store.portfolio_candidate_build_count_v1(), 1);
+
+    store.maybe_rebalance_portfolios(650_000);
+    assert_eq!(
+        store.portfolio_candidate_build_count_v1(),
+        1,
+        "candidate stats build should be skipped when cadence gate rejects rebalance"
     );
 }
 
