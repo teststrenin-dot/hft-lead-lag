@@ -170,6 +170,45 @@ fn write_trial_ack_uses_submission_scoped_ack_file_when_present() {
 }
 
 #[test]
+fn write_trial_ack_sanitizes_submission_id_path_fragments() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-ack-sanitize-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    let ack = TrialAck::success(
+        "run-1".to_string(),
+        1_000,
+        1,
+        0,
+        Some("../evil/../../sub:1".to_string()),
+    );
+    write_trial_ack(&dir, &ack);
+
+    let ack_dir = dir.join("trial-acks");
+    let files: Vec<PathBuf> = fs::read_dir(&ack_dir)
+        .expect("read ack dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    let file_name = files[0]
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("utf-8 file name");
+    assert_eq!(files[0].parent(), Some(ack_dir.as_path()));
+    assert!(file_name.ends_with(".json"));
+    assert!(!file_name.contains('/'));
+    assert!(!file_name.contains('\\'));
+    assert!(!file_name.starts_with(".."));
+    assert!(!dir.join(".trial-ack").exists());
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn list_trial_batch_queue_files_returns_sorted_json_files() {
     let dir = std::env::temp_dir().join(format!(
         "hft-lead-lag-main-batch-queue-{}-{}",

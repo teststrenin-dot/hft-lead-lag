@@ -154,6 +154,34 @@ fn trial_ack_queue_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("trial-acks")
 }
 
+fn sanitize_submission_id_for_ack_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut sanitized = String::with_capacity(trimmed.len().min(128));
+    for ch in trimmed.chars().take(128) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+
+    while sanitized.starts_with('.') {
+        sanitized.remove(0);
+    }
+    while sanitized.ends_with('.') {
+        sanitized.pop();
+    }
+
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        return None;
+    }
+    Some(sanitized)
+}
+
 pub(super) fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
     let queue_dir = trial_batch_queue_dir(config_dir);
     let mut files = Vec::new();
@@ -294,17 +322,22 @@ pub(super) fn archive_trial_batch_queue_file(
 }
 
 pub(super) fn write_trial_ack(dir: &Path, ack: &TrialAck) {
-    let path = if let Some(submission_id) = ack.submission_id.as_deref() {
-        let ack_dir = trial_ack_queue_dir(dir);
-        if let Err(error) = std::fs::create_dir_all(&ack_dir) {
-            warn!(
-                "trial-ack: failed to create queue dir {}: {error}",
-                ack_dir.display()
-            );
+    let path = match ack
+        .submission_id
+        .as_deref()
+        .and_then(sanitize_submission_id_for_ack_path)
+    {
+        Some(submission_id) => {
+            let ack_dir = trial_ack_queue_dir(dir);
+            if let Err(error) = std::fs::create_dir_all(&ack_dir) {
+                warn!(
+                    "trial-ack: failed to create queue dir {}: {error}",
+                    ack_dir.display()
+                );
+            }
+            ack_dir.join(format!("{submission_id}.json"))
         }
-        ack_dir.join(format!("{submission_id}.json"))
-    } else {
-        dir.join(".trial-ack")
+        None => dir.join(".trial-ack"),
     };
     match serde_json::to_string_pretty(ack) {
         Ok(json) => {
