@@ -999,6 +999,36 @@ fn compute_common_symbols_returns_empty_when_no_overlap() {
 }
 
 #[test]
+fn build_runtime_universe_fallback_respects_blacklist() {
+    let path = write_temp_config(
+        "runtime-universe-fallback-blacklist",
+        r#"
+[binance]
+enabled = true
+blacklist = ["BTCUSDT", "ETHUSDT"]
+
+[gate]
+enabled = true
+blacklist = ["BTCUSDT", "ETHUSDT"]
+"#,
+    );
+    let manager =
+        ConfigManager::from_file(path.to_str().expect("utf-8 path")).expect("load config");
+
+    let universe = build_runtime_universe(&manager, 50_000_000.0, Vec::new(), Vec::new());
+    assert!(
+        universe.strategy_symbols.is_empty(),
+        "blacklist must apply to fallback symbols too"
+    );
+    assert!(
+        universe.screener_symbols.is_empty(),
+        "blacklist must apply to screener fallback symbols too"
+    );
+
+    fs::remove_file(path).expect("cleanup temp config");
+}
+
+#[test]
 fn strategy_ticks_in_order_skips_missing_symbols() {
     let strategy_symbols = vec!["BTCUSDT", "ETHUSDT"];
     let mut latest = std::collections::HashMap::new();

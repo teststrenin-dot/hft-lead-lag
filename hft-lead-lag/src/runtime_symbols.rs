@@ -158,10 +158,16 @@ pub(super) fn build_runtime_universe(
     }
     info!("Common symbols: {}", common_symbols.len());
 
-    let (strategy_symbols, screener_symbols, used_fallback) =
+    let (mut strategy_symbols, mut screener_symbols, used_fallback) =
         select_runtime_symbols(&common_symbols);
+    strategy_symbols.retain(|symbol| !blacklist.contains(symbol.as_str()));
+    screener_symbols.retain(|symbol| !blacklist.contains(symbol.as_str()));
     if used_fallback {
-        warn!("No common symbols found! Using fallback...");
+        if strategy_symbols.is_empty() {
+            warn!("No common symbols found and fallback symbols are blacklisted; runtime universe is empty");
+        } else {
+            warn!("No common symbols found! Using fallback...");
+        }
     }
 
     info!(
