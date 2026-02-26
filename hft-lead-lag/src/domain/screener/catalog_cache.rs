@@ -53,6 +53,7 @@ pub(super) fn prune_symbol_catalog_with_limits(
     let mut removed = 0usize;
     for key in stale_keys {
         if store.symbols.remove(&key).is_some() {
+            store.trade_accumulators.remove(&key);
             removed += 1;
         }
     }
@@ -71,6 +72,7 @@ pub(super) fn prune_symbol_catalog_with_limits(
     });
     for (_, key) in oldest.into_iter().take(overflow) {
         if store.symbols.remove(&key).is_some() {
+            store.trade_accumulators.remove(&key);
             removed += 1;
         }
     }

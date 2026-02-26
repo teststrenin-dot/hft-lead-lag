@@ -87,6 +87,32 @@ fn prune_symbol_catalog_with_limits_drops_stale_symbols() {
 }
 
 #[test]
+fn prune_symbol_catalog_with_limits_drops_stale_candidate_accumulator() {
+    let store = ScreenerStore::default();
+    store.symbols.insert(
+        "STALE".to_string(),
+        SymbolState {
+            updated_at_ms: 1_000,
+            first_tick_ms: Some(1_000),
+            ..SymbolState::default()
+        },
+    );
+    store.observe_closed_trade_for_portfolio("STALE", 0.20, false, 2_000);
+    assert!(store.trade_accumulators.get("STALE").is_some());
+
+    let removed = store.prune_symbol_catalog_with_limits(10_000, 500, 10);
+    assert_eq!(removed, 1);
+    assert!(store.symbols.get("STALE").is_none());
+    assert!(store.trade_accumulators.get("STALE").is_none());
+
+    let candidates = store.portfolio_candidate_stats_v1(10_000);
+    assert!(
+        candidates.iter().all(|stats| stats.symbol != "STALE"),
+        "pruned symbol must not stay in candidate stats"
+    );
+}
+
+#[test]
 fn prune_symbol_catalog_with_limits_enforces_cardinality_cap() {
     let store = ScreenerStore::default();
     for idx in 0..5 {
