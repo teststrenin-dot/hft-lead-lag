@@ -12,6 +12,22 @@ fn write_temp_config(name: &str, content: &str) -> PathBuf {
 }
 
 #[test]
+fn parse_portfolio_ids_deduplicates_and_skips_empty_tokens() {
+    let parsed = parse_portfolio_ids("A, B, ,A, C ,,");
+    assert_eq!(
+        parsed,
+        vec!["A".to_string(), "B".to_string(), "C".to_string()]
+    );
+}
+
+#[test]
+fn parse_portfolio_ids_from_env_returns_none_for_empty_input() {
+    std::env::set_var(PORTFOLIO_IDS_ENV, " ,  ,");
+    assert!(portfolio_ids_from_env().is_none());
+    std::env::remove_var(PORTFOLIO_IDS_ENV);
+}
+
+#[test]
 fn load_trial_batch_parses_incremental_mode() {
     let config = TraderConfig::default();
     let path = std::env::temp_dir().join(format!(

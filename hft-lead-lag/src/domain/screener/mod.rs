@@ -38,7 +38,7 @@ use self::state::SymbolState;
 use self::utils::now_ms;
 
 use crate::application::services::{
-    PortfolioEngineV1, PortfolioId, PortfolioStateV1, SymbolGuardStateV1, SymbolStatsV1,
+    PortfolioEngineV1, PortfolioStateV1, SymbolGuardStateV1, SymbolStatsV1,
 };
 use crate::infrastructure::db::{
     DbWriter, PortfolioCandidateHistoryRecordV1, PortfolioGuardRecordV1, PortfolioStateRecordV1,
@@ -125,7 +125,7 @@ impl TradeAccumulator {
 struct PortfolioRuntimeState {
     engine: PortfolioEngineV1,
     last_rebalance_ms: Option<i64>,
-    latest_assignment: BTreeMap<PortfolioId, PortfolioStateV1>,
+    latest_assignment: BTreeMap<String, PortfolioStateV1>,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,12 +276,38 @@ impl ScreenerStore {
     }
 
     /// Latest portfolio assignment snapshot (v1 runtime).
-    pub fn portfolio_assignment_v1(&self) -> BTreeMap<PortfolioId, PortfolioStateV1> {
+    pub fn portfolio_assignment_v1(&self) -> BTreeMap<String, PortfolioStateV1> {
         self.portfolio_runtime
             .lock()
             .expect("portfolio runtime mutex poisoned")
             .latest_assignment
             .clone()
+    }
+
+    /// Current configured portfolio ids.
+    pub fn portfolio_ids_v1(&self) -> Vec<String> {
+        self.portfolio_runtime
+            .lock()
+            .expect("portfolio runtime mutex poisoned")
+            .engine
+            .portfolio_ids()
+            .to_vec()
+    }
+
+    /// Replace runtime portfolio id set (v1).
+    pub fn set_portfolio_ids_v1(&self, portfolio_ids: Vec<String>) {
+        let mut runtime = self
+            .portfolio_runtime
+            .lock()
+            .expect("portfolio runtime mutex poisoned");
+        runtime.engine.set_portfolio_ids(portfolio_ids);
+        runtime.latest_assignment = runtime
+            .engine
+            .portfolio_ids()
+            .iter()
+            .map(|id| (id.clone(), PortfolioStateV1::default()))
+            .collect();
+        runtime.last_rebalance_ms = None;
     }
 
     /// Build global candidate stats from cumulative per-symbol history.
@@ -304,17 +330,19 @@ impl ScreenerStore {
             .iter()
             .map(|row| (row.portfolio_id.as_str(), row))
             .collect();
-        runtime.latest_assignment = [(PortfolioId::A, "A"), (PortfolioId::B, "B")]
-            .into_iter()
-            .map(|(portfolio_id, label)| {
+        runtime.latest_assignment = runtime
+            .engine
+            .portfolio_ids()
+            .iter()
+            .map(|portfolio_id| {
                 let state = state_by_id
-                    .get(label)
+                    .get(portfolio_id.as_str())
                     .map(|row| PortfolioStateV1 {
                         shortlist: row.shortlist.clone(),
                         active_symbols: row.active_symbols.clone(),
                     })
                     .unwrap_or_default();
-                (portfolio_id, state)
+                (portfolio_id.clone(), state)
             })
             .collect();
 
@@ -514,16 +542,18 @@ impl ScreenerStore {
         runtime: &PortfolioRuntimeState,
         updated_at_ms: i64,
     ) -> (Vec<PortfolioStateRecordV1>, Vec<PortfolioGuardRecordV1>) {
-        let states = [(PortfolioId::A, "A"), (PortfolioId::B, "B")]
-            .into_iter()
-            .map(|(portfolio_id, label)| {
+        let states = runtime
+            .engine
+            .portfolio_ids()
+            .iter()
+            .map(|portfolio_id| {
                 let entry = runtime
                     .latest_assignment
-                    .get(&portfolio_id)
+                    .get(portfolio_id)
                     .cloned()
                     .unwrap_or_default();
                 PortfolioStateRecordV1 {
-                    portfolio_id: label.to_string(),
+                    portfolio_id: portfolio_id.clone(),
                     shortlist: entry.shortlist,
                     active_symbols: entry.active_symbols,
                     updated_at_ms,

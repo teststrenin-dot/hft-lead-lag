@@ -1,5 +1,6 @@
 use super::portfolio_runtime::{
-    eligible, rank_candidates, PortfolioEngineV1, PortfolioId, SymbolGuardStateV1, SymbolStatsV1,
+    default_portfolio_ids, eligible, rank_candidates, PortfolioEngineV1, SymbolGuardStateV1,
+    SymbolStatsV1,
 };
 use std::collections::HashSet;
 
@@ -75,8 +76,8 @@ fn portfolio_runtime_assign_without_overlap_enforces_top5_and_max4() {
     ];
 
     let assigned = engine.assign_without_overlap(&pool, 0);
-    let a_state = assigned.get(&PortfolioId::A).expect("state A");
-    let b_state = assigned.get(&PortfolioId::B).expect("state B");
+    let a_state = assigned.get("A").expect("state A");
+    let b_state = assigned.get("B").expect("state B");
 
     assert_eq!(a_state.shortlist.len(), 5);
     assert_eq!(b_state.shortlist.len(), 5);
@@ -104,8 +105,8 @@ fn portfolio_runtime_assign_without_overlap_balances_identical_candidate_pool() 
     ];
 
     let assigned = engine.assign_without_overlap(&pool, 0);
-    let a_state = assigned.get(&PortfolioId::A).expect("state A");
-    let b_state = assigned.get(&PortfolioId::B).expect("state B");
+    let a_state = assigned.get("A").expect("state A");
+    let b_state = assigned.get("B").expect("state B");
     assert_eq!(a_state.shortlist.len(), 5);
     assert_eq!(b_state.shortlist.len(), 5);
     assert!(
@@ -128,9 +129,52 @@ fn portfolio_runtime_assign_without_overlap_balances_identical_candidate_pool() 
         .collect();
     assert_eq!(
         union.len(),
-        5,
-        "all shortlisted symbols must be assigned to exactly one portfolio"
+        6,
+        "round-robin assignment should allocate all unique symbols without overlap"
     );
+}
+
+#[test]
+fn portfolio_runtime_with_portfolio_ids_supports_dynamic_count_and_independent_shortlists() {
+    let engine = PortfolioEngineV1::with_portfolio_ids(vec![
+        "A".to_string(),
+        "B".to_string(),
+        "C".to_string(),
+    ]);
+    assert_eq!(
+        engine.portfolio_ids(),
+        &vec!["A".to_string(), "B".to_string(), "C".to_string()]
+    );
+
+    let pool = vec![
+        stats("S1", 6, 10, 6, 4, 0.10),
+        stats("S2", 6, 10, 6, 4, 0.10),
+        stats("S3", 6, 10, 6, 4, 0.10),
+        stats("S4", 6, 10, 6, 4, 0.10),
+        stats("S5", 6, 10, 6, 4, 0.10),
+        stats("S6", 6, 10, 6, 4, 0.10),
+        stats("S7", 6, 10, 6, 4, 0.10),
+    ];
+    let assigned = engine.assign_without_overlap(&pool, 0);
+
+    assert_eq!(assigned.len(), 3);
+    assert_eq!(assigned.get("A").expect("A").shortlist.len(), 5);
+    assert_eq!(assigned.get("B").expect("B").shortlist.len(), 5);
+    assert_eq!(assigned.get("C").expect("C").shortlist.len(), 5);
+    assert_ne!(
+        assigned.get("A").expect("A").shortlist,
+        assigned.get("B").expect("B").shortlist
+    );
+    assert_ne!(
+        assigned.get("B").expect("B").shortlist,
+        assigned.get("C").expect("C").shortlist
+    );
+}
+
+#[test]
+fn portfolio_runtime_default_portfolio_ids_fallback_for_invalid_input() {
+    let engine = PortfolioEngineV1::with_portfolio_ids(vec!["".to_string(), " ".to_string()]);
+    assert_eq!(engine.portfolio_ids(), default_portfolio_ids().as_slice());
 }
 
 #[test]

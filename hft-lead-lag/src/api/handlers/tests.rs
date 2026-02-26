@@ -361,6 +361,39 @@ async fn portfolio_active_endpoint_returns_a_and_b_slots() {
 }
 
 #[tokio::test]
+async fn portfolio_active_endpoint_respects_dynamic_portfolio_ids() {
+    let health_state = Arc::new(HealthState::new());
+    let screener = ScreenerStore::default();
+    screener.set_portfolio_ids_v1(vec!["P1".to_string(), "P2".to_string(), "P3".to_string()]);
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!("portfolio-active-dynamic-{unique}.db"));
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener,
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: db_path.clone(),
+    });
+
+    let Json(resp) = get_portfolio_active(State(state)).await;
+    assert_eq!(resp.portfolios.len(), 3);
+    assert_eq!(resp.portfolios[0].portfolio_id, "P1");
+    assert_eq!(resp.portfolios[1].portfolio_id, "P2");
+    assert_eq!(resp.portfolios[2].portfolio_id, "P3");
+
+    let _ = fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn portfolio_candidates_endpoint_returns_derived_metrics() {
     let health_state = Arc::new(HealthState::new());
     let screener = ScreenerStore::default();

@@ -589,12 +589,8 @@ fn portfolio_rebalance_cadence_and_no_overlap_active_symbols() {
     assert_eq!(store.portfolio_last_rebalance_ms(), Some(600_000));
 
     let first = store.portfolio_assignment_v1();
-    let a_first = first
-        .get(&crate::application::services::PortfolioId::A)
-        .expect("portfolio A");
-    let b_first = first
-        .get(&crate::application::services::PortfolioId::B)
-        .expect("portfolio B");
+    let a_first = first.get("A").expect("portfolio A");
+    let b_first = first.get("B").expect("portfolio B");
     assert!(
         !a_first.active_symbols.is_empty(),
         "portfolio A must receive active symbols when enough candidates exist"
@@ -675,12 +671,8 @@ fn portfolio_runtime_restore_from_db_rows_sets_assignment_and_guards() {
     );
 
     let assignment = store.portfolio_assignment_v1();
-    let a = assignment
-        .get(&crate::application::services::PortfolioId::A)
-        .expect("portfolio A");
-    let b = assignment
-        .get(&crate::application::services::PortfolioId::B)
-        .expect("portfolio B");
+    let a = assignment.get("A").expect("portfolio A");
+    let b = assignment.get("B").expect("portfolio B");
     assert_eq!(a.active_symbols, vec!["BTCUSDT".to_string()]);
     assert_eq!(b.shortlist, vec!["SOLUSDT".to_string()]);
 
@@ -689,6 +681,37 @@ fn portfolio_runtime_restore_from_db_rows_sets_assignment_and_guards() {
     assert_eq!(guards[0].0, "BTCUSDT");
     assert_eq!(guards[0].1.streak_count, 2);
     assert_eq!(store.portfolio_last_rebalance_ms(), Some(800_000));
+}
+
+#[test]
+fn screener_portfolio_runtime_supports_dynamic_portfolio_ids() {
+    let store = ScreenerStore::default();
+    store.set_portfolio_ids_v1(vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+    assert_eq!(
+        store.portfolio_ids_v1(),
+        vec!["A".to_string(), "B".to_string(), "C".to_string()]
+    );
+
+    for symbol in [
+        "AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT", "FFFUSDT",
+    ] {
+        store.symbols.insert(
+            symbol.to_string(),
+            SymbolState {
+                first_tick_ms: Some(0),
+                ..SymbolState::default()
+            },
+        );
+        for idx in 0..8 {
+            store.observe_closed_trade_for_portfolio(symbol, 0.10, false, 1_000 + idx * 1_000);
+        }
+    }
+
+    store.maybe_rebalance_portfolios(600_000);
+    let assignment = store.portfolio_assignment_v1();
+    assert!(assignment.contains_key("A"));
+    assert!(assignment.contains_key("B"));
+    assert!(assignment.contains_key("C"));
 }
 
 #[test]

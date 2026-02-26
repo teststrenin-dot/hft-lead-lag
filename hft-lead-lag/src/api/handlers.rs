@@ -14,9 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
-use crate::application::services::{
-    compute_pm_raw, compute_useful_winrate, rank_candidates, PortfolioId,
-};
+use crate::application::services::{compute_pm_raw, compute_useful_winrate, rank_candidates};
 use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
 use crate::domain::screener::PolicyConfigSnapshot;
 use crate::domain::screener::{ScreenerRow, ScreenerStore};
@@ -112,7 +110,7 @@ pub(crate) struct ScreenerResponse {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct PortfolioActiveRow {
-    portfolio_id: &'static str,
+    portfolio_id: String,
     shortlist: Vec<String>,
     active_symbols: Vec<String>,
 }
@@ -235,12 +233,14 @@ pub(crate) async fn get_portfolio_active(
     State(state): State<Arc<HttpState>>,
 ) -> Json<PortfolioActiveResponse> {
     let assignment = state.screener.portfolio_assignment_v1();
-    let mut portfolios: Vec<PortfolioActiveRow> = [(PortfolioId::A, "A"), (PortfolioId::B, "B")]
+    let mut portfolios: Vec<PortfolioActiveRow> = state
+        .screener
+        .portfolio_ids_v1()
         .into_iter()
-        .map(|(portfolio_id, label)| {
+        .map(|portfolio_id| {
             let entry = assignment.get(&portfolio_id).cloned().unwrap_or_default();
             PortfolioActiveRow {
-                portfolio_id: label,
+                portfolio_id,
                 shortlist: entry.shortlist,
                 active_symbols: entry.active_symbols,
             }
@@ -260,8 +260,15 @@ pub(crate) async fn get_portfolio_active(
                     {
                         slot.shortlist = row.shortlist;
                         slot.active_symbols = row.active_symbols;
+                    } else {
+                        portfolios.push(PortfolioActiveRow {
+                            portfolio_id: row.portfolio_id,
+                            shortlist: row.shortlist,
+                            active_symbols: row.active_symbols,
+                        });
                     }
                 }
+                portfolios.sort_by(|a, b| a.portfolio_id.cmp(&b.portfolio_id));
             }
         }
     }

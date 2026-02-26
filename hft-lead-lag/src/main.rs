@@ -85,6 +85,7 @@ const STRATEGY_BLACKLIST: &[&str] = &[
     "AAVEUSDT",
 ];
 const SIGNAL_CHECK_BUDGET_PER_TICK: usize = 256;
+const PORTFOLIO_IDS_ENV: &str = "PORTFOLIO_IDS";
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
 
@@ -105,6 +106,31 @@ fn rebuild_latest_map(
         latest.insert(symbol.clone(), ticker.clone());
     }
     batch_latest
+}
+
+fn parse_portfolio_ids(raw: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for token in raw.split(',') {
+        let id = token.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if ids.iter().any(|existing| existing == id) {
+            continue;
+        }
+        ids.push(id.to_string());
+    }
+    ids
+}
+
+fn portfolio_ids_from_env() -> Option<Vec<String>> {
+    let raw = std::env::var(PORTFOLIO_IDS_ENV).ok()?;
+    let ids = parse_portfolio_ids(&raw);
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids)
+    }
 }
 
 #[tokio::main]
@@ -151,6 +177,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Start external APIs early so checkpoint endpoints are always available.
     let mut screener = ScreenerStore::default();
+    if let Some(portfolio_ids) = portfolio_ids_from_env() {
+        screener.set_portfolio_ids_v1(portfolio_ids.clone());
+        info!(
+            "Configured portfolio ids from {PORTFOLIO_IDS_ENV}: {:?}",
+            portfolio_ids
+        );
+    }
     let runtime_grid_path = Path::new(RUNTIME_GRID_CONFIG_PATH);
     ensure_runtime_grid_config_file(runtime_grid_path)?;
     let mut runtime_grid_last_modified: Option<FileFingerprint> = None;

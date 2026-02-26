@@ -1,16 +1,13 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const SHORTLIST_SIZE: usize = 5;
 pub const MAX_ACTIVE_SYMBOLS: usize = 4;
 pub const FAST_STREAK_WINDOW_MS: i64 = 120_000;
 pub const COOLDOWN_MS: i64 = 300_000;
+pub const DEFAULT_PORTFOLIO_IDS: &[&str] = &["A", "B"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PortfolioId {
-    A,
-    B,
-}
+pub type PortfolioId = String;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymbolStatsV1 {
@@ -35,9 +32,45 @@ pub struct SymbolGuardStateV1 {
     pub cooldown_until_ms: Option<i64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PortfolioEngineV1 {
     guards: HashMap<String, SymbolGuardStateV1>,
+    portfolio_ids: Vec<PortfolioId>,
+}
+
+impl Default for PortfolioEngineV1 {
+    fn default() -> Self {
+        Self {
+            guards: HashMap::new(),
+            portfolio_ids: default_portfolio_ids(),
+        }
+    }
+}
+
+pub fn default_portfolio_ids() -> Vec<PortfolioId> {
+    DEFAULT_PORTFOLIO_IDS
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect()
+}
+
+fn normalize_portfolio_ids(portfolio_ids: Vec<String>) -> Vec<PortfolioId> {
+    let mut normalized: Vec<PortfolioId> = Vec::new();
+    for raw in portfolio_ids {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if normalized.iter().any(|existing| existing == trimmed) {
+            continue;
+        }
+        normalized.push(trimmed.to_string());
+    }
+    if normalized.is_empty() {
+        default_portfolio_ids()
+    } else {
+        normalized
+    }
 }
 
 pub fn compute_useful_winrate(stats: &SymbolStatsV1) -> f64 {
@@ -91,48 +124,54 @@ impl PortfolioEngineV1 {
         Self::default()
     }
 
+    pub fn with_portfolio_ids(portfolio_ids: Vec<String>) -> Self {
+        Self {
+            guards: HashMap::new(),
+            portfolio_ids: normalize_portfolio_ids(portfolio_ids),
+        }
+    }
+
+    pub fn portfolio_ids(&self) -> &[PortfolioId] {
+        &self.portfolio_ids
+    }
+
+    pub fn set_portfolio_ids(&mut self, portfolio_ids: Vec<String>) {
+        self.portfolio_ids = normalize_portfolio_ids(portfolio_ids);
+    }
+
     pub fn assign_without_overlap(
         &self,
         candidates: &[SymbolStatsV1],
         now_ms: i64,
     ) -> BTreeMap<PortfolioId, PortfolioStateV1> {
-        let shortlist = self.build_shortlist(candidates, now_ms);
-        let shortlist_symbols: Vec<String> = shortlist.iter().map(|s| s.symbol.clone()).collect();
-
-        let mut active_a: Vec<String> = Vec::new();
-        let mut active_b: Vec<String> = Vec::new();
-
-        for stats in &shortlist {
-            let a_count = active_a.len();
-            let b_count = active_b.len();
-            let prefer_a = a_count <= b_count;
-
-            if prefer_a {
-                if active_a.len() < MAX_ACTIVE_SYMBOLS {
-                    active_a.push(stats.symbol.clone());
-                } else if active_b.len() < MAX_ACTIVE_SYMBOLS {
-                    active_b.push(stats.symbol.clone());
-                }
-            } else if active_b.len() < MAX_ACTIVE_SYMBOLS {
-                active_b.push(stats.symbol.clone());
-            } else if active_a.len() < MAX_ACTIVE_SYMBOLS {
-                active_a.push(stats.symbol.clone());
-            }
-        }
-
-        let state_a = PortfolioStateV1 {
-            shortlist: shortlist_symbols.clone(),
-            active_symbols: active_a,
-        };
-
-        let state_b = PortfolioStateV1 {
-            shortlist: shortlist_symbols,
-            active_symbols: active_b,
-        };
-
         let mut states = BTreeMap::new();
-        states.insert(PortfolioId::A, state_a);
-        states.insert(PortfolioId::B, state_b);
+        let ranked_pool = self.build_shortlist_pool(candidates, now_ms);
+        let shortlist_by_id: BTreeMap<PortfolioId, Vec<String>> = self
+            .portfolio_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, portfolio_id)| {
+                (
+                    portfolio_id.clone(),
+                    self.build_portfolio_shortlist(&ranked_pool, idx),
+                )
+            })
+            .collect();
+        let active_by_id = self.assign_active_symbols_no_overlap(&shortlist_by_id);
+        for portfolio_id in &self.portfolio_ids {
+            let shortlist = shortlist_by_id
+                .get(portfolio_id)
+                .cloned()
+                .unwrap_or_default();
+            let active_symbols = active_by_id.get(portfolio_id).cloned().unwrap_or_default();
+            states.insert(
+                portfolio_id.clone(),
+                PortfolioStateV1 {
+                    shortlist,
+                    active_symbols,
+                },
+            );
+        }
         states
     }
 
@@ -205,11 +244,84 @@ impl PortfolioEngineV1 {
         self.guards.extend(rows);
     }
 
-    fn build_shortlist(&self, candidates: &[SymbolStatsV1], now_ms: i64) -> Vec<SymbolStatsV1> {
+    fn build_shortlist_pool(
+        &self,
+        candidates: &[SymbolStatsV1],
+        now_ms: i64,
+    ) -> Vec<SymbolStatsV1> {
         rank_candidates(candidates)
             .into_iter()
             .filter(|stats| self.can_reenter(&stats.symbol, stats, now_ms))
-            .take(SHORTLIST_SIZE)
             .collect()
+    }
+
+    fn build_portfolio_shortlist(
+        &self,
+        ranked_pool: &[SymbolStatsV1],
+        portfolio_idx: usize,
+    ) -> Vec<String> {
+        if ranked_pool.is_empty() {
+            return Vec::new();
+        }
+
+        let mut shortlist: Vec<String> = Vec::new();
+        let rotation = portfolio_idx
+            .saturating_mul(MAX_ACTIVE_SYMBOLS)
+            .rem_euclid(ranked_pool.len());
+
+        for step in 0..ranked_pool.len() {
+            if shortlist.len() >= SHORTLIST_SIZE {
+                break;
+            }
+            let idx = (rotation + step) % ranked_pool.len();
+            let symbol = ranked_pool[idx].symbol.clone();
+            if shortlist.iter().any(|existing| existing == &symbol) {
+                continue;
+            }
+            shortlist.push(symbol);
+        }
+
+        shortlist
+    }
+
+    fn assign_active_symbols_no_overlap(
+        &self,
+        shortlist_by_id: &BTreeMap<PortfolioId, Vec<String>>,
+    ) -> BTreeMap<PortfolioId, Vec<String>> {
+        let mut used_symbols: HashSet<String> = HashSet::new();
+        let mut active_by_id: BTreeMap<PortfolioId, Vec<String>> = self
+            .portfolio_ids
+            .iter()
+            .map(|id| (id.clone(), Vec::new()))
+            .collect();
+
+        loop {
+            let mut progressed = false;
+            for portfolio_id in &self.portfolio_ids {
+                let shortlist = shortlist_by_id.get(portfolio_id);
+                let active_symbols = active_by_id
+                    .get_mut(portfolio_id)
+                    .expect("portfolio id should be initialized");
+                if active_symbols.len() >= MAX_ACTIVE_SYMBOLS {
+                    continue;
+                }
+                let Some(shortlist) = shortlist else {
+                    continue;
+                };
+                let maybe_next = shortlist
+                    .iter()
+                    .find(|symbol| !used_symbols.contains(*symbol));
+                if let Some(symbol) = maybe_next {
+                    active_symbols.push(symbol.clone());
+                    used_symbols.insert(symbol.clone());
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+
+        active_by_id
     }
 }
