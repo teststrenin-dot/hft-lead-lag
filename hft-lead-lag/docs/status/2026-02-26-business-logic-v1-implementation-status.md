@@ -45,9 +45,9 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 | Метрики по всему флоту | `Implemented` | `src/domain/screener/mod.rs:408` | Глобальная агрегация по всем символам в accumulators. |
 | Полная история (без rolling window) | `Implemented` | `src/infrastructure/db.rs:648`, `src/domain/screener/mod.rs:330`, `src/runtime_setup.rs:181` | История агрегируется из `trades` и восстанавливается в `trade_accumulators` после рестарта. |
 | avg pnl >= 0 | `Implemented` | `src/application/services/portfolio_runtime.rs:58` | В `eligible`. |
-| shortlist top-5 per portfolio | `Implemented` | `src/application/services/portfolio_runtime.rs:4`, `src/application/services/portfolio_runtime.rs:255` | `SHORTLIST_SIZE=5`. |
-| Нет overlap между активными символами портфелей | `Implemented` | `src/application/services/portfolio_runtime.rs:94` | Ownership map + split active sets. |
-| Конфликт по «лучшей» метрике | `Implemented` | `src/application/services/portfolio_runtime.rs:118` | При строгом превосходстве — победитель по tuple; при полном равенстве добавлен балансирующий tie-break. |
+| shortlist top-5 per portfolio | `Partial` | `src/application/services/portfolio_runtime.rs:4`, `src/application/services/portfolio_runtime.rs:90` | Сейчас строится единый `top-5` shortlist и копируется в оба портфеля; независимые shortlist per-portfolio пока не реализованы. |
+| Нет overlap между активными символами портфелей | `Implemented` | `src/application/services/portfolio_runtime.rs:94` | Активные символы раскладываются по портфелям без пересечений из общего shortlist. |
+| Конфликт по «лучшей» метрике | `Implemented` | `src/application/services/portfolio_runtime.rs:70`, `src/application/services/portfolio_runtime.rs:101` | Победитель определяется tuple-компаратором; при равном rank символы распределяются по портфелям через баланс по заполненности. |
 
 ## 6) Eject / Reset Rules
 | Item | Status | Evidence | Notes |
@@ -66,7 +66,7 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 ## 8) Rebalance Cadence
 | Item | Status | Evidence | Notes |
 |---|---|---|---|
-| Ребаланс каждые 2 минуты | `Partial` | `src/domain/screener/mod.rs:49`, `src/domain/screener/mod.rs:384`, `src/domain/screener/quote_ingest.rs:106` | Есть 2-минутный gate, но вызов event-driven на тиках, а не отдельный background таймер. |
+| Ребаланс каждые 2 минуты | `Implemented` | `src/event_loop_runtime.rs:8`, `src/event_loop_runtime.rs:106`, `src/domain/screener/mod.rs:468` | Вынесено в отдельный scheduler (`tokio::interval`) с внутренним cadence-gate в screener. |
 
 ## 9) Portfolio Race Policy
 | Item | Status | Evidence | Notes |
@@ -80,13 +80,13 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 | Dynamic hyperparameters policy | `Out of Scope (v1)` | `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md` | Намеренно отложено на v2. |
 
 ## Current Open Gaps (Priority)
-1. `P2`: rebalance invocation model (event-driven hot path vs dedicated 2-minute loop).
+1. `P1`: независимые shortlist per portfolio не реализованы (сейчас общий shortlist копируется в `A/B`).
 2. `P2`: явная runtime-связка `1 portfolio = 1 bot process` пока не реализована.
 3. `P2`: портфельная гонка пока аналитическая (нет money-rebalance/auto-promote winner path).
 4. `P3`: dynamic hyperparameters policy для нормализации к режиму рынка отложена (v2).
 
 ## Что Нужно Сделать Для 100% Бизнес-Логики
-1. Вынести ребаланс в отдельный scheduler (`2m cadence`), чтобы он не зависел от плотности тиков и не деградировал при просадке потока.
+1. Разделить shortlist-логику по портфелям (отдельные candidate pools/ranking для `A` и `B`), чтобы выполнить требование «каждый портфель берёт свой shortlist».
 2. Реализовать явный runtime слой `portfolio -> bot` (изолированный execution loop, health, restart policy по каждому портфелю).
 3. Доделать переход «гонка -> действие»: winner selection и автоматический маршрут в execution mode (сейчас это только read-model/аналитика).
 4. Добавить money-rebalance policy (allocation, лимиты риска, handoff между портфелями), сейчас это `Planned`.
@@ -96,3 +96,7 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 ## Tracking Update Rule
 - Обновлять этот файл после каждого раунда ревью и после каждого фикса `P0/P1`.
 - Для изменения статуса пункта обязательно указывать код-референс в колонке `Evidence`.
+
+## Delivery Roadmap
+- Чекпоинты реализации вынесены в отдельный документ:
+  - `docs/status/2026-02-26-business-logic-v1-checkpoints.md`

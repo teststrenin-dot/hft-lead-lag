@@ -29,6 +29,17 @@ ask_bid_bps = spread(hedge.bid, primary.ask)
 spread_bps = max(bid_ask_bps, ask_bid_bps)
 ```
 
+Выбор торгового направления:
+```text
+direction = LONG_LAGGER,  if bid_ask_bps >= ask_bid_bps
+direction = SHORT_LAGGER, otherwise
+```
+
+Гейт по лидерству primary (после offset-коррекции времени):
+```text
+signal is allowed only if primary_corrected_ts_ns >= hedge_corrected_ts_ns
+```
+
 Сигнал есть, если:
 ```text
 spread_bps >= min_entry_spread_bps
@@ -44,6 +55,17 @@ Evidence:
 - ms -> как есть
 - us -> `/1000`
 - ns -> `/1_000_000`
+
+Exchange clock-offset correction (по каждой бирже отдельно):
+```text
+offset_sample = ingress_ts - exchange_ts
+offset = median(last N offset_sample)
+corrected_exchange_ts = exchange_ts + offset
+```
+
+Параметры:
+- screener: `N=512` samples, recompute median every `64` updates, guard `|offset_sample_ms| <= 6h`;
+- lead-lag strategy service: та же формула в ns-домене, `N=256`.
 
 WebSocket drift:
 ```text
@@ -63,6 +85,8 @@ p = v[lo]*(1-frac) + v[hi]*frac
 
 Evidence:
 - `src/domain/screener/utils.rs`
+- `src/domain/screener/clock_offset.rs`
+- `src/application/services/lead_lag.rs`
 
 ## 3) Screener Lag and Cycle Metrics
 Instant lag:
@@ -77,7 +101,7 @@ lag_ms = p50(lag_samples in lag_window)
 
 Leader side:
 ```text
-leader = argmax(exchange_ts_ms)
+leader = argmax(corrected_exchange_ts_ms)
 ```
 
 Cycle divergence/convergence (через leader_mid):
@@ -261,8 +285,16 @@ persistent_trigger: stop_loss_streak >= 6
 cooldown_until = ts_ms + 300_000
 ```
 
+Scheduler cadence (portfolio rebalance):
+```text
+event_loop_tick_every = 120_000 ms
+rebalance_allowed if now_ms - last_rebalance_ms >= 120_000
+```
+
 Evidence:
 - `src/application/services/portfolio_runtime.rs`
+- `src/domain/screener/mod.rs`
+- `src/event_loop_runtime.rs`
 
 ## 8) Trial Axes Analytics Math
 Bucketing:
