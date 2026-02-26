@@ -72,6 +72,9 @@ fn resolve_lead_lag_config(
         if let Some(max_quote_skew_ms) = file_config.max_quote_skew_ms {
             config.max_quote_skew_ms = max_quote_skew_ms;
         }
+        if let Some(max_quote_age_ms) = file_config.max_quote_age_ms {
+            config.max_quote_age_ms = max_quote_age_ms;
+        }
     }
     config
 }
@@ -158,7 +161,7 @@ mod tests {
             1,
             1,
             123,
-            124,
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64,
         )
     }
 
@@ -240,6 +243,38 @@ symbols = ["BTCUSDT"]
                 .expect("load config");
         let runtime = resolve_lead_lag_config(&manager, vec!["BTCUSDT".to_string()]);
         assert_eq!(runtime.min_entry_spread_bps, 100.0);
+        fs::remove_file(path).expect("cleanup temp config");
+    }
+
+    #[test]
+    fn resolve_lead_lag_config_applies_quote_freshness_overrides() {
+        let path = write_temp_config(
+            "freshness-overrides",
+            r#"
+[binance]
+enabled = true
+blacklist = []
+
+[gate]
+enabled = true
+blacklist = []
+
+[lead_lag]
+primary_exchange = "binance"
+hedge_exchange = "gate"
+trigger_spread_bps = 30.0
+max_position_age_ms = 5000
+max_quote_skew_ms = 750
+max_quote_age_ms = 400
+symbols = ["BTCUSDT"]
+"#,
+        );
+        let manager =
+            crate::config::ConfigManager::from_file(path.to_str().expect("utf-8 temp path"))
+                .expect("load config");
+        let runtime = resolve_lead_lag_config(&manager, vec!["BTCUSDT".to_string()]);
+        assert_eq!(runtime.max_quote_skew_ms, 750);
+        assert_eq!(runtime.max_quote_age_ms, 400);
         fs::remove_file(path).expect("cleanup temp config");
     }
 }

@@ -161,6 +161,9 @@ pub struct LeadLagStrategyConfig {
     /// Maximum allowed local receive skew between primary and hedge quotes (ms).
     /// If exceeded, signal is suppressed as stale cross-exchange pair.
     pub max_quote_skew_ms: u64,
+    /// Maximum allowed quote age in local time for each side (ms).
+    /// If exceeded for either side, signal is suppressed as stale.
+    pub max_quote_age_ms: u64,
 }
 
 impl Default for LeadLagStrategyConfig {
@@ -174,6 +177,7 @@ impl Default for LeadLagStrategyConfig {
             order_qty_usd: 10.0,
             symbols: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
             max_quote_skew_ms: 1_000,
+            max_quote_age_ms: 2_000,
         }
     }
 }
@@ -237,6 +241,15 @@ impl LeadLagStrategy {
             return None;
         }
 
+        let now_ns = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
+        let max_quote_age_ns = self.config.max_quote_age_ms.saturating_mul(1_000_000);
+        if max_quote_age_ns > 0
+            && (now_ns.abs_diff(primary.local_ts_ns) > max_quote_age_ns
+                || now_ns.abs_diff(hedge.local_ts_ns) > max_quote_age_ns)
+        {
+            return None;
+        }
+
         let max_quote_skew_ns = self.config.max_quote_skew_ms.saturating_mul(1_000_000);
         if max_quote_skew_ns > 0
             && primary.local_ts_ns.abs_diff(hedge.local_ts_ns) > max_quote_skew_ns
@@ -285,7 +298,7 @@ impl LeadLagStrategy {
                 direction,
                 bid_ask_bps,
                 ask_bid_bps,
-                timestamp_ns: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64,
+                timestamp_ns: now_ns,
             })
         } else {
             None
@@ -323,7 +336,13 @@ mod tests {
     }
 
     fn ticker(symbol: &str, bid: f64, ask: f64, exchange_ts_ns: i64) -> BookTicker {
-        ticker_with_local(symbol, bid, ask, exchange_ts_ns, exchange_ts_ns)
+        ticker_with_local(
+            symbol,
+            bid,
+            ask,
+            exchange_ts_ns,
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64,
+        )
     }
 
     fn ticker_with_local(
@@ -413,6 +432,7 @@ mod tests {
     async fn check_signal_does_not_drop_primary_when_hedge_clock_is_ahead() {
         let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
             min_entry_spread_bps: 50.0,
+            max_quote_age_ms: 0,
             symbols: vec!["BTCUSDT".to_string()],
             ..Default::default()
         });
@@ -449,6 +469,7 @@ mod tests {
     async fn check_signal_ignores_when_quotes_are_too_far_apart_in_local_time() {
         let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
             min_entry_spread_bps: 50.0,
+            max_quote_age_ms: 0,
             symbols: vec!["BTCUSDT".to_string()],
             ..Default::default()
         });
@@ -474,5 +495,41 @@ mod tests {
             .await;
 
         assert!(strategy.check_signal("BTCUSDT").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn check_signal_ignores_when_one_quote_is_stale_even_if_skew_is_within_limit() {
+        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+            min_entry_spread_bps: 50.0,
+            max_quote_skew_ms: 10_000,
+            max_quote_age_ms: 250,
+            symbols: vec!["BTCUSDT".to_string()],
+            ..Default::default()
+        });
+
+        let now_ns = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
+        strategy
+            .update_primary_book(ticker_with_local(
+                "BTCUSDT",
+                110.0,
+                111.0,
+                200,
+                now_ns - 5_000_000_000,
+            ))
+            .await;
+        strategy
+            .update_hedge_book(ticker_with_local(
+                "BTCUSDT",
+                100.0,
+                101.0,
+                100,
+                now_ns - 50_000_000,
+            ))
+            .await;
+
+        assert!(
+            strategy.check_signal("BTCUSDT").await.is_none(),
+            "stale local quote must not produce signal even when pairwise skew is allowed"
+        );
     }
 }

@@ -40,6 +40,17 @@ direction = SHORT_LAGGER, otherwise
 signal is allowed only if primary_corrected_ts_ns >= hedge_corrected_ts_ns
 ```
 
+Freshness-гейты по local-time:
+```text
+pair_skew_ns = |primary.local_ts_ns - hedge.local_ts_ns|
+pair_skew_ns <= max_quote_skew_ms * 1_000_000
+
+age_primary_ns = |now_ns - primary.local_ts_ns|
+age_hedge_ns   = |now_ns - hedge.local_ts_ns|
+age_primary_ns <= max_quote_age_ms * 1_000_000
+age_hedge_ns   <= max_quote_age_ms * 1_000_000
+```
+
 Сигнал есть, если:
 ```text
 spread_bps >= min_entry_spread_bps
@@ -48,6 +59,7 @@ spread_bps >= min_entry_spread_bps
 Evidence:
 - `src/application/services/lead_lag.rs::calculate_spread_bps`
 - `src/application/services/lead_lag.rs::check_signal`
+- `src/application/strategies/mod.rs::resolve_lead_lag_config`
 
 ## 2) Time Normalization, Drift, Percentiles
 Нормализация timestamp к ms:

@@ -73,6 +73,12 @@ fn portfolio_runtime_assign_without_overlap_enforces_top5_and_max4() {
         stats("A3", 6, 14, 9, 4, 0.08),
         stats("A4", 6, 12, 8, 4, 0.07),
         stats("A6", 6, 10, 6, 4, 0.01),
+        stats("A7", 6, 9, 6, 3, 0.01),
+        stats("A8", 6, 8, 5, 3, 0.01),
+        stats("A9", 6, 7, 4, 3, 0.01),
+        stats("A10", 6, 7, 4, 3, 0.00),
+        stats("A11", 6, 6, 3, 3, 0.00),
+        stats("A12", 6, 6, 3, 3, 0.00),
     ];
 
     let assigned = engine.assign_without_overlap(&pool, 0);
@@ -83,6 +89,16 @@ fn portfolio_runtime_assign_without_overlap_enforces_top5_and_max4() {
     assert_eq!(b_state.shortlist.len(), 5);
     assert!(a_state.active_symbols.len() <= 4);
     assert!(b_state.active_symbols.len() <= 4);
+
+    let shortlist_overlap: Vec<&String> = a_state
+        .shortlist
+        .iter()
+        .filter(|sym| b_state.shortlist.contains(*sym))
+        .collect();
+    assert!(
+        shortlist_overlap.is_empty(),
+        "shortlists must not overlap across portfolios"
+    );
 
     let overlap: Vec<&String> = a_state
         .active_symbols
@@ -107,11 +123,21 @@ fn portfolio_runtime_assign_without_overlap_balances_identical_candidate_pool() 
     let assigned = engine.assign_without_overlap(&pool, 0);
     let a_state = assigned.get("A").expect("state A");
     let b_state = assigned.get("B").expect("state B");
-    assert_eq!(a_state.shortlist.len(), 5);
-    assert_eq!(b_state.shortlist.len(), 5);
+    assert!(a_state.shortlist.len() <= 5);
+    assert!(b_state.shortlist.len() <= 5);
     assert!(
         !a_state.active_symbols.is_empty() && !b_state.active_symbols.is_empty(),
         "identical pools must not starve one portfolio"
+    );
+
+    let shortlist_overlap: Vec<&String> = a_state
+        .shortlist
+        .iter()
+        .filter(|sym| b_state.shortlist.contains(*sym))
+        .collect();
+    assert!(
+        shortlist_overlap.is_empty(),
+        "shortlists must not overlap across portfolios"
     );
 
     let overlap: Vec<&String> = a_state
@@ -122,15 +148,20 @@ fn portfolio_runtime_assign_without_overlap_balances_identical_candidate_pool() 
     assert!(overlap.is_empty(), "active symbols must not overlap");
 
     let union: HashSet<String> = a_state
-        .active_symbols
+        .shortlist
         .iter()
-        .chain(b_state.active_symbols.iter())
+        .chain(b_state.shortlist.iter())
         .cloned()
         .collect();
     assert_eq!(
         union.len(),
         6,
-        "round-robin assignment should allocate all unique symbols without overlap"
+        "all unique symbols should be distributed across shortlists without overlap"
+    );
+    assert_eq!(
+        a_state.shortlist.len() + b_state.shortlist.len(),
+        6,
+        "with no-overlap shortlists total allocation cannot exceed pool size"
     );
 }
 
@@ -158,16 +189,37 @@ fn portfolio_runtime_with_portfolio_ids_supports_dynamic_count_and_independent_s
     let assigned = engine.assign_without_overlap(&pool, 0);
 
     assert_eq!(assigned.len(), 3);
-    assert_eq!(assigned.get("A").expect("A").shortlist.len(), 5);
-    assert_eq!(assigned.get("B").expect("B").shortlist.len(), 5);
-    assert_eq!(assigned.get("C").expect("C").shortlist.len(), 5);
+    assert!(assigned.get("A").expect("A").shortlist.len() <= 5);
+    assert!(assigned.get("B").expect("B").shortlist.len() <= 5);
+    assert!(assigned.get("C").expect("C").shortlist.len() <= 5);
+
+    let a_shortlist = assigned.get("A").expect("A").shortlist.clone();
+    let b_shortlist = assigned.get("B").expect("B").shortlist.clone();
+    let c_shortlist = assigned.get("C").expect("C").shortlist.clone();
+
     assert_ne!(
-        assigned.get("A").expect("A").shortlist,
-        assigned.get("B").expect("B").shortlist
+        a_shortlist, b_shortlist,
+        "portfolios should not receive identical shortlist"
     );
     assert_ne!(
-        assigned.get("B").expect("B").shortlist,
-        assigned.get("C").expect("C").shortlist
+        b_shortlist, c_shortlist,
+        "portfolios should not receive identical shortlist"
+    );
+
+    let mut shortlist_union: HashSet<String> = HashSet::new();
+    for symbol in &a_shortlist {
+        assert!(shortlist_union.insert(symbol.clone()));
+    }
+    for symbol in &b_shortlist {
+        assert!(shortlist_union.insert(symbol.clone()));
+    }
+    for symbol in &c_shortlist {
+        assert!(shortlist_union.insert(symbol.clone()));
+    }
+    assert_eq!(
+        shortlist_union.len(),
+        7,
+        "all symbols should be allocated across 3 shortlists without overlap"
     );
 }
 

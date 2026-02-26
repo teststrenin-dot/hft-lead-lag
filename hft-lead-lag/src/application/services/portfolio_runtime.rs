@@ -146,17 +146,7 @@ impl PortfolioEngineV1 {
     ) -> BTreeMap<PortfolioId, PortfolioStateV1> {
         let mut states = BTreeMap::new();
         let ranked_pool = self.build_shortlist_pool(candidates, now_ms);
-        let shortlist_by_id: BTreeMap<PortfolioId, Vec<String>> = self
-            .portfolio_ids
-            .iter()
-            .enumerate()
-            .map(|(idx, portfolio_id)| {
-                (
-                    portfolio_id.clone(),
-                    self.build_portfolio_shortlist(&ranked_pool, idx),
-                )
-            })
-            .collect();
+        let shortlist_by_id = self.build_shortlists_no_overlap(&ranked_pool);
         let active_by_id = self.assign_active_symbols_no_overlap(&shortlist_by_id);
         for portfolio_id in &self.portfolio_ids {
             let shortlist = shortlist_by_id
@@ -255,33 +245,44 @@ impl PortfolioEngineV1 {
             .collect()
     }
 
-    fn build_portfolio_shortlist(
+    fn build_shortlists_no_overlap(
         &self,
         ranked_pool: &[SymbolStatsV1],
-        portfolio_idx: usize,
-    ) -> Vec<String> {
+    ) -> BTreeMap<PortfolioId, Vec<String>> {
+        let mut shortlist_by_id: BTreeMap<PortfolioId, Vec<String>> = self
+            .portfolio_ids
+            .iter()
+            .map(|id| (id.clone(), Vec::new()))
+            .collect();
+
         if ranked_pool.is_empty() {
-            return Vec::new();
+            return shortlist_by_id;
         }
 
-        let mut shortlist: Vec<String> = Vec::new();
-        let rotation = portfolio_idx
-            .saturating_mul(MAX_ACTIVE_SYMBOLS)
-            .rem_euclid(ranked_pool.len());
+        let mut cursor = 0usize;
+        for _round in 0..SHORTLIST_SIZE {
+            let mut progressed = false;
+            for portfolio_id in &self.portfolio_ids {
+                let shortlist = shortlist_by_id
+                    .get_mut(portfolio_id)
+                    .expect("portfolio id should be initialized");
+                if shortlist.len() >= SHORTLIST_SIZE {
+                    continue;
+                }
+                if cursor >= ranked_pool.len() {
+                    break;
+                }
 
-        for step in 0..ranked_pool.len() {
-            if shortlist.len() >= SHORTLIST_SIZE {
+                shortlist.push(ranked_pool[cursor].symbol.clone());
+                cursor = cursor.saturating_add(1);
+                progressed = true;
+            }
+            if !progressed {
                 break;
             }
-            let idx = (rotation + step) % ranked_pool.len();
-            let symbol = ranked_pool[idx].symbol.clone();
-            if shortlist.iter().any(|existing| existing == &symbol) {
-                continue;
-            }
-            shortlist.push(symbol);
         }
 
-        shortlist
+        shortlist_by_id
     }
 
     fn assign_active_symbols_no_overlap(
