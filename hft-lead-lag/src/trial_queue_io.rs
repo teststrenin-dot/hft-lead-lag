@@ -142,6 +142,14 @@ pub(super) fn trial_batch_archive_dir(config_dir: &Path, success: bool) -> PathB
     config_dir.join("trial-batches-archive").join(bucket)
 }
 
+fn quarantine_marker_path(batch_json_path: &Path) -> PathBuf {
+    let file_name = batch_json_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("batch.json");
+    batch_json_path.with_file_name(format!("{file_name}.archive-quarantine"))
+}
+
 fn trial_ack_queue_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("trial-acks")
 }
@@ -159,6 +167,7 @@ pub(super) fn list_trial_batch_queue_files(config_dir: &Path) -> Vec<PathBuf> {
             .extension()
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            && !quarantine_marker_path(&path).exists()
         {
             files.push(path);
         }
@@ -226,6 +235,25 @@ pub(super) fn archive_trial_batch_queue_file(
             EventLoopState::now_ms()
         ));
         if let Err(error) = std::fs::rename(queued_batch_path, &stashed_path) {
+            let quarantine_marker = quarantine_marker_path(queued_batch_path);
+            if let Err(marker_error) = std::fs::write(
+                &quarantine_marker,
+                format!(
+                    "quarantined_at_ms={}\narchive_error={}\n",
+                    EventLoopState::now_ms(),
+                    error
+                ),
+            ) {
+                warn!(
+                    "trial-batch queue: archive+stash failed, and marker write failed {}: {marker_error}",
+                    quarantine_marker.display()
+                );
+            } else {
+                warn!(
+                    "trial-batch queue: archive+stash failed, marked payload as quarantined via {}",
+                    quarantine_marker.display()
+                );
+            }
             warn!(
                 "trial-batch queue: archive failed and stash rename failed {} -> {}: {error}",
                 queued_batch_path.display(),

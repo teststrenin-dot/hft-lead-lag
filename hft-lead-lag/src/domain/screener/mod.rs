@@ -438,10 +438,7 @@ impl ScreenerStore {
                 }
             }
 
-            runtime.latest_assignment =
-                runtime
-                    .engine
-                    .assign_without_overlap(&candidates, &candidates, now_ms);
+            runtime.latest_assignment = runtime.engine.assign_without_overlap(&candidates, now_ms);
             runtime.last_rebalance_ms = Some(now_ms);
             Some(Self::portfolio_snapshot_records(&runtime, now_ms))
         };

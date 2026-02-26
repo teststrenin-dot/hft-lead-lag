@@ -93,83 +93,41 @@ impl PortfolioEngineV1 {
 
     pub fn assign_without_overlap(
         &self,
-        portfolio_a_candidates: &[SymbolStatsV1],
-        portfolio_b_candidates: &[SymbolStatsV1],
+        candidates: &[SymbolStatsV1],
         now_ms: i64,
     ) -> BTreeMap<PortfolioId, PortfolioStateV1> {
-        let shortlist_a = self.build_shortlist(portfolio_a_candidates, now_ms);
-        let shortlist_b = self.build_shortlist(portfolio_b_candidates, now_ms);
+        let shortlist = self.build_shortlist(candidates, now_ms);
+        let shortlist_symbols: Vec<String> = shortlist.iter().map(|s| s.symbol.clone()).collect();
 
-        let mut ownership: HashMap<String, (PortfolioId, SymbolStatsV1)> = HashMap::new();
-        let mut owner_counts: HashMap<PortfolioId, usize> =
-            HashMap::from([(PortfolioId::A, 0_usize), (PortfolioId::B, 0_usize)]);
+        let mut active_a: Vec<String> = Vec::new();
+        let mut active_b: Vec<String> = Vec::new();
 
-        for (portfolio_id, shortlist) in [
-            (PortfolioId::A, &shortlist_a),
-            (PortfolioId::B, &shortlist_b),
-        ] {
-            for stats in shortlist {
-                match ownership.get(&stats.symbol).cloned() {
-                    None => {
-                        ownership.insert(stats.symbol.clone(), (portfolio_id, stats.clone()));
-                        *owner_counts.entry(portfolio_id).or_default() += 1;
-                    }
-                    Some((current_owner, current)) => {
-                        let should_take = match rank_tuple_cmp(stats, &current) {
-                            Ordering::Less => true,
-                            Ordering::Equal => {
-                                let candidate_count =
-                                    owner_counts.get(&portfolio_id).copied().unwrap_or(0);
-                                let current_count =
-                                    owner_counts.get(&current_owner).copied().unwrap_or(0);
-                                // Deterministic tie-break: keep active sets balanced.
-                                candidate_count < current_count
-                            }
-                            Ordering::Greater => false,
-                        };
+        for stats in &shortlist {
+            let a_count = active_a.len();
+            let b_count = active_b.len();
+            let prefer_a = a_count <= b_count;
 
-                        if should_take {
-                            ownership.insert(stats.symbol.clone(), (portfolio_id, stats.clone()));
-                            if current_owner != portfolio_id {
-                                if let Some(count) = owner_counts.get_mut(&current_owner) {
-                                    *count = count.saturating_sub(1);
-                                }
-                                *owner_counts.entry(portfolio_id).or_default() += 1;
-                            }
-                        }
-                    }
+            if prefer_a {
+                if active_a.len() < MAX_ACTIVE_SYMBOLS {
+                    active_a.push(stats.symbol.clone());
+                } else if active_b.len() < MAX_ACTIVE_SYMBOLS {
+                    active_b.push(stats.symbol.clone());
                 }
+            } else if active_b.len() < MAX_ACTIVE_SYMBOLS {
+                active_b.push(stats.symbol.clone());
+            } else if active_a.len() < MAX_ACTIVE_SYMBOLS {
+                active_a.push(stats.symbol.clone());
             }
         }
 
         let state_a = PortfolioStateV1 {
-            shortlist: shortlist_a.iter().map(|s| s.symbol.clone()).collect(),
-            active_symbols: shortlist_a
-                .iter()
-                .filter(|s| {
-                    ownership
-                        .get(&s.symbol)
-                        .map(|(owner, _)| *owner == PortfolioId::A)
-                        .unwrap_or(false)
-                })
-                .map(|s| s.symbol.clone())
-                .take(MAX_ACTIVE_SYMBOLS)
-                .collect(),
+            shortlist: shortlist_symbols.clone(),
+            active_symbols: active_a,
         };
 
         let state_b = PortfolioStateV1 {
-            shortlist: shortlist_b.iter().map(|s| s.symbol.clone()).collect(),
-            active_symbols: shortlist_b
-                .iter()
-                .filter(|s| {
-                    ownership
-                        .get(&s.symbol)
-                        .map(|(owner, _)| *owner == PortfolioId::B)
-                        .unwrap_or(false)
-                })
-                .map(|s| s.symbol.clone())
-                .take(MAX_ACTIVE_SYMBOLS)
-                .collect(),
+            shortlist: shortlist_symbols,
+            active_symbols: active_b,
         };
 
         let mut states = BTreeMap::new();

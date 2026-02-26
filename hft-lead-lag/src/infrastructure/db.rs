@@ -759,13 +759,7 @@ fn try_enqueue_command(
 }
 
 impl DbWriter {
-    /// Enqueue a batch of trades for async persistence.
-    pub fn send(&self, trades: Vec<FleetTrade>) {
-        if trades.is_empty() {
-            return;
-        }
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let command = DbCommand::Trades { seq, trades };
+    fn enqueue_command(&self, command: DbCommand, command_label: &'static str) {
         let outcome = try_enqueue_command(
             &self.tx,
             &self.overflow_tx,
@@ -773,49 +767,60 @@ impl DbWriter {
             &self.spillover_tx,
             command,
         );
+
+        let log_deferred = |stage: &str, total_deferred: u64| {
+            if total_deferred.is_power_of_two() || total_deferred.is_multiple_of(1000) {
+                warn!(
+                    "db writer {stage} while enqueueing {command_label} (total deferred: {total_deferred})"
+                );
+            }
+        };
+
         match outcome {
             EnqueueOutcome::QueuedPrimary => {}
             EnqueueOutcome::QueuedOverflow => {
                 let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                if n.is_power_of_two() || n.is_multiple_of(1000) {
-                    warn!("db writer primary queue full, deferred batches total: {n}");
-                }
+                log_deferred("primary queue full", n);
             }
             EnqueueOutcome::QueuedRetry => {
                 let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                if n.is_power_of_two() || n.is_multiple_of(1000) {
-                    warn!(
-                        "db writer primary+overflow full, queued in retry buffer (total deferred: {n})"
-                    );
-                }
+                log_deferred("primary+overflow queues full, queued in retry buffer", n);
             }
             EnqueueOutcome::QueuedSpillover => {
                 let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                if n.is_power_of_two() || n.is_multiple_of(1000) {
-                    warn!(
-                        "db writer primary+overflow+retry full, queued in spillover buffer (total deferred: {n})"
-                    );
-                }
+                log_deferred(
+                    "primary+overflow+retry queues full, queued in spillover buffer",
+                    n,
+                );
             }
             EnqueueOutcome::NeedsBackpressure(command) => {
                 let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                if n.is_power_of_two() || n.is_multiple_of(1000) {
-                    warn!(
-                        "db writer all async queues saturated; applying producer backpressure (total deferred: {n})"
-                    );
-                }
+                log_deferred(
+                    "all async queues saturated; applying producer backpressure",
+                    n,
+                );
                 if self.backpressure_tx.blocking_send(command).is_err() {
                     let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
                     warn!(
-                        "db writer backpressure queue closed, dropping batch (total dropped: {dropped})"
+                        "db writer backpressure queue closed, dropping {command_label} (total dropped: {dropped})"
                     );
                 }
             }
             EnqueueOutcome::DroppedClosed => {
                 let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                warn!("db writer channel closed, dropping batch (total dropped: {n})");
+                warn!("db writer channel closed, dropping {command_label} (total dropped: {n})");
             }
         }
+    }
+
+    /// Enqueue a batch of trades for async persistence.
+    pub fn send(&self, trades: Vec<FleetTrade>) {
+        if trades.is_empty() {
+            return;
+        }
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let command = DbCommand::Trades { seq, trades };
+        self.enqueue_command(command, "trade batch");
     }
 
     /// Enqueue a portfolio snapshot (active/shortlist + guard state).
@@ -830,42 +835,7 @@ impl DbWriter {
             states,
             guards,
         };
-        let outcome = try_enqueue_command(
-            &self.tx,
-            &self.overflow_tx,
-            &self.retry_tx,
-            &self.spillover_tx,
-            command,
-        );
-        match outcome {
-            EnqueueOutcome::QueuedPrimary => {}
-            EnqueueOutcome::QueuedOverflow
-            | EnqueueOutcome::QueuedRetry
-            | EnqueueOutcome::QueuedSpillover => {
-                let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                if n.is_power_of_two() || n.is_multiple_of(1000) {
-                    warn!("db writer queue saturated while enqueueing portfolio snapshot (total deferred: {n})");
-                }
-            }
-            EnqueueOutcome::NeedsBackpressure(command) => {
-                let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                if n.is_power_of_two() || n.is_multiple_of(1000) {
-                    warn!(
-                        "db writer all async queues saturated for portfolio snapshot; applying producer backpressure (total deferred: {n})"
-                    );
-                }
-                if self.backpressure_tx.blocking_send(command).is_err() {
-                    let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                    warn!(
-                        "db writer backpressure queue closed, dropping portfolio snapshot (total dropped: {dropped})"
-                    );
-                }
-            }
-            EnqueueOutcome::DroppedClosed => {
-                let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
-                warn!("db writer channel closed, dropping portfolio snapshot (total dropped: {n})");
-            }
-        }
+        self.enqueue_command(command, "portfolio snapshot");
     }
 
     /// Flush all currently enqueued DB writer data to disk (best effort).

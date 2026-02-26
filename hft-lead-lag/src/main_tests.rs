@@ -188,6 +188,32 @@ fn list_trial_batch_queue_files_returns_sorted_json_files() {
 }
 
 #[test]
+fn list_trial_batch_queue_files_skips_quarantined_json_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-batch-list-quarantine-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    let queue_dir = trial_batch_queue_dir(&dir);
+    fs::create_dir_all(&queue_dir).expect("create queue dir");
+
+    let quarantined = queue_dir.join("run-q-1.json");
+    let healthy = queue_dir.join("run-q-2.json");
+    fs::write(&quarantined, "{}").expect("write quarantined json");
+    fs::write(&healthy, "{}").expect("write healthy json");
+    fs::write(
+        queue_dir.join("run-q-1.json.archive-quarantine"),
+        "quarantined",
+    )
+    .expect("write quarantine marker");
+
+    let listed = list_trial_batch_queue_files(&dir);
+    assert_eq!(listed, vec![healthy]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn list_trial_batch_queue_files_uses_mtime_fallback_for_non_timestamp_files() {
     let dir = std::env::temp_dir().join(format!(
         "hft-lead-lag-main-batch-queue-fallback-{}-{}",

@@ -65,7 +65,7 @@ fn portfolio_runtime_ranking_uses_v1_tuple_priority() {
 #[test]
 fn portfolio_runtime_assign_without_overlap_enforces_top5_and_max4() {
     let engine = PortfolioEngineV1::new();
-    let a = vec![
+    let pool = vec![
         stats("X", 6, 20, 13, 6, 0.12),
         stats("A1", 6, 18, 11, 5, 0.10),
         stats("A2", 6, 16, 10, 5, 0.09),
@@ -73,26 +73,15 @@ fn portfolio_runtime_assign_without_overlap_enforces_top5_and_max4() {
         stats("A4", 6, 12, 8, 4, 0.07),
         stats("A6", 6, 10, 6, 4, 0.01),
     ];
-    let b = vec![
-        stats("X", 6, 19, 13, 5, 0.11),
-        stats("B1", 6, 18, 12, 4, 0.10),
-        stats("B2", 6, 16, 10, 4, 0.09),
-        stats("B3", 6, 14, 9, 4, 0.08),
-        stats("B4", 6, 12, 8, 3, 0.07),
-        stats("B6", 6, 10, 7, 3, 0.01),
-    ];
 
-    let assigned = engine.assign_without_overlap(&a, &b, 0);
+    let assigned = engine.assign_without_overlap(&pool, 0);
     let a_state = assigned.get(&PortfolioId::A).expect("state A");
     let b_state = assigned.get(&PortfolioId::B).expect("state B");
 
     assert_eq!(a_state.shortlist.len(), 5);
     assert_eq!(b_state.shortlist.len(), 5);
-    assert_eq!(a_state.active_symbols.len(), 4);
-    assert_eq!(b_state.active_symbols.len(), 4);
-
-    assert!(!a_state.active_symbols.iter().any(|s| s == "X"));
-    assert!(b_state.active_symbols.iter().any(|s| s == "X"));
+    assert!(a_state.active_symbols.len() <= 4);
+    assert!(b_state.active_symbols.len() <= 4);
 
     let overlap: Vec<&String> = a_state
         .active_symbols
@@ -114,7 +103,7 @@ fn portfolio_runtime_assign_without_overlap_balances_identical_candidate_pool() 
         stats("S6", 6, 10, 6, 4, 0.10),
     ];
 
-    let assigned = engine.assign_without_overlap(&pool, &pool, 0);
+    let assigned = engine.assign_without_overlap(&pool, 0);
     let a_state = assigned.get(&PortfolioId::A).expect("state A");
     let b_state = assigned.get(&PortfolioId::B).expect("state B");
     assert_eq!(a_state.shortlist.len(), 5);
