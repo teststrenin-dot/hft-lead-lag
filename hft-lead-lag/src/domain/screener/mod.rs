@@ -12,6 +12,7 @@ pub mod cycle_tracker;
 pub mod fleet_patch;
 mod fleet_reload;
 mod policy_views;
+mod portfolio_records;
 pub mod price_samples;
 mod quote_ingest;
 pub mod shadow_fleet;
@@ -40,14 +41,15 @@ use self::utils::now_ms;
 use crate::application::services::{
     PortfolioEngineV1, PortfolioStateV1, SymbolGuardStateV1, SymbolStatsV1,
 };
-use crate::infrastructure::db::{
-    DbWriter, PortfolioCandidateHistoryRecordV1, PortfolioGuardRecordV1, PortfolioStateRecordV1,
-};
+use crate::infrastructure::db::DbWriter;
 
 pub use self::shadow_fleet::PolicyConfigSnapshot;
 pub use self::shadow_trader::{ChartTrade, ShadowStats};
 pub use self::trader_config::{
     TraderConfig, TraderConfigValidationError, CONFIG_ID_CONTRACT_VERSION,
+};
+pub use portfolio_records::{
+    PortfolioCandidateHistoryRecordV1, PortfolioGuardRecordV1, PortfolioStateRecordV1,
 };
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
