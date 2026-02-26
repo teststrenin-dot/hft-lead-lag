@@ -45,6 +45,7 @@ impl ExchangeDrifts {
 
 #[derive(Debug, Default)]
 pub struct SymbolState {
+    pub(crate) first_tick_ms: Option<i64>,
     pub(crate) binance: Option<Quote>,
     pub(crate) gate: Option<Quote>,
     pub(crate) leader_exchange: &'static str,

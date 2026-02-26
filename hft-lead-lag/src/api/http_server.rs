@@ -142,6 +142,12 @@ impl HttpServer {
             .route(endpoints::SYMBOLS, get(handlers::get_symbols))
             .route(endpoints::SCREENER_DATA, get(handlers::get_screener))
             .route(endpoints::SCREENER_PAGE, get(templates::screener_page))
+            .route("/api/v1/portfolio/active", get(handlers::get_portfolio_active))
+            .route(
+                "/api/v1/portfolio/candidates",
+                get(handlers::get_portfolio_candidates),
+            )
+            .route("/api/v1/portfolio/guards", get(handlers::get_portfolio_guards))
             .route("/api/v1/shadow/:symbol", get(handlers::get_shadow_debug))
             .route("/api/v1/chart/:symbol", get(handlers::get_chart_data))
             .route("/api/v1/fleet", get(handlers::get_fleet_ranking))

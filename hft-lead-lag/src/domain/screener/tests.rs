@@ -143,6 +143,27 @@ fn update_drains_pending_fleet_trades_even_without_db_writer() {
 }
 
 #[test]
+fn update_partial_book_with_existing_portfolio_stats_does_not_block() {
+    let store = ScreenerStore::default();
+    // Pre-create candidate stats so rebalance path reads this symbol from accumulators.
+    store.observe_closed_trade_for_portfolio("BTCUSDT", 0.10, false, 1_000);
+    let ts_ns = 1_700_000_100_000_000_000_i64;
+    let update_ts_ms = ts_ns / 1_000_000;
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let store_clone = store.clone();
+
+    std::thread::spawn(move || {
+        store_clone.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
+        let _ = done_tx.send(());
+    });
+
+    done_rx
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .expect("update() must not block on partial-book rebalance path");
+    assert_eq!(store.portfolio_last_rebalance_ms(), Some(update_ts_ms));
+}
+
+#[test]
 fn rows_sorted_marks_live_ws_source_and_update_time() {
     let store = ScreenerStore::default();
     let ts_ns = 1_700_000_000_000_000_000_i64;
@@ -414,5 +435,198 @@ fn incremental_with_mixed_old_and_new_ids_resets_symbol_for_new_only_id() {
             .fleet
             .is_none(),
         "new-only changed id must reset in-scope symbol fleet"
+    );
+}
+
+#[test]
+fn portfolio_candidate_age_uses_first_tick_timestamp() {
+    let store = ScreenerStore::default();
+    let ts_ns = 1_700_000_000_000_000_000_i64;
+    let first_tick_ms = ts_ns / 1_000_000;
+
+    store.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
+    store.update(
+        "BTCUSDT",
+        "gate",
+        100.0,
+        100.1,
+        ts_ns + 1_000_000,
+        ts_ns + 1_000_000,
+    );
+
+    let state = store.symbols.get("BTCUSDT").expect("BTCUSDT state");
+    assert_eq!(state.first_tick_ms, Some(first_tick_ms));
+
+    store.observe_closed_trade_for_portfolio("BTCUSDT", 0.10, false, first_tick_ms + 1_000);
+    let stats = store.portfolio_candidate_stats_v1(first_tick_ms + 6 * 60_000);
+    let btc = stats
+        .iter()
+        .find(|row| row.symbol == "BTCUSDT")
+        .expect("candidate stats for BTCUSDT");
+    assert!(btc.age_minutes_from_first_tick >= 6);
+}
+
+#[test]
+fn portfolio_candidate_stats_accumulate_full_history() {
+    let store = ScreenerStore::default();
+    store.symbols.insert(
+        "BTCUSDT".to_string(),
+        SymbolState {
+            first_tick_ms: Some(0),
+            ..SymbolState::default()
+        },
+    );
+
+    store.observe_closed_trade_for_portfolio("BTCUSDT", 0.20, false, 10_000);
+    store.observe_closed_trade_for_portfolio("BTCUSDT", -0.10, true, 20_000);
+    store.observe_closed_trade_for_portfolio("BTCUSDT", 0.0, false, 30_000);
+
+    let stats = store.portfolio_candidate_stats_v1(600_000);
+    let btc = stats
+        .iter()
+        .find(|row| row.symbol == "BTCUSDT")
+        .expect("candidate stats for BTCUSDT");
+    assert_eq!(btc.closed_trades, 3);
+    assert_eq!(btc.profitable_trades, 1);
+    assert_eq!(btc.losing_trades, 1);
+    assert!((btc.avg_pnl_pct - (0.10 / 3.0)).abs() < 1e-12);
+}
+
+#[test]
+fn portfolio_rebalance_cadence_and_no_overlap_active_symbols() {
+    let store = ScreenerStore::default();
+    for symbol in ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT"] {
+        store.symbols.insert(
+            symbol.to_string(),
+            SymbolState {
+                first_tick_ms: Some(0),
+                ..SymbolState::default()
+            },
+        );
+        for idx in 0..8 {
+            store.observe_closed_trade_for_portfolio(symbol, 0.10, false, 1_000 + idx * 1_000);
+        }
+        for idx in 0..2 {
+            store.observe_closed_trade_for_portfolio(symbol, -0.02, true, 20_000 + idx * 1_000);
+        }
+    }
+
+    store.maybe_rebalance_portfolios(600_000);
+    assert_eq!(store.portfolio_last_rebalance_ms(), Some(600_000));
+
+    let first = store.portfolio_assignment_v1();
+    let a_first = first
+        .get(&crate::application::services::PortfolioId::A)
+        .expect("portfolio A");
+    let b_first = first
+        .get(&crate::application::services::PortfolioId::B)
+        .expect("portfolio B");
+
+    let overlap_first: Vec<&String> = a_first
+        .active_symbols
+        .iter()
+        .filter(|s| b_first.active_symbols.contains(*s))
+        .collect();
+    assert!(
+        overlap_first.is_empty(),
+        "portfolio active symbols must not overlap"
+    );
+
+    store.maybe_rebalance_portfolios(650_000);
+    assert_eq!(
+        store.portfolio_last_rebalance_ms(),
+        Some(600_000),
+        "rebalance must not run before 2 minutes"
+    );
+}
+
+#[test]
+fn portfolio_runtime_restore_from_db_rows_sets_assignment_and_guards() {
+    let store = ScreenerStore::default();
+    store.restore_portfolio_runtime_v1_from_db_rows(
+        &[
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()],
+                active_symbols: vec!["BTCUSDT".to_string()],
+                updated_at_ms: 700_000,
+            },
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: vec!["SOLUSDT".to_string()],
+                active_symbols: vec!["SOLUSDT".to_string()],
+                updated_at_ms: 700_000,
+            },
+        ],
+        &[crate::infrastructure::db::PortfolioGuardRecordV1 {
+            symbol: "BTCUSDT".to_string(),
+            streak_count: 2,
+            first_streak_ts_ms: Some(650_000),
+            cooldown_until_ms: Some(900_000),
+            updated_at_ms: 800_000,
+        }],
+    );
+
+    let assignment = store.portfolio_assignment_v1();
+    let a = assignment
+        .get(&crate::application::services::PortfolioId::A)
+        .expect("portfolio A");
+    let b = assignment
+        .get(&crate::application::services::PortfolioId::B)
+        .expect("portfolio B");
+    assert_eq!(a.active_symbols, vec!["BTCUSDT".to_string()]);
+    assert_eq!(b.shortlist, vec!["SOLUSDT".to_string()]);
+
+    let guards = store.portfolio_guard_states_v1();
+    assert_eq!(guards.len(), 1);
+    assert_eq!(guards[0].0, "BTCUSDT");
+    assert_eq!(guards[0].1.streak_count, 2);
+    assert_eq!(store.portfolio_last_rebalance_ms(), Some(800_000));
+}
+
+#[test]
+fn stop_loss_streak_triggers_cooldown_exclusion_until_expiry() {
+    let store = ScreenerStore::default();
+    store.symbols.insert(
+        "XRPUSDT".to_string(),
+        SymbolState {
+            first_tick_ms: Some(0),
+            ..SymbolState::default()
+        },
+    );
+
+    for idx in 0..12 {
+        store.observe_closed_trade_for_portfolio("XRPUSDT", 0.20, false, 1_000 + idx * 1_000);
+    }
+
+    store.maybe_rebalance_portfolios(600_000);
+    let baseline = store.portfolio_assignment_v1();
+    let baseline_a = baseline
+        .get(&crate::application::services::PortfolioId::A)
+        .expect("portfolio A");
+    assert!(baseline_a.active_symbols.iter().any(|s| s == "XRPUSDT"));
+
+    for ts in [800_000_i64, 820_000, 840_000, 860_000, 880_000] {
+        store.observe_closed_trade_for_portfolio("XRPUSDT", -0.05, true, ts);
+    }
+
+    store.maybe_rebalance_portfolios(900_000);
+    let during = store.portfolio_assignment_v1();
+    let during_a = during
+        .get(&crate::application::services::PortfolioId::A)
+        .expect("portfolio A");
+    assert!(
+        !during_a.active_symbols.iter().any(|s| s == "XRPUSDT"),
+        "symbol must be excluded while cooldown active"
+    );
+
+    store.maybe_rebalance_portfolios(1_200_001);
+    let after = store.portfolio_assignment_v1();
+    let after_a = after
+        .get(&crate::application::services::PortfolioId::A)
+        .expect("portfolio A");
+    assert!(
+        after_a.active_symbols.iter().any(|s| s == "XRPUSDT"),
+        "symbol should be eligible again after cooldown expiry"
     );
 }

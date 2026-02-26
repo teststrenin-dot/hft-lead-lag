@@ -178,6 +178,19 @@ pub(super) fn init_screener_persistence(
     let conn = hft_lead_lag::infrastructure::db::open_db(db_path)?;
     let fleet_configs = screener.fleet_configs();
     hft_lead_lag::infrastructure::db::upsert_configs(&conn, fleet_configs.as_ref())?;
+    let persisted_portfolios = hft_lead_lag::infrastructure::db::load_portfolio_state_v1(&conn)?;
+    let persisted_guards = hft_lead_lag::infrastructure::db::load_portfolio_guards_v1(&conn)?;
+    if !persisted_portfolios.is_empty() || !persisted_guards.is_empty() {
+        screener.restore_portfolio_runtime_v1_from_db_rows(
+            &persisted_portfolios,
+            &persisted_guards,
+        );
+        info!(
+            "Restored portfolio runtime snapshot: states={} guards={}",
+            persisted_portfolios.len(),
+            persisted_guards.len()
+        );
+    }
     info!(
         "Seeded {} fleet configs into {}",
         fleet_configs.len(),

@@ -1,0 +1,127 @@
+%% HFT Lead-Lag: end-to-end runtime/control/persistence pipeline
+flowchart TB
+
+classDef source fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1,stroke-width:1px;
+classDef runtime fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20,stroke-width:1px;
+classDef control fill:#fff8e1,stroke:#f9a825,color:#e65100,stroke-width:1px;
+classDef storage fill:#f3e5f5,stroke:#8e24aa,color:#4a148c,stroke-width:1px;
+classDef api fill:#ede7f6,stroke:#5e35b1,color:#311b92,stroke-width:1px;
+classDef external fill:#f5f5f5,stroke:#616161,color:#212121,stroke-width:1px;
+
+subgraph DATA["1) Data Plane: WS -> Event Loop -> Screener"]
+  direction LR
+
+  BNWS["Binance WS\n(BinanceMarketData)"]:::source
+  GTWS["Gate WS\n(GateMarketData)"]:::source
+  RXQ["Tokio channels\nMarketDataEvent"]:::runtime
+  LOOP["run_event_loop()\n(event_loop_runtime.rs)"]:::runtime
+  CORE["EventLoopState\nprocess_exchange_batch()\nupdate_strategy_books()"]:::runtime
+  STRAT["RuntimeStrategy\ncheck_signal()"]:::runtime
+  SCR["ScreenerStore\nupdate()/rows/policy/fleet"]:::runtime
+
+  BNWS --> RXQ
+  GTWS --> RXQ
+  RXQ --> LOOP
+  LOOP --> CORE
+  CORE --> STRAT
+  CORE --> SCR
+end
+
+subgraph CONTROL["2) Control Plane: Trial/Runtime Hot Reload"]
+  direction LR
+
+  RAY["Ray Driver / FleetIPC"]:::external
+  BQ["config/trial-batches/*.json"]:::control
+  BF["config/trial-batch.json\n(single-file mode)"]:::control
+  CTL["config/trial-control.json"]:::control
+  RG["config/runtime-grid.json"]:::control
+
+  TBW["run_trial_batch_watch_loop()"]:::control
+  TCW["run_trial_control_watch_loop()"]:::control
+  RGW["run_runtime_grid_watch_loop()"]:::control
+
+  LTB["load_trial_batch()"]:::control
+  APB["apply_trial_batch()"]:::control
+  PLAN["build_trial_batch_patch_plan()"]:::control
+  PATCH["try_apply_fleet_patch()\n(set run_id, reset fleets)"]:::control
+  ACK["write_trial_ack()\nconfig/trial-acks/<submission>.json"]:::control
+  ARCH["archive_trial_batch_queue_file()\ntrial-batches-archive/(ok|error)"]:::control
+
+  LCTL["load_trial_control()"]:::control
+  CLR["close_trial_run_meta_async()\n+ clear run_id"]:::control
+
+  LRG["load_runtime_grid_generation_async()"]:::control
+  URC["upsert_runtime_configs_async()"]:::control
+  RFG["replace_fleet_configs()"]:::control
+
+  RAY --> BQ
+  RAY --> BF
+  RAY --> CTL
+
+  BQ --> TBW
+  BF --> TBW
+  TBW --> LTB
+  LTB --> APB
+  APB --> PLAN
+  APB --> PATCH
+  APB --> ACK
+  APB --> ARCH
+  APB -. update .-> HSQ["HealthState\ntrial_last_ack_*\ntrial_queue_depth"]:::control
+
+  CTL --> TCW
+  TCW --> LCTL
+  LCTL --> CLR
+
+  RG --> RGW
+  RGW --> LRG
+  LRG --> URC
+  URC --> RFG
+end
+
+subgraph PERSIST["3) Persistence + API/Observability"]
+  direction LR
+
+  TRD["FleetTrade batches\nfrom symbol fleets"]:::runtime
+  SEND["DbWriter.send(seq, trades)"]:::storage
+
+  Q0["Primary queue"]:::storage
+  Q1["Overflow queue"]:::storage
+  Q2["Retry queue"]:::storage
+  Q3["Spillover queue"]:::storage
+  Q4["Backpressure queue\n(blocking send)"]:::storage
+
+  WR["Writer loop\n(rx + flush interval + seq-flush barrier)"]:::storage
+  DB["SQLite optimizer.db\nconfigs/trades/trial_runs_meta"]:::storage
+
+  API["HTTP server (axum)"]:::api
+  HND["handlers.rs\nhealth/screener/fleet/trials"]:::api
+  HS["HealthState + DbWriter counters"]:::api
+  RO["Read-only DB queries"]:::api
+
+  SEND --> Q0
+  Q0 --> WR
+  Q0 -. full .-> Q1
+  Q1 --> Q0
+  Q1 -. full .-> Q2
+  Q2 --> Q1
+  Q2 -. full .-> Q3
+  Q3 --> Q2
+  Q3 -. full .-> Q4
+  Q4 --> Q3
+  WR --> DB
+
+  API --> HND
+  HND --> SCR
+  HND --> HS
+  HND --> RO
+  RO --> DB
+end
+
+SCR --> TRD
+TRD --> SEND
+PATCH --> SCR
+RFG --> SCR
+RFG --> SEND
+ACK --> RAY
+DB --> RAY
+HS --> API

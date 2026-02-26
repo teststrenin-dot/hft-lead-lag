@@ -336,3 +336,197 @@ async fn trial_runs_expose_patch_level_metadata() {
     let _ = fs::remove_file(format!("{}-wal", db_path.display()));
     let _ = fs::remove_file(format!("{}-shm", db_path.display()));
 }
+
+#[tokio::test]
+async fn portfolio_active_endpoint_returns_a_and_b_slots() {
+    let health_state = Arc::new(HealthState::new());
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let Json(resp) = get_portfolio_active(State(state)).await;
+    assert_eq!(resp.portfolios.len(), 2);
+    assert_eq!(resp.portfolios[0].portfolio_id, "A");
+    assert_eq!(resp.portfolios[1].portfolio_id, "B");
+}
+
+#[tokio::test]
+async fn portfolio_candidates_endpoint_returns_derived_metrics() {
+    let health_state = Arc::new(HealthState::new());
+    let screener = ScreenerStore::default();
+    screener.update("BTCUSDT", "binance", 100.0, 100.1, 1_000_000, 1_000_000);
+    screener.portfolio_observe_closed_trade_v1("BTCUSDT", 0.20, false, 1_001_000);
+    screener.portfolio_observe_closed_trade_v1("BTCUSDT", -0.10, true, 1_002_000);
+    screener.portfolio_observe_closed_trade_v1("BTCUSDT", 0.00, false, 1_003_000);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener,
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let Json(resp) = get_portfolio_candidates(State(state)).await;
+    assert_eq!(resp.total_candidates, 1);
+    assert_eq!(resp.rows[0].symbol, "BTCUSDT");
+    assert_eq!(resp.rows[0].pm_raw, 0);
+    assert!((resp.rows[0].useful_winrate - (1.0 / 3.0)).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn portfolio_guards_endpoint_reports_cooldown_state() {
+    let health_state = Arc::new(HealthState::new());
+    let screener = ScreenerStore::default();
+    let base_ts = crate::domain::screener::utils::now_ms();
+    for i in 0..5 {
+        screener.portfolio_observe_closed_trade_v1(
+            "ETHUSDT",
+            -0.05,
+            true,
+            base_ts + i * 1_000,
+        );
+    }
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener,
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let Json(resp) = get_portfolio_guards(State(state)).await;
+    assert_eq!(resp.total_symbols, 1);
+    assert_eq!(resp.rows[0].symbol, "ETHUSDT");
+    assert!(resp.rows[0].cooldown_until_ms.is_some());
+    assert!(resp.rows[0].in_cooldown);
+}
+
+#[tokio::test]
+async fn portfolio_active_endpoint_falls_back_to_db_state_snapshot() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!("portfolio-active-fallback-{unique}.db"));
+    let conn = crate::infrastructure::db::open_db(&db_path).expect("open db");
+    crate::infrastructure::db::replace_portfolio_state_v1(
+        &conn,
+        &[
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec!["BTCUSDT".to_string()],
+                active_symbols: vec!["BTCUSDT".to_string()],
+                updated_at_ms: 1_000,
+            },
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: vec!["ETHUSDT".to_string()],
+                active_symbols: vec![],
+                updated_at_ms: 1_000,
+            },
+        ],
+    )
+    .expect("seed portfolio state");
+    drop(conn);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: Arc::new(HealthState::new()),
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: db_path.clone(),
+    });
+
+    let Json(resp) = get_portfolio_active(State(state)).await;
+    let a = resp
+        .portfolios
+        .iter()
+        .find(|p| p.portfolio_id == "A")
+        .expect("portfolio A");
+    let b = resp
+        .portfolios
+        .iter()
+        .find(|p| p.portfolio_id == "B")
+        .expect("portfolio B");
+    assert_eq!(a.active_symbols, vec!["BTCUSDT".to_string()]);
+    assert_eq!(b.shortlist, vec!["ETHUSDT".to_string()]);
+
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{}-wal", db_path.display()));
+    let _ = fs::remove_file(format!("{}-shm", db_path.display()));
+}
+
+#[tokio::test]
+async fn portfolio_guards_endpoint_falls_back_to_db_state_snapshot() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!("portfolio-guards-fallback-{unique}.db"));
+    let conn = crate::infrastructure::db::open_db(&db_path).expect("open db");
+    crate::infrastructure::db::replace_portfolio_guards_v1(
+        &conn,
+        &[crate::infrastructure::db::PortfolioGuardRecordV1 {
+            symbol: "SOLUSDT".to_string(),
+            streak_count: 0,
+            first_streak_ts_ms: None,
+            cooldown_until_ms: Some(crate::domain::screener::utils::now_ms() + 60_000),
+            updated_at_ms: 1_000,
+        }],
+    )
+    .expect("seed portfolio guards");
+    drop(conn);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: Arc::new(HealthState::new()),
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: db_path.clone(),
+    });
+
+    let Json(resp) = get_portfolio_guards(State(state)).await;
+    assert_eq!(resp.total_symbols, 1);
+    assert_eq!(resp.rows[0].symbol, "SOLUSDT");
+    assert!(resp.rows[0].in_cooldown);
+
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_file(format!("{}-wal", db_path.display()));
+    let _ = fs::remove_file(format!("{}-shm", db_path.display()));
+}

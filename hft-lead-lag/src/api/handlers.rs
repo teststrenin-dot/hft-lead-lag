@@ -14,9 +14,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
+use crate::application::services::{
+    compute_pm_raw, compute_useful_winrate, rank_candidates, PortfolioId,
+};
 use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
 use crate::domain::screener::PolicyConfigSnapshot;
 use crate::domain::screener::{ScreenerRow, ScreenerStore};
+use crate::infrastructure::db::{load_portfolio_guards_v1, load_portfolio_state_v1};
 use crate::infrastructure::enrichment::{self, CachedNatr};
 use crate::infrastructure::rest::{BinanceRestClient, GateRestClient};
 #[cfg(test)]
@@ -106,6 +110,54 @@ pub(crate) struct ScreenerResponse {
     rows: Vec<ScreenerRow>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct PortfolioActiveRow {
+    portfolio_id: &'static str,
+    shortlist: Vec<String>,
+    active_symbols: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PortfolioActiveResponse {
+    generated_at_ms: i64,
+    portfolios: Vec<PortfolioActiveRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PortfolioCandidateRow {
+    symbol: String,
+    age_minutes_from_first_tick: u64,
+    closed_trades: u32,
+    profitable_trades: u32,
+    losing_trades: u32,
+    useful_winrate: f64,
+    pm_raw: i64,
+    avg_pnl_pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PortfolioCandidatesResponse {
+    generated_at_ms: i64,
+    total_candidates: usize,
+    rows: Vec<PortfolioCandidateRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PortfolioGuardRow {
+    symbol: String,
+    streak_count: u32,
+    first_streak_ts_ms: Option<i64>,
+    cooldown_until_ms: Option<i64>,
+    in_cooldown: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PortfolioGuardsResponse {
+    generated_at_ms: i64,
+    total_symbols: usize,
+    rows: Vec<PortfolioGuardRow>,
+}
+
 // ── Handlers ────────────────────────────────────────────────────────
 
 pub(crate) async fn health(
@@ -174,6 +226,123 @@ pub(crate) async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<Sc
     Json(ScreenerResponse {
         generated_at_ms: crate::domain::screener::utils::now_ms(),
         period_minutes: (state.screener.window_ms() / 60_000) as u64,
+        total_symbols: rows.len(),
+        rows,
+    })
+}
+
+pub(crate) async fn get_portfolio_active(
+    State(state): State<Arc<HttpState>>,
+) -> Json<PortfolioActiveResponse> {
+    let assignment = state.screener.portfolio_assignment_v1();
+    let mut portfolios: Vec<PortfolioActiveRow> = [(PortfolioId::A, "A"), (PortfolioId::B, "B")]
+        .into_iter()
+        .map(|(portfolio_id, label)| {
+            let entry = assignment.get(&portfolio_id).cloned().unwrap_or_default();
+            PortfolioActiveRow {
+                portfolio_id: label,
+                shortlist: entry.shortlist,
+                active_symbols: entry.active_symbols,
+            }
+        })
+        .collect();
+
+    let all_empty = portfolios
+        .iter()
+        .all(|row| row.shortlist.is_empty() && row.active_symbols.is_empty());
+    if all_empty {
+        if let Ok(conn) = open_readonly_conn(&state) {
+            if let Ok(rows) = load_portfolio_state_v1(&conn) {
+                for row in rows {
+                    if let Some(slot) = portfolios
+                        .iter_mut()
+                        .find(|slot| slot.portfolio_id == row.portfolio_id)
+                    {
+                        slot.shortlist = row.shortlist;
+                        slot.active_symbols = row.active_symbols;
+                    }
+                }
+            }
+        }
+    }
+
+    Json(PortfolioActiveResponse {
+        generated_at_ms: crate::domain::screener::utils::now_ms(),
+        portfolios,
+    })
+}
+
+pub(crate) async fn get_portfolio_candidates(
+    State(state): State<Arc<HttpState>>,
+) -> Json<PortfolioCandidatesResponse> {
+    let generated_at_ms = crate::domain::screener::utils::now_ms();
+    let ranked = rank_candidates(&state.screener.portfolio_candidate_stats_v1(generated_at_ms));
+    let rows: Vec<PortfolioCandidateRow> = ranked
+        .iter()
+        .map(|stats| PortfolioCandidateRow {
+            symbol: stats.symbol.clone(),
+            age_minutes_from_first_tick: stats.age_minutes_from_first_tick,
+            closed_trades: stats.closed_trades,
+            profitable_trades: stats.profitable_trades,
+            losing_trades: stats.losing_trades,
+            useful_winrate: compute_useful_winrate(stats),
+            pm_raw: compute_pm_raw(stats),
+            avg_pnl_pct: stats.avg_pnl_pct,
+        })
+        .collect();
+
+    Json(PortfolioCandidatesResponse {
+        generated_at_ms,
+        total_candidates: rows.len(),
+        rows,
+    })
+}
+
+pub(crate) async fn get_portfolio_guards(
+    State(state): State<Arc<HttpState>>,
+) -> Json<PortfolioGuardsResponse> {
+    let generated_at_ms = crate::domain::screener::utils::now_ms();
+    let mut rows: Vec<PortfolioGuardRow> = state
+        .screener
+        .portfolio_guard_states_v1()
+        .into_iter()
+        .map(|(symbol, guard)| {
+            let in_cooldown = guard
+                .cooldown_until_ms
+                .map(|until| generated_at_ms < until)
+                .unwrap_or(false);
+            PortfolioGuardRow {
+                symbol,
+                streak_count: guard.streak_count,
+                first_streak_ts_ms: guard.first_streak_ts_ms,
+                cooldown_until_ms: guard.cooldown_until_ms,
+                in_cooldown,
+            }
+        })
+        .collect();
+
+    if rows.is_empty() {
+        if let Ok(conn) = open_readonly_conn(&state) {
+            if let Ok(db_rows) = load_portfolio_guards_v1(&conn) {
+                rows = db_rows
+                    .into_iter()
+                    .map(|row| PortfolioGuardRow {
+                        symbol: row.symbol,
+                        streak_count: row.streak_count,
+                        first_streak_ts_ms: row.first_streak_ts_ms,
+                        cooldown_until_ms: row.cooldown_until_ms,
+                        in_cooldown: row
+                            .cooldown_until_ms
+                            .map(|until| generated_at_ms < until)
+                            .unwrap_or(false),
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    Json(PortfolioGuardsResponse {
+        generated_at_ms,
         total_symbols: rows.len(),
         rows,
     })
@@ -318,7 +487,12 @@ pub(crate) async fn get_fleet_ranking(
             )
         })?;
 
-    let result: Vec<FleetConfigRank> = rows.filter_map(|r| r.ok()).collect();
+    let result: Vec<FleetConfigRank> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("row decode: {e}"),
+        )
+    })?;
     Ok(Json(result))
 }
 
@@ -399,7 +573,12 @@ pub(crate) async fn get_fleet_by_symbol(
             )
         })?;
 
-    let result: Vec<SymbolBestConfig> = rows.filter_map(|r| r.ok()).collect();
+    let result: Vec<SymbolBestConfig> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("row decode: {e}"),
+        )
+    })?;
     Ok(Json(result))
 }
 
@@ -520,7 +699,12 @@ pub(crate) async fn get_fleet_ranked(
             )
         })?;
 
-    let mut result: Vec<FleetRankedConfig> = rows.filter_map(|r| r.ok()).collect();
+    let mut result: Vec<FleetRankedConfig> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("row decode: {e}"),
+        )
+    })?;
     result.sort_by(|a, b| {
         b.composite
             .partial_cmp(&a.composite)
@@ -650,7 +834,12 @@ pub(crate) async fn get_trial_runs(
             )
         })?;
 
-    let result: Vec<TrialRunSummary> = rows.filter_map(|r| r.ok()).collect();
+    let result: Vec<TrialRunSummary> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("row decode: {e}"),
+        )
+    })?;
     Ok(Json(result))
 }
 
@@ -747,7 +936,12 @@ pub(crate) async fn get_forward_runs(
             )
         })?;
 
-    let result: Vec<TrialRunSummary> = rows.filter_map(|r| r.ok()).collect();
+    let result: Vec<TrialRunSummary> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("row decode: {e}"),
+        )
+    })?;
     Ok(Json(result))
 }
 
@@ -817,7 +1011,12 @@ pub(crate) async fn get_forward_by_symbol(
             )
         })?;
 
-    let result: Vec<SymbolBestConfig> = rows.filter_map(|r| r.ok()).collect();
+    let result: Vec<SymbolBestConfig> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("row decode: {e}"),
+        )
+    })?;
     Ok(Json(result))
 }
 
@@ -912,7 +1111,12 @@ pub(crate) async fn get_trial_configs(
             )
         })?;
 
-    let result: Vec<TrialConfigDetail> = rows.filter_map(|r| r.ok()).collect();
+    let result: Vec<TrialConfigDetail> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("row decode: {e}"),
+        )
+    })?;
     Ok(Json(result))
 }
 

@@ -19,9 +19,10 @@ pub mod state;
 pub mod trader_config;
 pub mod utils;
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::Arc;
 use std::fmt;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -33,7 +34,10 @@ use self::shadow_trader::{ChartData, ShadowDebug};
 use self::state::SymbolState;
 use self::utils::now_ms;
 
-use crate::infrastructure::db::DbWriter;
+use crate::application::services::{
+    PortfolioEngineV1, PortfolioId, PortfolioStateV1, SymbolGuardStateV1, SymbolStatsV1,
+};
+use crate::infrastructure::db::{DbWriter, PortfolioGuardRecordV1, PortfolioStateRecordV1};
 
 pub use self::shadow_fleet::PolicyConfigSnapshot;
 pub use self::shadow_trader::{ChartTrade, ShadowStats};
@@ -45,6 +49,7 @@ const SYMBOL_STALE_TTL_MS: i64 = 30 * 60 * 1000;
 const SYMBOL_CATALOG_MAX_SIZE: usize = 2_000;
 const SYMBOL_CATALOG_PRUNE_INTERVAL_MS: i64 = 30_000;
 const ROWS_CACHE_MIN_REBUILD_INTERVAL_MS: i64 = 250;
+const PORTFOLIO_REBALANCE_INTERVAL_MS: i64 = 2 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // ScreenerRow — read-model DTO for API / UI consumption
@@ -77,6 +82,41 @@ pub struct ScreenerRow {
     pub shadow_avg_lag_ms: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct TradeAccumulator {
+    closed_trades: u32,
+    profitable_trades: u32,
+    losing_trades: u32,
+    pnl_sum_pct: f64,
+}
+
+impl TradeAccumulator {
+    fn observe(&mut self, pnl_pct: f64) {
+        self.closed_trades = self.closed_trades.saturating_add(1);
+        if pnl_pct > 0.0 {
+            self.profitable_trades = self.profitable_trades.saturating_add(1);
+        } else if pnl_pct < 0.0 {
+            self.losing_trades = self.losing_trades.saturating_add(1);
+        }
+        self.pnl_sum_pct += pnl_pct;
+    }
+
+    fn avg_pnl_pct(self) -> f64 {
+        if self.closed_trades == 0 {
+            0.0
+        } else {
+            self.pnl_sum_pct / self.closed_trades as f64
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PortfolioRuntimeState {
+    engine: PortfolioEngineV1,
+    last_rebalance_ms: Option<i64>,
+    latest_assignment: BTreeMap<PortfolioId, PortfolioStateV1>,
+}
+
 // ---------------------------------------------------------------------------
 // ScreenerStore — thread-safe facade over per-symbol state
 // ---------------------------------------------------------------------------
@@ -84,6 +124,8 @@ pub struct ScreenerRow {
 #[derive(Debug, Clone)]
 pub struct ScreenerStore {
     symbols: Arc<DashMap<String, SymbolState>>,
+    trade_accumulators: Arc<DashMap<String, TradeAccumulator>>,
+    portfolio_runtime: Arc<Mutex<PortfolioRuntimeState>>,
     window_ms: i64,
     fleet_configs: Arc<ArcSwap<Vec<TraderConfig>>>,
     db_writer: Option<DbWriter>,
@@ -166,6 +208,8 @@ impl ScreenerStore {
     pub fn new(window_ms: i64) -> Self {
         Self {
             symbols: Arc::new(DashMap::new()),
+            trade_accumulators: Arc::new(DashMap::new()),
+            portfolio_runtime: Arc::new(Mutex::new(PortfolioRuntimeState::default())),
             window_ms,
             fleet_configs: Arc::new(ArcSwap::from_pointee(generate_grid())),
             db_writer: None,
@@ -200,6 +244,226 @@ impl ScreenerStore {
 
     pub fn current_run_id(&self) -> Option<String> {
         (**self.current_run_id.load()).clone()
+    }
+
+    /// Latest portfolio assignment snapshot (v1 runtime).
+    pub fn portfolio_assignment_v1(&self) -> BTreeMap<PortfolioId, PortfolioStateV1> {
+        self.portfolio_runtime
+            .lock()
+            .expect("portfolio runtime mutex poisoned")
+            .latest_assignment
+            .clone()
+    }
+
+    /// Build global candidate stats from cumulative per-symbol history.
+    pub fn portfolio_candidate_stats_v1(&self, now_ms: i64) -> Vec<SymbolStatsV1> {
+        self.global_candidate_stats(now_ms)
+    }
+
+    /// Restore in-memory portfolio runtime from persisted DB snapshots.
+    pub fn restore_portfolio_runtime_v1_from_db_rows(
+        &self,
+        states: &[PortfolioStateRecordV1],
+        guards: &[PortfolioGuardRecordV1],
+    ) {
+        let mut runtime = self
+            .portfolio_runtime
+            .lock()
+            .expect("portfolio runtime mutex poisoned");
+
+        let state_by_id: std::collections::HashMap<&str, &PortfolioStateRecordV1> =
+            states.iter().map(|row| (row.portfolio_id.as_str(), row)).collect();
+        runtime.latest_assignment = [(PortfolioId::A, "A"), (PortfolioId::B, "B")]
+            .into_iter()
+            .map(|(portfolio_id, label)| {
+                let state = state_by_id
+                    .get(label)
+                    .map(|row| PortfolioStateV1 {
+                        shortlist: row.shortlist.clone(),
+                        active_symbols: row.active_symbols.clone(),
+                    })
+                    .unwrap_or_default();
+                (portfolio_id, state)
+            })
+            .collect();
+
+        runtime.engine.replace_guard_states(
+            guards
+                .iter()
+                .map(|row| {
+                    (
+                        row.symbol.clone(),
+                        SymbolGuardStateV1 {
+                            streak_count: row.streak_count,
+                            first_streak_ts_ms: row.first_streak_ts_ms,
+                            cooldown_until_ms: row.cooldown_until_ms,
+                        },
+                    )
+                })
+                .collect(),
+        );
+
+        runtime.last_rebalance_ms = states
+            .iter()
+            .map(|row| row.updated_at_ms)
+            .chain(guards.iter().map(|row| row.updated_at_ms))
+            .max();
+    }
+
+    /// Snapshot guard/cooldown state per symbol used by portfolio runtime.
+    pub fn portfolio_guard_states_v1(&self) -> Vec<(String, SymbolGuardStateV1)> {
+        self.portfolio_runtime
+            .lock()
+            .expect("portfolio runtime mutex poisoned")
+            .engine
+            .guard_states()
+    }
+
+    #[cfg(test)]
+    fn portfolio_last_rebalance_ms(&self) -> Option<i64> {
+        self.portfolio_runtime
+            .lock()
+            .expect("portfolio runtime mutex poisoned")
+            .last_rebalance_ms
+    }
+
+    pub(super) fn observe_closed_trade_for_portfolio(
+        &self,
+        symbol: &str,
+        pnl_pct: f64,
+        is_stop_loss: bool,
+        ts_ms: i64,
+    ) {
+        self.trade_accumulators
+            .entry(symbol.to_string())
+            .or_default()
+            .value_mut()
+            .observe(pnl_pct);
+
+        let maybe_snapshot = {
+            let mut runtime = self
+                .portfolio_runtime
+                .lock()
+                .expect("portfolio runtime mutex poisoned");
+            let before = runtime.engine.guard_state(symbol);
+            runtime
+                .engine
+                .record_closed_trade(symbol, pnl_pct, is_stop_loss, ts_ms);
+            let after = runtime.engine.guard_state(symbol);
+            if before != after {
+                Some(Self::portfolio_snapshot_records(&runtime, ts_ms))
+            } else {
+                None
+            }
+        };
+
+        if let (Some((states, guards)), Some(writer)) = (maybe_snapshot, self.db_writer.clone()) {
+            writer.send_portfolio_snapshot_v1(states, guards);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn portfolio_observe_closed_trade_v1(
+        &self,
+        symbol: &str,
+        pnl_pct: f64,
+        is_stop_loss: bool,
+        ts_ms: i64,
+    ) {
+        self.observe_closed_trade_for_portfolio(symbol, pnl_pct, is_stop_loss, ts_ms);
+    }
+
+    pub(super) fn maybe_rebalance_portfolios(&self, now_ms: i64) {
+        let candidates = self.global_candidate_stats(now_ms);
+        let maybe_snapshot = {
+            let mut runtime = self
+                .portfolio_runtime
+                .lock()
+                .expect("portfolio runtime mutex poisoned");
+
+            if let Some(last_ms) = runtime.last_rebalance_ms {
+                if now_ms.saturating_sub(last_ms) < PORTFOLIO_REBALANCE_INTERVAL_MS {
+                    return;
+                }
+            }
+
+            runtime.latest_assignment =
+                runtime
+                    .engine
+                    .assign_without_overlap(&candidates, &candidates, now_ms);
+            runtime.last_rebalance_ms = Some(now_ms);
+            Some(Self::portfolio_snapshot_records(&runtime, now_ms))
+        };
+
+        if let (Some((states, guards)), Some(writer)) = (maybe_snapshot, self.db_writer.clone()) {
+            writer.send_portfolio_snapshot_v1(states, guards);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn portfolio_maybe_rebalance_v1(&self, now_ms: i64) {
+        self.maybe_rebalance_portfolios(now_ms);
+    }
+
+    fn global_candidate_stats(&self, now_ms: i64) -> Vec<SymbolStatsV1> {
+        let mut out = Vec::new();
+        for entry in self.trade_accumulators.iter() {
+            let symbol = entry.key();
+            let acc = *entry.value();
+            let first_tick_ms = self
+                .symbols
+                .get(symbol.as_str())
+                .and_then(|state| state.first_tick_ms)
+                .unwrap_or(now_ms);
+            let age_minutes_from_first_tick = now_ms
+                .saturating_sub(first_tick_ms)
+                .max(0)
+                .div_euclid(60_000) as u64;
+            out.push(SymbolStatsV1 {
+                symbol: symbol.clone(),
+                age_minutes_from_first_tick,
+                closed_trades: acc.closed_trades,
+                profitable_trades: acc.profitable_trades,
+                losing_trades: acc.losing_trades,
+                avg_pnl_pct: acc.avg_pnl_pct(),
+            });
+        }
+        out
+    }
+
+    fn portfolio_snapshot_records(
+        runtime: &PortfolioRuntimeState,
+        updated_at_ms: i64,
+    ) -> (Vec<PortfolioStateRecordV1>, Vec<PortfolioGuardRecordV1>) {
+        let states = [(PortfolioId::A, "A"), (PortfolioId::B, "B")]
+            .into_iter()
+            .map(|(portfolio_id, label)| {
+                let entry = runtime
+                    .latest_assignment
+                    .get(&portfolio_id)
+                    .cloned()
+                    .unwrap_or_default();
+                PortfolioStateRecordV1 {
+                    portfolio_id: label.to_string(),
+                    shortlist: entry.shortlist,
+                    active_symbols: entry.active_symbols,
+                    updated_at_ms,
+                }
+            })
+            .collect();
+        let guards = runtime
+            .engine
+            .guard_states()
+            .into_iter()
+            .map(|(symbol, guard)| PortfolioGuardRecordV1 {
+                symbol,
+                streak_count: guard.streak_count,
+                first_streak_ts_ms: guard.first_streak_ts_ms,
+                cooldown_until_ms: guard.cooldown_until_ms,
+                updated_at_ms,
+            })
+            .collect();
+        (states, guards)
     }
 
     /// Set 24h volume for symbols (called once at startup from REST data).
