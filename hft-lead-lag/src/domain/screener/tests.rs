@@ -291,6 +291,41 @@ fn full_replace_resets_all_symbol_fleets() {
 }
 
 #[test]
+fn full_replace_drained_trades_update_portfolio_stats() {
+    let store = ScreenerStore::default();
+    let cfg = config_with_gap(41.0);
+    with_symbol_fleet(&store, "BTCUSDT", &[cfg]);
+    {
+        let mut state = store.symbols.get_mut("BTCUSDT").expect("BTCUSDT state");
+        let fleet = state.fleet.as_mut().expect("fleet");
+        fleet.push_pending_trade_for_test(FleetTrade {
+            config_id: cfg.config_id(),
+            symbol: "BTCUSDT".to_string(),
+            run_id: None,
+            trade: sample_closed_trade(2_000),
+        });
+    }
+
+    let report = store.apply_fleet_patch(
+        vec![cfg],
+        FleetPatchPlan::new(
+            FleetPatchMode::FullReplace,
+            Vec::<u64>::new(),
+            None::<Vec<String>>,
+        ),
+    );
+
+    assert_eq!(report.drained_trades, 1);
+    let stats = store.portfolio_candidate_stats_v1(10_000);
+    let btc = stats
+        .iter()
+        .find(|row| row.symbol == "BTCUSDT")
+        .expect("candidate stats must include drained reset trade");
+    assert_eq!(btc.closed_trades, 1);
+    assert_eq!(btc.profitable_trades, 1);
+}
+
+#[test]
 fn incremental_resets_only_symbols_with_touched_configs() {
     let store = ScreenerStore::default();
     let touched_cfg = config_with_gap(51.0);

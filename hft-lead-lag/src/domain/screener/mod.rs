@@ -32,7 +32,7 @@ use dashmap::DashMap;
 use serde::Serialize;
 
 use self::fleet_patch::{FleetPatchMode, FleetPatchPlan};
-use self::shadow_fleet::generate_grid;
+use self::shadow_fleet::{generate_grid, FleetTrade};
 use self::shadow_trader::{ChartData, ShadowDebug};
 use self::state::SymbolState;
 use self::utils::now_ms;
@@ -442,6 +442,26 @@ impl ScreenerStore {
         if let (Some((states, guards)), Some(writer)) = (maybe_snapshot, self.db_writer.clone()) {
             writer.send_portfolio_snapshot_v1(states, guards);
         }
+    }
+
+    pub(super) fn handle_drained_fleet_trades(&self, drained_trades: Vec<FleetTrade>) -> usize {
+        if drained_trades.is_empty() {
+            return 0;
+        }
+        for ft in &drained_trades {
+            self.observe_closed_trade_for_portfolio(
+                &ft.symbol,
+                ft.trade.pnl_pct,
+                ft.trade.exit_reason == "stop_loss",
+                ft.trade.ts_ms,
+            );
+        }
+
+        let drained_count = drained_trades.len();
+        if let Some(writer) = self.db_writer.clone() {
+            writer.send(drained_trades);
+        }
+        drained_count
     }
 
     #[cfg(test)]

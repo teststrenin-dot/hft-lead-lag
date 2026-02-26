@@ -112,21 +112,7 @@ pub(super) fn update(
         QuoteUpdateResult::Ready(trades) => trades,
     };
 
-    for ft in &drained_trades {
-        store.observe_closed_trade_for_portfolio(
-            &ft.symbol,
-            ft.trade.pnl_pct,
-            ft.trade.exit_reason == "stop_loss",
-            ft.trade.ts_ms,
-        );
-    }
-
-    if !drained_trades.is_empty() {
-        if let Some(ref writer) = store.db_writer {
-            writer.send(drained_trades);
-        }
-        // Without a writer attached, drop drained trades to keep fleet queue bounded.
-    }
+    store.handle_drained_fleet_trades(drained_trades);
 
     store.mark_rows_cache_dirty();
 }

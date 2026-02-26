@@ -67,12 +67,7 @@ pub(super) fn try_apply_fleet_patch(
         };
         symbols_reset += 1;
         let trades = fleet.drain_trades();
-        drained_trades += trades.len();
-        if let Some(writer) = &store.db_writer {
-            if !trades.is_empty() {
-                writer.send(trades);
-            }
-        }
+        drained_trades += store.handle_drained_fleet_trades(trades);
     }
 
     Ok(FleetReloadReport {
