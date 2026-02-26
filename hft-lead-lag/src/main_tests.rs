@@ -290,6 +290,54 @@ fn archive_trial_batch_queue_file_prunes_archive_to_max_files() {
 }
 
 #[test]
+fn archive_trial_batch_queue_file_stashes_payload_when_archive_dir_unavailable() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-batch-archive-stash-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    let queue_dir = trial_batch_queue_dir(&dir);
+    fs::create_dir_all(&queue_dir).expect("create queue dir");
+    let queued_file = queue_dir.join("run-stash-1.json");
+    fs::write(&queued_file, r#"{"run_id":"run-stash","configs":[]}"#)
+        .expect("write queued file");
+
+    // Block `create_dir_all(config/trial-batches-archive/ok)` by placing a file
+    // where the archive root directory should be.
+    let archive_root = dir.join("trial-batches-archive");
+    fs::write(&archive_root, "blocked").expect("create archive root blocker file");
+
+    archive_trial_batch_queue_file(&dir, &queued_file, true);
+
+    assert!(
+        !queued_file.exists(),
+        "raw queue json should not remain after stashing"
+    );
+    let stashed: Vec<PathBuf> = fs::read_dir(&queue_dir)
+        .expect("read queue dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("run-stash-1.json.archive-pending"))
+        })
+        .collect();
+    assert_eq!(
+        stashed.len(),
+        1,
+        "payload must be preserved exactly once on archive failure"
+    );
+    let listed = list_trial_batch_queue_files(&dir);
+    assert!(
+        listed.is_empty(),
+        "stashed payload must not be re-consumed as queue JSON"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn build_trial_batch_error_ack_uses_payload_identity_when_available() {
     let dir = std::env::temp_dir().join(format!(
         "hft-lead-lag-main-batch-ack-id-{}-{}",

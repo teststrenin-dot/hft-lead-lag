@@ -216,18 +216,36 @@ pub(super) fn archive_trial_batch_queue_file(
     queued_batch_path: &Path,
     success: bool,
 ) {
+    fn stash_unarchived_batch(queued_batch_path: &Path) {
+        let file_name = queued_batch_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("batch");
+        let stashed_path = queued_batch_path.with_file_name(format!(
+            "{}-{file_name}.archive-pending",
+            EventLoopState::now_ms()
+        ));
+        if let Err(error) = std::fs::rename(queued_batch_path, &stashed_path) {
+            warn!(
+                "trial-batch queue: archive failed and stash rename failed {} -> {}: {error}",
+                queued_batch_path.display(),
+                stashed_path.display()
+            );
+        } else {
+            warn!(
+                "trial-batch queue: archive failed, stashed unarchived payload at {}",
+                stashed_path.display()
+            );
+        }
+    }
+
     let archive_dir = trial_batch_archive_dir(config_dir, success);
     if let Err(error) = std::fs::create_dir_all(&archive_dir) {
         warn!(
             "trial-batch queue: failed to create archive dir {}: {error}",
             archive_dir.display()
         );
-        if let Err(remove_error) = std::fs::remove_file(queued_batch_path) {
-            warn!(
-                "trial-batch queue: failed to remove {} after archive error: {remove_error}",
-                queued_batch_path.display()
-            );
-        }
+        stash_unarchived_batch(queued_batch_path);
         return;
     }
     let file_name = queued_batch_path
@@ -241,12 +259,7 @@ pub(super) fn archive_trial_batch_queue_file(
             queued_batch_path.display(),
             archived_path.display()
         );
-        if let Err(remove_error) = std::fs::remove_file(queued_batch_path) {
-            warn!(
-                "trial-batch queue: failed to remove {} after archive rename error: {remove_error}",
-                queued_batch_path.display()
-            );
-        }
+        stash_unarchived_batch(queued_batch_path);
         return;
     }
     prune_trial_batch_archive_dir(&archive_dir, TRIAL_BATCH_ARCHIVE_MAX_FILES);
