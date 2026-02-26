@@ -72,9 +72,7 @@ async fn refresh_gate_natr_batch(
 
     let batch_size = GATE_NATR_BATCH_SIZE.min(symbols.len());
     let rest = GateRestClient::new();
-    let mut updates: Vec<(String, f64)> = Vec::with_capacity(batch_size);
-    let mut fetched = 0usize;
-    let mut missing = 0usize;
+    let mut updates: Vec<(String, Option<f64>)> = Vec::with_capacity(batch_size);
 
     for offset in 0..batch_size {
         let idx = (start_idx + offset) % symbols.len();
@@ -88,16 +86,10 @@ async fn refresh_gate_natr_batch(
             Ok(Ok(Some(v))) if v.is_finite() && v >= 0.0 => Some(v),
             _ => None,
         };
-        if let Some(v) = natr {
-            updates.push((symbol.clone(), v));
-            fetched += 1;
-        } else {
-            updates.push((symbol.clone(), 0.0));
-            missing += 1;
-        }
+        updates.push((symbol.clone(), natr));
     }
 
-    screener.set_gate_natr_30m(&updates);
+    let (fetched, missing) = apply_gate_natr_refresh_results(screener, updates);
     info!(
         "Gate NATR refresh: fetched={} missing={} batch={} symbols={}",
         fetched,
@@ -107,6 +99,30 @@ async fn refresh_gate_natr_batch(
     );
 
     (start_idx + batch_size) % symbols.len()
+}
+
+fn apply_gate_natr_refresh_results(
+    screener: &ScreenerStore,
+    updates: Vec<(String, Option<f64>)>,
+) -> (usize, usize) {
+    let mut valid_updates: Vec<(String, f64)> = Vec::with_capacity(updates.len());
+    let mut fetched = 0usize;
+    let mut missing = 0usize;
+    for (symbol, maybe_natr) in updates {
+        match maybe_natr {
+            Some(v) if v.is_finite() && v >= 0.0 => {
+                valid_updates.push((symbol, v));
+                fetched += 1;
+            }
+            _ => {
+                missing += 1;
+            }
+        }
+    }
+    if !valid_updates.is_empty() {
+        screener.set_gate_natr_30m(&valid_updates);
+    }
+    (fetched, missing)
 }
 
 pub(super) fn spawn_gate_natr_refresher(screener: ScreenerStore, symbols: Vec<String>) {
@@ -125,6 +141,44 @@ pub(super) fn spawn_gate_natr_refresher(screener: ScreenerStore, symbols: Vec<St
             .await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_gate_natr_refresh_results_keeps_previous_values_on_missing_entries() {
+        let screener = ScreenerStore::default();
+        let ts_ns = 1_700_000_000_000_000_000_i64;
+        screener.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
+        screener.update(
+            "BTCUSDT",
+            "gate",
+            100.0,
+            100.1,
+            ts_ns + 1_000_000,
+            ts_ns + 1_000_000,
+        );
+        screener.set_gate_natr_30m(&[("BTCUSDT".to_string(), 2.5)]);
+
+        let (fetched, missing) = apply_gate_natr_refresh_results(
+            &screener,
+            vec![
+                ("BTCUSDT".to_string(), None),
+                ("ETHUSDT".to_string(), Some(1.2)),
+            ],
+        );
+
+        assert_eq!(fetched, 1);
+        assert_eq!(missing, 1);
+        let rows = screener.rows_sorted();
+        let btc = rows
+            .iter()
+            .find(|row| row.symbol == "BTCUSDT")
+            .expect("BTCUSDT row");
+        assert!((btc.gate_natr_30m_pct - 2.5).abs() < f64::EPSILON);
+    }
 }
 
 pub(super) async fn configure_and_connect_exchanges(
