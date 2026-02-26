@@ -35,8 +35,5 @@ pub(super) fn file_fingerprint_changed(
     previous: Option<FileFingerprint>,
     current: Option<FileFingerprint>,
 ) -> bool {
-    match current {
-        Some(current) => previous != Some(current),
-        None => false,
-    }
+    previous != current
 }

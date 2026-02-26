@@ -142,6 +142,18 @@ fn file_fingerprint_change_skips_when_fingerprint_same() {
 }
 
 #[test]
+fn file_fingerprint_change_detects_file_disappearance() {
+    let ts = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+    let prev = Some(FileFingerprint {
+        modified: ts,
+        len: 100,
+        content_hash: 1,
+    });
+    let current = None;
+    assert!(file_fingerprint_changed(prev, current));
+}
+
+#[test]
 fn trial_ack_failure_serialization_includes_status_and_error() {
     let ack = TrialAck::error("run-err".to_string(), "invalid payload".to_string(), None);
     let json = serde_json::to_value(&ack).expect("serialize");
