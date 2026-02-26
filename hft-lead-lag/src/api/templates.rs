@@ -9,10 +9,14 @@ pub async fn screener_page() -> Html<&'static str> {
     Html(SCREENER_HTML)
 }
 
-pub async fn fleet_page() -> Html<&'static str> {
+fn trials_dashboard_page() -> Html<&'static str> {
     Html(TRIALS_HTML)
 }
 
+pub async fn fleet_page() -> Html<&'static str> {
+    trials_dashboard_page()
+}
+
 pub async fn trials_page() -> Html<&'static str> {
-    Html(TRIALS_HTML)
+    trials_dashboard_page()
 }
