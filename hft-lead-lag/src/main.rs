@@ -32,13 +32,14 @@ use event_loop_core::{
 };
 #[cfg(test)]
 use event_loop_ingest::ingest_latest_batch;
+use event_loop_ingest::ingest_exchange_batch;
 #[cfg(test)]
 use event_loop_ingest::strategy_ticks_in_order;
 #[cfg(test)]
 use event_loop_ingest::updated_symbols_from_batch;
-use event_loop_ingest::{
-    process_exchange_batch, updated_strategy_symbol_ids_from_batch, BatchIngestContext,
-};
+#[cfg(test)]
+use event_loop_ingest::process_exchange_batch;
+use event_loop_ingest::{updated_strategy_symbol_ids_from_batch, BatchIngestContext};
 use event_loop_runtime::{run_event_loop, EventLoopRuntimeContext};
 use file_fingerprint::{
     file_fingerprint_changed, hash_content_deterministic, read_file_fingerprint, FileFingerprint,
@@ -94,6 +95,7 @@ const ENABLE_SCREENER_CHART_PIPELINE: bool = false;
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
 
+#[cfg(test)]
 fn rebuild_latest_map(
     latest: &mut std::collections::HashMap<bytes::Bytes, hft_lead_lag::domain::BookTicker>,
     first: hft_lead_lag::domain::BookTicker,

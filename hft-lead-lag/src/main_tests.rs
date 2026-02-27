@@ -888,8 +888,16 @@ async fn event_loop_state_starts_clean() {
     let mut state = EventLoopState::new();
     assert_eq!(state.ticker_count, 0);
     assert_eq!(state.signal_count, 0);
-    assert!(state.latest_bn.is_empty());
-    assert!(state.latest_gt.is_empty());
+    assert!(
+        state
+            .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
+            .is_none()
+    );
+    assert!(
+        state
+            .latest_book_for_strategy_symbol(ExchangeSide::Gate, 0)
+            .is_none()
+    );
     assert_eq!(state.metrics.drift_stats_string_and_reset(), "no_data");
 }
 
@@ -918,8 +926,21 @@ async fn event_loop_state_process_exchange_result_updates_binance_map() {
         .expect("exchange result should parse");
 
     assert_eq!(processed.updated_strategy_symbol_ids, vec![0, 1]);
-    assert_eq!(state.latest_bn.len(), 2);
-    assert!(state.latest_gt.is_empty());
+    assert!(
+        state
+            .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
+            .is_some()
+    );
+    assert!(
+        state
+            .latest_book_for_strategy_symbol(ExchangeSide::Binance, 1)
+            .is_some()
+    );
+    assert!(
+        state
+            .latest_book_for_strategy_symbol(ExchangeSide::Gate, 0)
+            .is_none()
+    );
     assert_eq!(state.ticker_count, 2);
 }
 
@@ -957,7 +978,7 @@ async fn event_loop_state_process_exchange_result_propagates_error() {
     let mut state = EventLoopState::new();
     let screener = ScreenerStore::default();
     let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(8);
-    let strategy_symbol_index = StrategySymbolIndex::new(&Vec::<String>::new());
+    let strategy_symbol_index = StrategySymbolIndex::new(&["BTCUSDT".to_string()]);
 
     let result = state.process_exchange_result(
         ExchangeSide::Gate,
@@ -975,8 +996,16 @@ async fn event_loop_state_process_exchange_result_propagates_error() {
         Err(hft_lead_lag::domain::ExchangeError::Timeout(msg)) if msg == "test"
     ));
     assert_eq!(state.ticker_count, 0);
-    assert!(state.latest_bn.is_empty());
-    assert!(state.latest_gt.is_empty());
+    assert!(
+        state
+            .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
+            .is_none()
+    );
+    assert!(
+        state
+            .latest_book_for_strategy_symbol(ExchangeSide::Gate, 0)
+            .is_none()
+    );
 }
 
 fn test_ticker(symbol: &str, exchange_ts_ns: i64) -> hft_lead_lag::domain::BookTicker {

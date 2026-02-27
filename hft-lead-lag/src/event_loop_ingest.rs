@@ -1,7 +1,7 @@
-use super::{
-    rebuild_latest_map, EventLoopMetrics, MarketDataEvent, ScreenerStore, StrategySymbolIndex,
-    SymbolId,
-};
+use super::{EventLoopMetrics, MarketDataEvent, ScreenerStore, StrategySymbolIndex, SymbolId};
+#[cfg(test)]
+use super::rebuild_latest_map;
+#[cfg(test)]
 use bytes::Bytes;
 use std::collections::HashSet;
 
@@ -55,6 +55,7 @@ pub(super) fn updated_strategy_symbol_ids_from_batch(
     ids
 }
 
+#[cfg(test)]
 pub(super) fn ingest_latest_batch<F: Fn() -> i64>(
     latest: &std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
     ctx: &mut BatchIngestContext<'_, F>,
@@ -97,6 +98,7 @@ pub(super) struct BatchIngestContext<'a, F: Fn() -> i64> {
     pub(super) ws_tx: Option<&'a tokio::sync::broadcast::Sender<MarketDataEvent>>,
 }
 
+#[cfg(test)]
 pub(super) fn process_exchange_batch<F: Fn() -> i64>(
     latest: &mut std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
     first: hft_lead_lag::domain::BookTicker,
@@ -105,4 +107,48 @@ pub(super) fn process_exchange_batch<F: Fn() -> i64>(
 ) {
     let updated_batch = rebuild_latest_map(latest, first, drained);
     ingest_latest_batch(&updated_batch, ctx);
+}
+
+fn ingest_ticker<F: Fn() -> i64>(
+    ticker: &hft_lead_lag::domain::BookTicker,
+    ctx: &mut BatchIngestContext<'_, F>,
+) {
+    let Ok(symbol_str) = std::str::from_utf8(ticker.symbol.as_ref()) else {
+        return;
+    };
+
+    *ctx.ticker_count += 1;
+    ctx.metrics
+        .record_tick_drift((ctx.now_ms)(), ticker.exchange_ts_ns);
+
+    let bid = ticker.bid_price();
+    let ask = ticker.ask_price();
+    ctx.screener.update(
+        symbol_str,
+        ctx.exchange,
+        bid,
+        ask,
+        ticker.exchange_ts_ns,
+        ticker.local_ts_ns,
+    );
+    if let Some(ws_tx) = ctx.ws_tx {
+        let _ = ws_tx.send(MarketDataEvent {
+            symbol: symbol_str.to_string(),
+            exchange: ctx.exchange,
+            bid,
+            ask,
+            timestamp_ns: ticker.exchange_ts_ns,
+        });
+    }
+}
+
+pub(super) fn ingest_exchange_batch<F: Fn() -> i64>(
+    first: &hft_lead_lag::domain::BookTicker,
+    drained: &[hft_lead_lag::domain::BookTicker],
+    ctx: &mut BatchIngestContext<'_, F>,
+) {
+    ingest_ticker(first, ctx);
+    for ticker in drained {
+        ingest_ticker(ticker, ctx);
+    }
 }

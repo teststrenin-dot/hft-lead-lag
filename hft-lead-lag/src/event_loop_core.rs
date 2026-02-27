@@ -1,5 +1,5 @@
 use super::{
-    process_exchange_batch, updated_strategy_symbol_ids_from_batch, BatchIngestContext,
+    ingest_exchange_batch, updated_strategy_symbol_ids_from_batch, BatchIngestContext,
     ConfigManager, HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore,
     SIGNAL_CHECK_BUDGET_PER_TICK,
 };
@@ -150,8 +150,6 @@ pub(super) struct EventLoopState {
     pub(super) signal_count: usize,
     last_status_at: Instant,
     pub(super) signal_interval: tokio::time::Interval,
-    pub(super) latest_bn: std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
-    pub(super) latest_gt: std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
     latest_bn_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
     latest_gt_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
     pub(super) pending_signal_symbols: std::collections::BTreeSet<SymbolId>,
@@ -348,8 +346,6 @@ impl EventLoopState {
             signal_count: 0,
             last_status_at: Instant::now(),
             signal_interval,
-            latest_bn: std::collections::HashMap::new(),
-            latest_gt: std::collections::HashMap::new(),
             latest_bn_by_symbol_id: Vec::new(),
             latest_gt_by_symbol_id: Vec::new(),
             pending_signal_symbols: std::collections::BTreeSet::new(),
@@ -393,17 +389,11 @@ impl EventLoopState {
             screener,
             ws_tx,
         };
-        match side {
-            ExchangeSide::Binance => {
-                process_exchange_batch(&mut self.latest_bn, ticker, drained, &mut ctx)
-            }
-            ExchangeSide::Gate => {
-                process_exchange_batch(&mut self.latest_gt, ticker, drained, &mut ctx)
-            }
-        }
-        self.upsert_latest_books_by_symbol_ids(
+        ingest_exchange_batch(&ticker, &drained, &mut ctx);
+        self.upsert_latest_books_by_symbol_ids_from_batch(
             side,
-            &updated_strategy_symbol_ids,
+            &ticker,
+            &drained,
             strategy_symbol_index,
         );
         let state_updated_ts_ns = Self::now_ns();
@@ -511,31 +501,28 @@ impl EventLoopState {
         }
     }
 
-    fn upsert_latest_books_by_symbol_ids(
+    fn upsert_latest_books_by_symbol_ids_from_batch(
         &mut self,
         side: ExchangeSide,
-        updated_strategy_symbol_ids: &[SymbolId],
+        first: &hft_lead_lag::domain::BookTicker,
+        drained: &[hft_lead_lag::domain::BookTicker],
         strategy_symbol_index: &StrategySymbolIndex,
     ) {
-        let latest = match side {
-            ExchangeSide::Binance => &self.latest_bn,
-            ExchangeSide::Gate => &self.latest_gt,
-        };
-        let updates: Vec<(usize, hft_lead_lag::domain::BookTicker)> = updated_strategy_symbol_ids
-            .iter()
-            .filter_map(|symbol_id| {
-                let symbol = strategy_symbol_index.symbol(*symbol_id)?;
-                let ticker = latest.get(symbol.as_bytes())?.clone();
-                Some((*symbol_id as usize, ticker))
-            })
-            .collect();
-
         let cache = self.latest_books_by_symbol_id_mut(side);
-        for (idx, ticker) in updates {
+        let mut upsert = |ticker: &hft_lead_lag::domain::BookTicker| {
+            let Some(symbol_id) = strategy_symbol_index.symbol_id(ticker.symbol.as_ref()) else {
+                return;
+            };
+            let idx = symbol_id as usize;
             if cache.len() <= idx {
                 cache.resize(idx + 1, None);
             }
-            cache[idx] = Some(ticker);
+            cache[idx] = Some(ticker.clone());
+        };
+
+        upsert(first);
+        for ticker in drained {
+            upsert(ticker);
         }
     }
 
