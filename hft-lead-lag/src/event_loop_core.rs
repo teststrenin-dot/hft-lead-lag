@@ -238,9 +238,11 @@ pub(super) struct EventLoopState {
     pub(super) signal_count: usize,
     last_status_at: Instant,
     pub(super) signal_interval: tokio::time::Interval,
+    #[cfg(test)]
     latest_bn_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
+    #[cfg(test)]
     latest_gt_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
-    pending_strategy_updates: VecDeque<(ExchangeSide, SymbolId)>,
+    pending_strategy_updates: VecDeque<(ExchangeSide, SymbolId, hft_lead_lag::domain::BookTicker)>,
     pub(super) pending_signal_symbols: PendingSymbolSet,
     symbol_stage_timestamps: std::collections::HashMap<SymbolId, SymbolStageTimestamps>,
     pub(super) metrics: EventLoopMetrics,
@@ -315,6 +317,7 @@ impl StrategySymbolIndex {
 
 pub(super) struct ProcessExchangeResult {
     pub(super) updated_strategy_symbol_ids: Vec<SymbolId>,
+    pub(super) strategy_updates: Vec<(SymbolId, hft_lead_lag::domain::BookTicker)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -445,7 +448,9 @@ impl EventLoopState {
             signal_count: 0,
             last_status_at: Instant::now(),
             signal_interval,
+            #[cfg(test)]
             latest_bn_by_symbol_id: Vec::new(),
+            #[cfg(test)]
             latest_gt_by_symbol_id: Vec::new(),
             pending_strategy_updates: VecDeque::new(),
             pending_signal_symbols: PendingSymbolSet::new(),
@@ -490,31 +495,27 @@ impl EventLoopState {
         ingest_exchange_batch(&ticker, &drained, &mut ctx);
         let (updated_strategy_symbol_ids, strategy_updates) =
             strategy_symbol_updates_from_batch(ticker, drained, strategy_symbol_index);
-        self.upsert_latest_books_by_symbol_ids(side, strategy_updates);
+        #[cfg(test)]
+        self.upsert_latest_books_by_symbol_ids(side, strategy_updates.clone());
         let state_updated_ts_ns = Self::now_ns();
         self.record_stage_timestamps_for_batch(
-            side,
-            &updated_strategy_symbol_ids,
+            &strategy_updates,
             parsed_ts_ns,
             state_updated_ts_ns,
         );
         Ok(ProcessExchangeResult {
             updated_strategy_symbol_ids,
+            strategy_updates,
         })
     }
 
     fn record_stage_timestamps_for_batch(
         &mut self,
-        side: ExchangeSide,
-        updated_strategy_symbol_ids: &[SymbolId],
+        strategy_updates: &[(SymbolId, hft_lead_lag::domain::BookTicker)],
         parsed_ts_ns: i64,
         state_updated_ts_ns: i64,
     ) {
-        for symbol_id in updated_strategy_symbol_ids {
-            let Some(ticker) = self.latest_book_for_strategy_symbol(side, *symbol_id) else {
-                continue;
-            };
-
+        for (symbol_id, ticker) in strategy_updates {
             let recv_ws_frame_ts_ns = ticker.local_ts_ns;
             self.metrics
                 .record_ingest_latency_ns(recv_ws_frame_ts_ns, parsed_ts_ns);
@@ -551,6 +552,7 @@ impl EventLoopState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn update_strategy_books(
         &self,
         side: ExchangeSide,
@@ -576,6 +578,7 @@ impl EventLoopState {
         }
     }
 
+    #[cfg(test)]
     fn latest_books_by_symbol_id(
         &self,
         side: ExchangeSide,
@@ -586,6 +589,7 @@ impl EventLoopState {
         }
     }
 
+    #[cfg(test)]
     fn latest_books_by_symbol_id_mut(
         &mut self,
         side: ExchangeSide,
@@ -596,6 +600,7 @@ impl EventLoopState {
         }
     }
 
+    #[cfg(test)]
     fn upsert_latest_books_by_symbol_ids(
         &mut self,
         side: ExchangeSide,
@@ -611,6 +616,7 @@ impl EventLoopState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn latest_book_for_strategy_symbol(
         &self,
         side: ExchangeSide,
@@ -628,10 +634,11 @@ impl EventLoopState {
     pub(super) fn enqueue_strategy_updates(
         &mut self,
         side: ExchangeSide,
-        updated_strategy_symbol_ids: &[SymbolId],
+        strategy_updates: Vec<(SymbolId, hft_lead_lag::domain::BookTicker)>,
     ) {
-        for symbol_id in updated_strategy_symbol_ids {
-            self.pending_strategy_updates.push_back((side, *symbol_id));
+        for (symbol_id, ticker) in strategy_updates {
+            self.pending_strategy_updates
+                .push_back((side, symbol_id, ticker));
         }
     }
 
@@ -640,13 +647,11 @@ impl EventLoopState {
         strategy: &mut dyn RuntimeStrategy,
         strategy_exchange_routing: StrategyExchangeRouting,
     ) {
-        while let Some((side, symbol_id)) = self.pending_strategy_updates.pop_front() {
-            self.update_strategy_books(
-                side,
-                strategy,
-                std::slice::from_ref(&symbol_id),
-                strategy_exchange_routing,
-            );
+        while let Some((side, _symbol_id, ticker)) = self.pending_strategy_updates.pop_front() {
+            match strategy_exchange_routing.role_for_side(side) {
+                StrategyBookRole::Primary => strategy.on_primary_book(ticker),
+                StrategyBookRole::Hedge => strategy.on_hedge_book(ticker),
+            }
         }
     }
 
@@ -776,6 +781,56 @@ impl EventLoopState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use hft_lead_lag::domain::BookTicker;
+
+    struct RecordingStrategy {
+        primary_updates: Vec<BookTicker>,
+        hedge_updates: Vec<BookTicker>,
+    }
+
+    impl RecordingStrategy {
+        fn new() -> Self {
+            Self {
+                primary_updates: Vec::new(),
+                hedge_updates: Vec::new(),
+            }
+        }
+    }
+
+    impl RuntimeStrategy for RecordingStrategy {
+        fn strategy_name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn on_primary_book(&mut self, ticker: BookTicker) {
+            self.primary_updates.push(ticker);
+        }
+
+        fn on_hedge_book(&mut self, ticker: BookTicker) {
+            self.hedge_updates.push(ticker);
+        }
+
+        fn check_signal(
+            &mut self,
+            _symbol_id: SymbolId,
+            _now_ns: i64,
+        ) -> Option<hft_lead_lag::StrategySignal> {
+            None
+        }
+    }
+
+    fn ticker(symbol: &'static [u8], bid: i64, ask: i64, ts: i64) -> BookTicker {
+        BookTicker::new(
+            Bytes::from_static(symbol),
+            bid,
+            ask,
+            1,
+            1,
+            ts,
+            ts,
+        )
+    }
 
     #[test]
     fn strategy_symbol_index_assigns_stable_ids() {
@@ -846,5 +901,21 @@ mod tests {
         assert_eq!(pending.pop_first(), None);
         assert!(pending.is_empty());
         assert_eq!(pending.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn strategy_update_queue_flushes_tickers_without_latest_cache_lookup() {
+        let mut state = EventLoopState::new();
+        let mut strategy = RecordingStrategy::new();
+        state.enqueue_strategy_updates(
+            ExchangeSide::Binance,
+            vec![(0, ticker(b"BTCUSDT", 100, 101, 1_000))],
+        );
+
+        state.flush_strategy_updates(&mut strategy, StrategyExchangeRouting::default());
+
+        assert_eq!(strategy.primary_updates.len(), 1);
+        assert_eq!(strategy.hedge_updates.len(), 0);
+        assert_eq!(strategy.primary_updates[0].symbol.as_ref(), b"BTCUSDT");
     }
 }

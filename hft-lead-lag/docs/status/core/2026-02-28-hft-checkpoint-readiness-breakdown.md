@@ -57,10 +57,10 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 1. Done and not touched:
    - Pending-symbol scheduling mechanism exists.
    - Pending-symbol store is now `SymbolId` bitset-backed (`PendingSymbolSet`), replacing tree-based pending queue.
+   - Strategy-update queue now carries `(ExchangeSide, SymbolId, BookTicker)` and flushes directly into strategy apply (removed runtime latest-cache lookup clone on this path).
 2. Done but must be reworked:
-   - Per-batch tick cloning in strategy feed path.
+   - None.
 3. Missing and required:
-   - Complete clone-elimination strategy update path across ingest -> strategy apply.
    - Processing proportional to update rate, not universe size.
 
 ## `HFT-CP4` Minimal-Copy WS Parse Path

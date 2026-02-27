@@ -27,7 +27,7 @@ async fn handle_exchange_tick(
         Ok(processed) => {
             side.mark_alive(context.health_state, EventLoopState::now_ms());
             state.mark_pending_signal_symbols(&processed.updated_strategy_symbol_ids);
-            state.enqueue_strategy_updates(side, &processed.updated_strategy_symbol_ids);
+            state.enqueue_strategy_updates(side, processed.strategy_updates);
             state.sync_stage_timestamps_to_health(
                 &processed.updated_strategy_symbol_ids,
                 context.health_state,

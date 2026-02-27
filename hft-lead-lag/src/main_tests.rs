@@ -1694,8 +1694,8 @@ async fn strategy_update_queue_enqueues_and_flushes_updates() {
         )
         .expect("gate result");
 
-    state.enqueue_strategy_updates(ExchangeSide::Binance, &binance.updated_strategy_symbol_ids);
-    state.enqueue_strategy_updates(ExchangeSide::Gate, &gate.updated_strategy_symbol_ids);
+    state.enqueue_strategy_updates(ExchangeSide::Binance, binance.strategy_updates);
+    state.enqueue_strategy_updates(ExchangeSide::Gate, gate.strategy_updates);
     state.flush_strategy_updates(
         &mut strategy,
         StrategyExchangeRouting {
