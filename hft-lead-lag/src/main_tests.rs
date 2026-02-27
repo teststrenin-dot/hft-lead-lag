@@ -906,7 +906,7 @@ async fn event_loop_state_process_exchange_result_updates_binance_map() {
     let strategy_symbol_index =
         StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
 
-    let updated_symbols = state
+    let processed = state
         .process_exchange_result(
             ExchangeSide::Binance,
             Ok(test_ticker("BTCUSDT", 100_000_000)),
@@ -917,7 +917,7 @@ async fn event_loop_state_process_exchange_result_updates_binance_map() {
         )
         .expect("exchange result should parse");
 
-    assert_eq!(updated_symbols, vec![sym("BTCUSDT"), sym("ETHUSDT")]);
+    assert_eq!(processed.updated_strategy_symbol_ids, vec![0, 1]);
     assert_eq!(state.latest_bn.len(), 2);
     assert!(state.latest_gt.is_empty());
     assert_eq!(state.ticker_count, 2);
@@ -1507,7 +1507,7 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
         .update_strategy_books(
             ExchangeSide::Binance,
             &strategy,
-            &updated_binance,
+            &strategy_symbol_index.symbol_ids(&updated_binance),
             &strategy_symbol_index,
             StrategyExchangeRouting {
                 primary: ExchangeSide::Gate,
@@ -1519,7 +1519,7 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
         .update_strategy_books(
             ExchangeSide::Gate,
             &strategy,
-            &updated_gate,
+            &strategy_symbol_index.symbol_ids(&updated_gate),
             &strategy_symbol_index,
             StrategyExchangeRouting {
                 primary: ExchangeSide::Gate,
@@ -1556,7 +1556,7 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
         sym("ETHUSDT"),
         sym("BTCUSDT"),
     ];
-    state.mark_pending_signal_symbols(&updated, &strategy_symbol_index);
+    state.mark_pending_signal_symbols(&strategy_symbol_index.symbol_ids(&updated));
 
     state
         .handle_signal_tick(&strategy, &strategy_symbol_index, &health)

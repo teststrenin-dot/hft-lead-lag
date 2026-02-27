@@ -3,7 +3,7 @@ use super::{
     HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore, SIGNAL_CHECK_BUDGET_PER_TICK,
 };
 use bytes::Bytes;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{error, info, warn};
@@ -194,6 +194,24 @@ impl StrategySymbolIndex {
             .get(symbol_id as usize)
             .map(String::as_str)
     }
+
+    pub(super) fn symbol_ids(&self, updated_symbols: &[Bytes]) -> Vec<SymbolId> {
+        let mut ids = Vec::with_capacity(updated_symbols.len());
+        let mut seen = HashSet::with_capacity(updated_symbols.len());
+        for symbol in updated_symbols {
+            let Some(symbol_id) = self.symbol_id(symbol) else {
+                continue;
+            };
+            if seen.insert(symbol_id) {
+                ids.push(symbol_id);
+            }
+        }
+        ids
+    }
+}
+
+pub(super) struct ProcessExchangeResult {
+    pub(super) updated_strategy_symbol_ids: Vec<SymbolId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,10 +372,11 @@ impl EventLoopState {
         strategy_symbol_index: &StrategySymbolIndex,
         screener: &ScreenerStore,
         ws_tx: Option<&tokio::sync::broadcast::Sender<MarketDataEvent>>,
-    ) -> Result<Vec<Bytes>, hft_lead_lag::domain::ExchangeError> {
+    ) -> Result<ProcessExchangeResult, hft_lead_lag::domain::ExchangeError> {
         let parsed_ts_ns = Self::now_ns();
         let ticker = result?;
         let updated_symbols = updated_symbols_from_batch(&ticker, &drained);
+        let updated_strategy_symbol_ids = strategy_symbol_index.symbol_ids(&updated_symbols);
         let mut ctx = BatchIngestContext {
             exchange: side.exchange_name(),
             ticker_count: &mut self.ticker_count,
@@ -377,18 +396,20 @@ impl EventLoopState {
         let state_updated_ts_ns = Self::now_ns();
         self.record_stage_timestamps_for_batch(
             side,
-            &updated_symbols,
+            &updated_strategy_symbol_ids,
             strategy_symbol_index,
             parsed_ts_ns,
             state_updated_ts_ns,
         );
-        Ok(updated_symbols)
+        Ok(ProcessExchangeResult {
+            updated_strategy_symbol_ids,
+        })
     }
 
     fn record_stage_timestamps_for_batch(
         &mut self,
         side: ExchangeSide,
-        updated_symbols: &[Bytes],
+        updated_strategy_symbol_ids: &[SymbolId],
         strategy_symbol_index: &StrategySymbolIndex,
         parsed_ts_ns: i64,
         state_updated_ts_ns: i64,
@@ -398,11 +419,11 @@ impl EventLoopState {
             ExchangeSide::Gate => &self.latest_gt,
         };
 
-        for symbol in updated_symbols {
-            let Some(symbol_id) = strategy_symbol_index.symbol_id(symbol) else {
+        for symbol_id in updated_strategy_symbol_ids {
+            let Some(symbol) = strategy_symbol_index.symbol(*symbol_id) else {
                 continue;
             };
-            let Some(ticker) = latest.get(symbol) else {
+            let Some(ticker) = latest.get(symbol.as_bytes()) else {
                 continue;
             };
 
@@ -411,7 +432,7 @@ impl EventLoopState {
                 .record_ingest_latency_ns(recv_ws_frame_ts_ns, parsed_ts_ns);
 
             self.symbol_stage_timestamps.insert(
-                symbol_id,
+                *symbol_id,
                 SymbolStageTimestamps {
                     recv_ws_frame_ts_ns,
                     parsed_ts_ns,
@@ -423,15 +444,11 @@ impl EventLoopState {
 
     pub(super) fn sync_stage_timestamps_to_health(
         &self,
-        updated_symbols: &[Bytes],
-        strategy_symbol_index: &StrategySymbolIndex,
+        updated_strategy_symbol_ids: &[SymbolId],
         health: &HealthState,
     ) {
-        for symbol in updated_symbols {
-            let Some(symbol_id) = strategy_symbol_index.symbol_id(symbol) else {
-                continue;
-            };
-            let Some(stages) = self.symbol_stage_timestamps.get(&symbol_id) else {
+        for symbol_id in updated_strategy_symbol_ids {
+            let Some(stages) = self.symbol_stage_timestamps.get(symbol_id) else {
                 continue;
             };
             health
@@ -450,17 +467,17 @@ impl EventLoopState {
         &self,
         side: ExchangeSide,
         strategy: &dyn RuntimeStrategy,
-        updated_symbols: &[Bytes],
+        updated_strategy_symbol_ids: &[SymbolId],
         strategy_symbol_index: &StrategySymbolIndex,
         strategy_exchange_routing: StrategyExchangeRouting,
     ) {
-        for symbol in updated_symbols {
-            if strategy_symbol_index.symbol_id(symbol).is_none() {
+        for symbol_id in updated_strategy_symbol_ids {
+            let Some(symbol) = strategy_symbol_index.symbol(*symbol_id) else {
                 continue;
-            }
+            };
             let ticker = match side {
-                ExchangeSide::Binance => self.latest_bn.get(symbol),
-                ExchangeSide::Gate => self.latest_gt.get(symbol),
+                ExchangeSide::Binance => self.latest_bn.get(symbol.as_bytes()),
+                ExchangeSide::Gate => self.latest_gt.get(symbol.as_bytes()),
             };
             let Some(ticker) = ticker else {
                 continue;
@@ -473,15 +490,9 @@ impl EventLoopState {
         }
     }
 
-    pub(super) fn mark_pending_signal_symbols(
-        &mut self,
-        updated_symbols: &[Bytes],
-        strategy_symbol_index: &StrategySymbolIndex,
-    ) {
-        for symbol in updated_symbols {
-            if let Some(symbol_id) = strategy_symbol_index.symbol_id(symbol) {
-                self.pending_signal_symbols.insert(symbol_id);
-            }
+    pub(super) fn mark_pending_signal_symbols(&mut self, updated_strategy_symbol_ids: &[SymbolId]) {
+        for symbol_id in updated_strategy_symbol_ids {
+            self.pending_signal_symbols.insert(*symbol_id);
         }
     }
 
@@ -641,5 +652,24 @@ mod tests {
         assert_eq!(index.symbol(0), Some("BTCUSDT"));
         assert_eq!(index.symbol(1), Some("ETHUSDT"));
         assert_eq!(index.symbol(9), None);
+    }
+
+    #[test]
+    fn strategy_symbol_index_collects_deduped_ids_for_updated_symbols() {
+        let index = StrategySymbolIndex::new(&[
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+            "SOLUSDT".to_string(),
+        ]);
+        let updated = vec![
+            Bytes::from_static(b"ETHUSDT"),
+            Bytes::from_static(b"DOGEUSDT"),
+            Bytes::from_static(b"BTCUSDT"),
+            Bytes::from_static(b"ETHUSDT"),
+        ];
+
+        let ids = index.symbol_ids(&updated);
+
+        assert_eq!(ids, vec![1, 0]);
     }
 }

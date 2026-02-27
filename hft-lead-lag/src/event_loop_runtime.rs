@@ -23,12 +23,11 @@ async fn handle_exchange_tick(
         context.screener,
         context.ws_tx,
     ) {
-        Ok(updated_symbols) => {
+        Ok(processed) => {
             side.mark_alive(context.health_state, EventLoopState::now_ms());
-            state.mark_pending_signal_symbols(&updated_symbols, context.strategy_symbol_index);
+            state.mark_pending_signal_symbols(&processed.updated_strategy_symbol_ids);
             state.sync_stage_timestamps_to_health(
-                &updated_symbols,
-                context.strategy_symbol_index,
+                &processed.updated_strategy_symbol_ids,
                 context.health_state,
             );
             context
@@ -39,7 +38,7 @@ async fn handle_exchange_tick(
                 .update_strategy_books(
                     side,
                     context.strategy,
-                    &updated_symbols,
+                    &processed.updated_strategy_symbol_ids,
                     context.strategy_symbol_index,
                     context.strategy_exchange_routing,
                 )
