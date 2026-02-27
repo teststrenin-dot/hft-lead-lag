@@ -177,27 +177,23 @@ impl StrategySymbolIndex {
 
         #[cfg(test)]
         {
-        let mut symbol_to_id = HashMap::with_capacity(strategy_symbols.len());
-        let mut id_to_symbol = Vec::with_capacity(strategy_symbols.len());
-        let mut next_symbol_id: usize = 0;
-
-        for symbol in strategy_symbols {
-            let key = Bytes::copy_from_slice(symbol.as_bytes());
-            if symbol_to_id.contains_key(&key) {
-                continue;
+            let symbol_to_id = hft_lead_lag::domain::build_strategy_symbol_id_map(strategy_symbols)
+                .expect("strategy symbol id map");
+            let mut id_to_symbol = vec![String::new(); symbol_to_id.len()];
+            for symbol in strategy_symbols {
+                let Some(symbol_id) = symbol_to_id.get(symbol.as_bytes()).copied() else {
+                    continue;
+                };
+                let slot = &mut id_to_symbol[symbol_id as usize];
+                if slot.is_empty() {
+                    *slot = symbol.clone();
+                }
             }
-            let Ok(symbol_id) = SymbolId::try_from(next_symbol_id) else {
-                break;
-            };
-            symbol_to_id.insert(key, symbol_id);
-            next_symbol_id = next_symbol_id.saturating_add(1);
-            id_to_symbol.push(symbol.clone());
-        }
 
-        Self {
-            symbol_to_id,
-            id_to_symbol,
-        }
+            Self {
+                symbol_to_id,
+                id_to_symbol,
+            }
         }
     }
 

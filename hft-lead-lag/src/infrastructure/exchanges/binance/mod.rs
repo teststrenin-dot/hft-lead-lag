@@ -13,8 +13,9 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 
 use crate::domain::{
-    symbols::SymbolCache, BookTicker, ExchangeError, ExchangeId, ExchangeResult, MarketDataStream,
-    SubscriptionId, SymbolId, Trade,
+    build_strategy_symbol_id_map, symbols::SymbolCache, BookTicker, ExchangeError, ExchangeId,
+    ExchangeResult, MarketDataStream, StrategySymbolIdCapacityError, SubscriptionId, SymbolId,
+    Trade,
 };
 use crate::infrastructure::exchanges::common::{
     contains_bytes, extract_json_bool_field_by_pattern, extract_json_i64_field_by_pattern,
@@ -112,30 +113,12 @@ impl BinanceMarketData {
         }
     }
 
-    pub fn set_strategy_symbol_ids(&mut self, strategy_symbols: &[String]) {
-        self.strategy_symbol_ids.clear();
-        let mut next_symbol_id: usize = 0;
-        let mut truncated = false;
-
-        for symbol in strategy_symbols {
-            let key = bytes::Bytes::copy_from_slice(symbol.as_bytes());
-            if self.strategy_symbol_ids.contains_key(&key) {
-                continue;
-            }
-            let Ok(symbol_id) = SymbolId::try_from(next_symbol_id) else {
-                truncated = true;
-                break;
-            };
-            self.strategy_symbol_ids.insert(key, symbol_id);
-            next_symbol_id = next_symbol_id.saturating_add(1);
-        }
-
-        if truncated {
-            warn!(
-                "Binance strategy symbol-id map truncated at {} symbols (SymbolId capacity reached)",
-                self.strategy_symbol_ids.len()
-            );
-        }
+    pub fn set_strategy_symbol_ids(
+        &mut self,
+        strategy_symbols: &[String],
+    ) -> Result<(), StrategySymbolIdCapacityError> {
+        self.strategy_symbol_ids = build_strategy_symbol_id_map(strategy_symbols)?;
+        Ok(())
     }
 
     fn attach_strategy_symbol_id(&self, ticker: BookTicker) -> BookTicker {
@@ -631,7 +614,9 @@ mod tests {
     #[test]
     fn attach_strategy_symbol_id_sets_preconfigured_mapping() {
         let mut market = BinanceMarketData::new();
-        market.set_strategy_symbol_ids(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+        market
+            .set_strategy_symbol_ids(&["BTCUSDT".to_string(), "ETHUSDT".to_string()])
+            .expect("symbol-id map");
         let ticker = BookTicker::new(bytes::Bytes::from_static(b"ETHUSDT"), 1, 2, 3, 4, 5, 6);
 
         let mapped = market.attach_strategy_symbol_id(ticker);
@@ -641,11 +626,13 @@ mod tests {
     #[test]
     fn set_strategy_symbol_ids_keeps_first_seen_id_for_duplicates() {
         let mut market = BinanceMarketData::new();
-        market.set_strategy_symbol_ids(&[
-            "BTCUSDT".to_string(),
-            "ETHUSDT".to_string(),
-            "BTCUSDT".to_string(),
-        ]);
+        market
+            .set_strategy_symbol_ids(&[
+                "BTCUSDT".to_string(),
+                "ETHUSDT".to_string(),
+                "BTCUSDT".to_string(),
+            ])
+            .expect("symbol-id map");
         let ticker = BookTicker::new(bytes::Bytes::from_static(b"BTCUSDT"), 1, 2, 3, 4, 5, 6);
 
         let mapped = market.attach_strategy_symbol_id(ticker);

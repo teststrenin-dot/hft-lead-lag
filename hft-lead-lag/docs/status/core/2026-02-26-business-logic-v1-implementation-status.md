@@ -24,7 +24,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 | Checkpoint | Status | Evidence | Main gap |
 |---|---|---|---|
 | `HFT-CP0` Latency and Allocation Observatory | `In Progress` | `/health` now includes staged timestamps, ingest/decision/e2e latency stats, runtime backlog depths | `order_intent_enqueued_ts` is currently proxy-level until CP6 execution queue is live |
-| `HFT-CP1` SymbolId and Allocation Removal | `In Progress` | Hot-path maps/pending sets moved from `String` keys to `Bytes` keys in `lead_lag.rs`, `event_loop_ingest.rs`, `event_loop_core.rs`, `main.rs` | Need full `SymbolId` universe and array-state conversion |
+| `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Hot-path ingest now dedupes latest-per-symbol, runtime consumes connector-attached `strategy_symbol_id`, and connectors/runtime use canonical `symbol->id` builder with fail-fast capacity guard | None |
 | `HFT-CP2` Lock-Free Strategy State | `Planned` | `LeadLagStrategy` has `Arc<RwLock<...>>` and `Arc<Mutex<...>>` | Need single-owner strategy state with queue-fed updates |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `In Progress` | Updated-symbol batch now de-duplicates without sort and flows as `Bytes` | Still needs `SymbolId` bitset/array path and clone elimination in strategy feed |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Partial` | ticks and fast parse are in place | Symbol bytes are still copied/converted in hot segments |
@@ -44,12 +44,11 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## 6) Top open gaps (priority)
 1. `P0`: validate `HFT-CP0` metrics under live load and finalize dashboard/read-model for operator use.
-2. `P0`: complete `HFT-CP1` (`SymbolId` universe + array-state conversion).
-3. `P0`: implement `HFT-CP2` and remove lock-driven hot-path jitter.
-4. `P1`: complete `HFT-CP3` with `SymbolId` bitset and clone-free strategy feed path.
-5. `P1`: close `HFT-CP4` and remove remaining symbol-copy overhead.
-6. `P1`: implement `HFT-CP5` replay harness for deterministic bug/perf validation.
-7. `P2`: implement `HFT-CP6` execution SLA contracts and `HFT-CP7` ops hardening.
+2. `P0`: implement `HFT-CP2` and remove lock-driven hot-path jitter.
+3. `P1`: complete `HFT-CP3` with `SymbolId` bitset and clone-free strategy feed path.
+4. `P1`: close `HFT-CP4` and remove remaining symbol-copy overhead.
+5. `P1`: implement `HFT-CP5` replay harness for deterministic bug/perf validation.
+6. `P2`: implement `HFT-CP6` execution SLA contracts and `HFT-CP7` ops hardening.
 
 ## 7) Tracking rule
 For every status change:

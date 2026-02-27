@@ -18,7 +18,7 @@ Last sync: 2026-02-28 (`HFT-CP` re-baseline)
 | Checkpoint | Status | Notes |
 |---|---|---|
 | `HFT-CP0` Latency and Allocation Observatory | `In Progress` | `/health` exposes staged timestamps + latency snapshots + backlog gauges; final operator polish pending. |
-| `HFT-CP1` SymbolId and Allocation Removal | `In Progress` | String-key maps in hot path migrated to `Bytes`; `SymbolId` universe step remains. |
+| `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Runtime/connector path is `SymbolId`-first with canonical id map builder, per-batch latest dedupe, and capacity fail-fast (no silent truncation). |
 | `HFT-CP2` Lock-Free Strategy State | `Planned` | Lead-lag strategy still lock-based (`RwLock`/`Mutex`). |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `In Progress` | Updated flow is `Bytes`-based and no longer sorts string batches; `SymbolId` bitset path remains. |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Planned` | Fast parsing exists but symbol copy path remains in critical segments. |

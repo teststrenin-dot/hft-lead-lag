@@ -32,6 +32,9 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - Gate nested decode hot path (`data.p`, `data.s`) now uses static byte patterns; dynamic pattern formatting removed from runtime calls.
    - Connectors now attach `strategy_symbol_id` to `BookTicker` at source; runtime consumes id-indexed updates directly at ingest boundary.
    - Runtime strategy checks now execute by `SymbolId` in event loop (`check_signal(symbol_id)`), removing per-tick `id -> string` resolution in hot loop.
+   - Canonical `symbol -> SymbolId` map builder extracted to domain helper and reused by connectors/runtime test index to eliminate id-construction drift.
+   - Runtime startup now fails fast on `SymbolId` capacity overflow; silent truncation removed.
+   - Runtime ingest path now restores latest-per-symbol batch dedupe before screener/ws update fanout.
 2. Done but must be reworked:
    - None.
 3. Missing and required:
