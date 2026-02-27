@@ -6,9 +6,8 @@
 //! - Manages position lifecycle
 
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use tokio::sync::RwLock;
 
 use crate::domain::{messages::ticks_to_decimal, BookTicker, ExchangeId};
 
@@ -187,62 +186,52 @@ impl Default for LeadLagStrategyConfig {
 pub struct LeadLagStrategy {
     config: LeadLagStrategyConfig,
     /// Current positions
-    positions: Arc<RwLock<Vec<PositionState>>>,
+    positions: Vec<PositionState>,
     /// Latest book tickers from primary exchange
-    primary_books: Arc<RwLock<std::collections::HashMap<Bytes, BookTicker>>>,
+    primary_books: HashMap<Bytes, BookTicker>,
     /// Latest book tickers from hedge exchange
-    hedge_books: Arc<RwLock<std::collections::HashMap<Bytes, BookTicker>>>,
-    primary_clock_offset: Arc<Mutex<ExchangeClockOffset>>,
-    hedge_clock_offset: Arc<Mutex<ExchangeClockOffset>>,
+    hedge_books: HashMap<Bytes, BookTicker>,
+    primary_clock_offset: ExchangeClockOffset,
+    hedge_clock_offset: ExchangeClockOffset,
 }
 
 impl LeadLagStrategy {
     pub fn new(config: LeadLagStrategyConfig) -> Self {
         Self {
             config,
-            positions: Arc::new(RwLock::new(Vec::new())),
-            primary_books: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            hedge_books: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            primary_clock_offset: Arc::new(Mutex::new(ExchangeClockOffset::default())),
-            hedge_clock_offset: Arc::new(Mutex::new(ExchangeClockOffset::default())),
+            positions: Vec::new(),
+            primary_books: HashMap::new(),
+            hedge_books: HashMap::new(),
+            primary_clock_offset: ExchangeClockOffset::default(),
+            hedge_clock_offset: ExchangeClockOffset::default(),
         }
     }
 
     /// Update primary exchange book ticker
-    pub async fn update_primary_book(&self, ticker: BookTicker) {
+    pub fn update_primary_book(&mut self, ticker: BookTicker) {
         let symbol = ticker.symbol.clone();
         self.primary_clock_offset
-            .lock()
-            .expect("primary clock offset mutex poisoned")
             .observe(ticker.local_ts_ns, ticker.exchange_ts_ns);
-        let mut books = self.primary_books.write().await;
-        books.insert(symbol, ticker);
+        self.primary_books.insert(symbol, ticker);
     }
 
     /// Update hedge exchange book ticker
-    pub async fn update_hedge_book(&self, ticker: BookTicker) {
+    pub fn update_hedge_book(&mut self, ticker: BookTicker) {
         let symbol = ticker.symbol.clone();
         self.hedge_clock_offset
-            .lock()
-            .expect("hedge clock offset mutex poisoned")
             .observe(ticker.local_ts_ns, ticker.exchange_ts_ns);
-        let mut books = self.hedge_books.write().await;
-        books.insert(symbol, ticker);
+        self.hedge_books.insert(symbol, ticker);
     }
 
     /// Check for lead-lag signal
-    pub async fn check_signal(&self, symbol: &str) -> Option<LeadLagSignal> {
-        let primary_books = self.primary_books.read().await;
-        let hedge_books = self.hedge_books.read().await;
-
-        let primary = primary_books.get(symbol.as_bytes())?;
-        let hedge = hedge_books.get(symbol.as_bytes())?;
+    pub fn check_signal(&self, symbol: &str, now_ns: i64) -> Option<LeadLagSignal> {
+        let primary = self.primary_books.get(symbol.as_bytes())?;
+        let hedge = self.hedge_books.get(symbol.as_bytes())?;
 
         if primary.local_ts_ns <= 0 || hedge.local_ts_ns <= 0 {
             return None;
         }
 
-        let now_ns = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
         let max_quote_age_ns = self.config.max_quote_age_ms.saturating_mul(1_000_000);
         if max_quote_age_ns > 0
             && (now_ns.abs_diff(primary.local_ts_ns) > max_quote_age_ns
@@ -262,13 +251,9 @@ impl LeadLagStrategy {
         // we do not trade when lead source is unclear.
         let primary_corrected_ts_ns = self
             .primary_clock_offset
-            .lock()
-            .expect("primary clock offset mutex poisoned")
             .corrected_exchange_ts_ns(primary.exchange_ts_ns);
         let hedge_corrected_ts_ns = self
             .hedge_clock_offset
-            .lock()
-            .expect("hedge clock offset mutex poisoned")
             .corrected_exchange_ts_ns(hedge.exchange_ts_ns);
 
         if primary_corrected_ts_ns < hedge_corrected_ts_ns {
@@ -307,14 +292,13 @@ impl LeadLagStrategy {
     }
 
     /// Get current positions
-    pub async fn get_positions(&self) -> Vec<PositionState> {
-        self.positions.read().await.clone()
+    pub fn get_positions(&self) -> Vec<PositionState> {
+        self.positions.clone()
     }
 
     /// Check if we have an open position for symbol
-    pub async fn has_position(&self, symbol: &str) -> bool {
-        let positions = self.positions.read().await;
-        positions.iter().any(|p| p.symbol == symbol)
+    pub fn has_position(&self, symbol: &str) -> bool {
+        self.positions.iter().any(|p| p.symbol == symbol)
     }
 }
 
@@ -364,40 +348,33 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn check_signal_ignores_when_primary_not_leading() {
-        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+    #[test]
+    fn check_signal_ignores_when_primary_not_leading() {
+        let mut strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
             min_entry_spread_bps: 1.0,
             symbols: vec!["BTCUSDT".to_string()],
             ..Default::default()
         });
-        strategy
-            .update_primary_book(ticker("BTCUSDT", 110.0, 111.0, 100))
-            .await;
-        strategy
-            .update_hedge_book(ticker("BTCUSDT", 100.0, 101.0, 200))
-            .await;
+        let now_ns = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
+        strategy.update_primary_book(ticker("BTCUSDT", 110.0, 111.0, 100));
+        strategy.update_hedge_book(ticker("BTCUSDT", 100.0, 101.0, 200));
 
-        assert!(strategy.check_signal("BTCUSDT").await.is_none());
+        assert!(strategy.check_signal("BTCUSDT", now_ns).is_none());
     }
 
-    #[tokio::test]
-    async fn check_signal_triggers_on_bid_ask_leg_when_primary_leads() {
-        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+    #[test]
+    fn check_signal_triggers_on_bid_ask_leg_when_primary_leads() {
+        let mut strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
             min_entry_spread_bps: 50.0,
             symbols: vec!["BTCUSDT".to_string()],
             ..Default::default()
         });
-        strategy
-            .update_primary_book(ticker("BTCUSDT", 110.0, 111.0, 200))
-            .await;
-        strategy
-            .update_hedge_book(ticker("BTCUSDT", 100.0, 101.0, 100))
-            .await;
+        let now_ns = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
+        strategy.update_primary_book(ticker("BTCUSDT", 110.0, 111.0, 200));
+        strategy.update_hedge_book(ticker("BTCUSDT", 100.0, 101.0, 100));
 
         let signal = strategy
-            .check_signal("BTCUSDT")
-            .await
+            .check_signal("BTCUSDT", now_ns)
             .expect("bid/ask leg should trigger");
         assert!(signal.spread_bps > 50.0);
         assert_eq!(signal.direction, SignalDirection::LongLagger);
@@ -405,23 +382,19 @@ mod tests {
         assert_eq!(signal.lagger, ExchangeId::GateFutures);
     }
 
-    #[tokio::test]
-    async fn check_signal_triggers_on_ask_bid_leg_when_primary_leads() {
-        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+    #[test]
+    fn check_signal_triggers_on_ask_bid_leg_when_primary_leads() {
+        let mut strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
             min_entry_spread_bps: 20.0,
             symbols: vec!["BTCUSDT".to_string()],
             ..Default::default()
         });
-        strategy
-            .update_primary_book(ticker("BTCUSDT", 100.0, 100.5, 200))
-            .await;
-        strategy
-            .update_hedge_book(ticker("BTCUSDT", 101.0, 101.5, 100))
-            .await;
+        let now_ns = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
+        strategy.update_primary_book(ticker("BTCUSDT", 100.0, 100.5, 200));
+        strategy.update_hedge_book(ticker("BTCUSDT", 101.0, 101.5, 100));
 
         let signal = strategy
-            .check_signal("BTCUSDT")
-            .await
+            .check_signal("BTCUSDT", now_ns)
             .expect("ask/bid leg should trigger");
         assert!(signal.spread_bps > 20.0);
         assert_eq!(signal.direction, SignalDirection::ShortLagger);
@@ -429,9 +402,9 @@ mod tests {
         assert_eq!(signal.lagger, ExchangeId::GateFutures);
     }
 
-    #[tokio::test]
-    async fn check_signal_does_not_drop_primary_when_hedge_clock_is_ahead() {
-        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+    #[test]
+    fn check_signal_does_not_drop_primary_when_hedge_clock_is_ahead() {
+        let mut strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
             min_entry_spread_bps: 50.0,
             max_quote_age_ms: 0,
             symbols: vec!["BTCUSDT".to_string()],
@@ -440,35 +413,30 @@ mod tests {
 
         // Hedge exchange clock is +1h ahead, but local receive order still shows
         // primary as fresher for this decision cycle.
-        strategy
-            .update_hedge_book(ticker_with_local(
-                "BTCUSDT",
-                100.0,
-                101.0,
-                3_601_900_000_000,
-                1_900_000_000,
-            ))
-            .await;
-        strategy
-            .update_primary_book(ticker_with_local(
-                "BTCUSDT",
-                110.0,
-                111.0,
-                2_000_000_000,
-                2_000_000_000,
-            ))
-            .await;
+        strategy.update_hedge_book(ticker_with_local(
+            "BTCUSDT",
+            100.0,
+            101.0,
+            3_601_900_000_000,
+            1_900_000_000,
+        ));
+        strategy.update_primary_book(ticker_with_local(
+            "BTCUSDT",
+            110.0,
+            111.0,
+            2_000_000_000,
+            2_000_000_000,
+        ));
 
         let signal = strategy
-            .check_signal("BTCUSDT")
-            .await
+            .check_signal("BTCUSDT", 2_000_000_000)
             .expect("clock offset on hedge must not suppress valid primary-led signal");
         assert!(signal.spread_bps > 50.0);
     }
 
-    #[tokio::test]
-    async fn check_signal_ignores_when_quotes_are_too_far_apart_in_local_time() {
-        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+    #[test]
+    fn check_signal_ignores_when_quotes_are_too_far_apart_in_local_time() {
+        let mut strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
             min_entry_spread_bps: 50.0,
             max_quote_age_ms: 0,
             symbols: vec!["BTCUSDT".to_string()],
@@ -476,31 +444,27 @@ mod tests {
         });
 
         // Large local receive skew means one side is stale for this decision.
-        strategy
-            .update_primary_book(ticker_with_local(
-                "BTCUSDT",
-                110.0,
-                111.0,
-                2_000_000_000,
-                10_000_000_000,
-            ))
-            .await;
-        strategy
-            .update_hedge_book(ticker_with_local(
-                "BTCUSDT",
-                100.0,
-                101.0,
-                100_000_000,
-                100_000_000,
-            ))
-            .await;
+        strategy.update_primary_book(ticker_with_local(
+            "BTCUSDT",
+            110.0,
+            111.0,
+            2_000_000_000,
+            10_000_000_000,
+        ));
+        strategy.update_hedge_book(ticker_with_local(
+            "BTCUSDT",
+            100.0,
+            101.0,
+            100_000_000,
+            100_000_000,
+        ));
 
-        assert!(strategy.check_signal("BTCUSDT").await.is_none());
+        assert!(strategy.check_signal("BTCUSDT", 10_000_000_000).is_none());
     }
 
-    #[tokio::test]
-    async fn check_signal_ignores_when_one_quote_is_stale_even_if_skew_is_within_limit() {
-        let strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
+    #[test]
+    fn check_signal_ignores_when_one_quote_is_stale_even_if_skew_is_within_limit() {
+        let mut strategy = LeadLagStrategy::new(LeadLagStrategyConfig {
             min_entry_spread_bps: 50.0,
             max_quote_skew_ms: 10_000,
             max_quote_age_ms: 250,
@@ -509,27 +473,23 @@ mod tests {
         });
 
         let now_ns = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
-        strategy
-            .update_primary_book(ticker_with_local(
-                "BTCUSDT",
-                110.0,
-                111.0,
-                200,
-                now_ns - 5_000_000_000,
-            ))
-            .await;
-        strategy
-            .update_hedge_book(ticker_with_local(
-                "BTCUSDT",
-                100.0,
-                101.0,
-                100,
-                now_ns - 50_000_000,
-            ))
-            .await;
+        strategy.update_primary_book(ticker_with_local(
+            "BTCUSDT",
+            110.0,
+            111.0,
+            200,
+            now_ns - 5_000_000_000,
+        ));
+        strategy.update_hedge_book(ticker_with_local(
+            "BTCUSDT",
+            100.0,
+            101.0,
+            100,
+            now_ns - 50_000_000,
+        ));
 
         assert!(
-            strategy.check_signal("BTCUSDT").await.is_none(),
+            strategy.check_signal("BTCUSDT", now_ns).is_none(),
             "stale local quote must not produce signal even when pairwise skew is allowed"
         );
     }

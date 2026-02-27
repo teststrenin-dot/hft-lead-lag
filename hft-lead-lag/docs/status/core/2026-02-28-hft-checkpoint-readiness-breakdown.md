@@ -44,11 +44,13 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 ## `HFT-CP2` Lock-Free Strategy State
 1. Done and not touched:
    - Runtime strategy/event loop wiring exists.
+   - `LeadLagStrategy` hot-path state is now single-owner (`HashMap` + direct fields), with no `Arc<RwLock<...>>`/`Arc<Mutex<...>>`.
+   - Runtime strategy API switched to sync `&mut self` path; event loop feeds strategy updates/checks without async lock points.
 2. Done but must be reworked:
-   - `Arc<RwLock<...>>`/`Arc<Mutex<...>>` in lead-lag strategy hot path.
+   - None.
 3. Missing and required:
-   - Single-owner strategy engine state with queue-fed updates.
-   - Lock-free signal check path.
+   - Explicit queue-fed boundary contract for strategy input path (documented/benchmarked).
+   - p99 tail evidence capture after lock removal.
 
 ## `HFT-CP3` Event-Driven Updated-Only Processing
 1. Done and not touched:

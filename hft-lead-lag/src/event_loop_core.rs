@@ -462,10 +462,10 @@ impl EventLoopState {
         }
     }
 
-    pub(super) async fn update_strategy_books(
+    pub(super) fn update_strategy_books(
         &self,
         side: ExchangeSide,
-        strategy: &dyn RuntimeStrategy,
+        strategy: &mut dyn RuntimeStrategy,
         updated_strategy_symbol_ids: &[SymbolId],
         strategy_exchange_routing: StrategyExchangeRouting,
     ) {
@@ -475,8 +475,8 @@ impl EventLoopState {
             };
 
             match strategy_exchange_routing.role_for_side(side) {
-                StrategyBookRole::Primary => strategy.on_primary_book(ticker.clone()).await,
-                StrategyBookRole::Hedge => strategy.on_hedge_book(ticker.clone()).await,
+                StrategyBookRole::Primary => strategy.on_primary_book(ticker.clone()),
+                StrategyBookRole::Hedge => strategy.on_hedge_book(ticker.clone()),
             }
         }
     }
@@ -536,9 +536,9 @@ impl EventLoopState {
         self.pending_signal_symbols.len() as u64
     }
 
-    pub(super) async fn handle_signal_tick(
+    pub(super) fn handle_signal_tick(
         &mut self,
-        strategy: &dyn RuntimeStrategy,
+        strategy: &mut dyn RuntimeStrategy,
         health: &HealthState,
     ) {
         if self.pending_signal_symbols.is_empty() {
@@ -549,8 +549,8 @@ impl EventLoopState {
             let Some(symbol_id) = self.pending_signal_symbols.pop_first() else {
                 break;
             };
-            let signal = strategy.check_signal(symbol_id).await;
             let signal_decided_ts_ns = Self::now_ns();
+            let signal = strategy.check_signal(symbol_id, signal_decided_ts_ns);
             health
                 .runtime_last_signal_decided_ts_ns
                 .store(signal_decided_ts_ns, Ordering::Relaxed);

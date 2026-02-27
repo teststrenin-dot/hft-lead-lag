@@ -1580,39 +1580,32 @@ symbols = ["BTCUSDT"]
 
 #[derive(Default)]
 struct RecordingRuntimeStrategy {
-    primary_symbols: std::sync::Mutex<Vec<String>>,
-    hedge_symbols: std::sync::Mutex<Vec<String>>,
-    checked_symbols: std::sync::Mutex<Vec<hft_lead_lag::domain::SymbolId>>,
+    primary_symbols: Vec<String>,
+    hedge_symbols: Vec<String>,
+    checked_symbols: Vec<hft_lead_lag::domain::SymbolId>,
 }
 
-#[async_trait::async_trait]
 impl RuntimeStrategy for RecordingRuntimeStrategy {
     fn strategy_name(&self) -> &'static str {
         "recording"
     }
 
-    async fn on_primary_book(&self, ticker: hft_lead_lag::domain::BookTicker) {
+    fn on_primary_book(&mut self, ticker: hft_lead_lag::domain::BookTicker) {
         self.primary_symbols
-            .lock()
-            .expect("primary lock")
             .push(String::from_utf8_lossy(&ticker.symbol).to_string());
     }
 
-    async fn on_hedge_book(&self, ticker: hft_lead_lag::domain::BookTicker) {
+    fn on_hedge_book(&mut self, ticker: hft_lead_lag::domain::BookTicker) {
         self.hedge_symbols
-            .lock()
-            .expect("hedge lock")
             .push(String::from_utf8_lossy(&ticker.symbol).to_string());
     }
 
-    async fn check_signal(
-        &self,
+    fn check_signal(
+        &mut self,
         symbol_id: hft_lead_lag::domain::SymbolId,
+        _now_ns: i64,
     ) -> Option<hft_lead_lag::StrategySignal> {
-        self.checked_symbols
-            .lock()
-            .expect("checked lock")
-            .push(symbol_id);
+        self.checked_symbols.push(symbol_id);
         None
     }
 }
@@ -1620,7 +1613,7 @@ impl RuntimeStrategy for RecordingRuntimeStrategy {
 #[tokio::test]
 async fn update_strategy_books_routes_by_configured_exchange_roles() {
     let mut state = EventLoopState::new();
-    let strategy = RecordingRuntimeStrategy::default();
+    let mut strategy = RecordingRuntimeStrategy::default();
     let strategy_symbol_index =
         StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     let screener = ScreenerStore::default();
@@ -1647,39 +1640,27 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
     let updated_binance = vec![sym("BTCUSDT")];
     let updated_gate = vec![sym("ETHUSDT")];
 
-    state
-        .update_strategy_books(
-            ExchangeSide::Binance,
-            &strategy,
-            &strategy_symbol_index.symbol_ids(&updated_binance),
-            StrategyExchangeRouting {
-                primary: ExchangeSide::Gate,
-                hedge: ExchangeSide::Binance,
-            },
-        )
-        .await;
-    state
-        .update_strategy_books(
-            ExchangeSide::Gate,
-            &strategy,
-            &strategy_symbol_index.symbol_ids(&updated_gate),
-            StrategyExchangeRouting {
-                primary: ExchangeSide::Gate,
-                hedge: ExchangeSide::Binance,
-            },
-        )
-        .await;
+    state.update_strategy_books(
+        ExchangeSide::Binance,
+        &mut strategy,
+        &strategy_symbol_index.symbol_ids(&updated_binance),
+        StrategyExchangeRouting {
+            primary: ExchangeSide::Gate,
+            hedge: ExchangeSide::Binance,
+        },
+    );
+    state.update_strategy_books(
+        ExchangeSide::Gate,
+        &mut strategy,
+        &strategy_symbol_index.symbol_ids(&updated_gate),
+        StrategyExchangeRouting {
+            primary: ExchangeSide::Gate,
+            hedge: ExchangeSide::Binance,
+        },
+    );
 
-    let primary = strategy
-        .primary_symbols
-        .lock()
-        .expect("primary symbols")
-        .clone();
-    let hedge = strategy
-        .hedge_symbols
-        .lock()
-        .expect("hedge symbols")
-        .clone();
+    let primary = strategy.primary_symbols.clone();
+    let hedge = strategy.hedge_symbols.clone();
     assert_eq!(primary, vec!["ETHUSDT".to_string()]);
     assert_eq!(hedge, vec!["BTCUSDT".to_string()]);
 }
@@ -1687,7 +1668,7 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
 #[tokio::test]
 async fn handle_signal_tick_checks_only_pending_symbols() {
     let mut state = EventLoopState::new();
-    let strategy = RecordingRuntimeStrategy::default();
+    let mut strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
 
     let strategy_symbol_index =
@@ -1700,36 +1681,28 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
     ];
     state.mark_pending_signal_symbols(&strategy_symbol_index.symbol_ids(&updated));
 
-    state.handle_signal_tick(&strategy, &health).await;
+    state.handle_signal_tick(&mut strategy, &health);
 
-    let checked = strategy
-        .checked_symbols
-        .lock()
-        .expect("checked symbols")
-        .clone();
+    let checked = strategy.checked_symbols.clone();
     assert_eq!(checked, vec![0, 1]);
 }
 
 #[tokio::test]
 async fn handle_signal_tick_skips_when_no_pending_symbols() {
     let mut state = EventLoopState::new();
-    let strategy = RecordingRuntimeStrategy::default();
+    let mut strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
 
-    state.handle_signal_tick(&strategy, &health).await;
+    state.handle_signal_tick(&mut strategy, &health);
 
-    let checked = strategy
-        .checked_symbols
-        .lock()
-        .expect("checked symbols")
-        .clone();
+    let checked = strategy.checked_symbols.clone();
     assert!(checked.is_empty());
 }
 
 #[tokio::test]
 async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
     let mut state = EventLoopState::new();
-    let strategy = RecordingRuntimeStrategy::default();
+    let mut strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
     let total = SIGNAL_CHECK_BUDGET_PER_TICK + 2;
     let symbols: Vec<String> = (0..total).map(|idx| format!("SYM{idx:04}")).collect();
@@ -1744,22 +1717,14 @@ async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
         );
     }
 
-    state.handle_signal_tick(&strategy, &health).await;
+    state.handle_signal_tick(&mut strategy, &health);
     assert_eq!(state.pending_signal_symbols.len(), 2);
-    let checked_after_first_tick = strategy
-        .checked_symbols
-        .lock()
-        .expect("checked symbols")
-        .len();
+    let checked_after_first_tick = strategy.checked_symbols.len();
     assert_eq!(checked_after_first_tick, SIGNAL_CHECK_BUDGET_PER_TICK);
 
-    state.handle_signal_tick(&strategy, &health).await;
+    state.handle_signal_tick(&mut strategy, &health);
     assert!(state.pending_signal_symbols.is_empty());
-    let checked_after_second_tick = strategy
-        .checked_symbols
-        .lock()
-        .expect("checked symbols")
-        .len();
+    let checked_after_second_tick = strategy.checked_symbols.len();
     assert_eq!(checked_after_second_tick, total);
 }
 

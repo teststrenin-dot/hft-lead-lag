@@ -14,7 +14,7 @@ Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-contr
 |---|---|---|---|
 | `HFT-CP0` Latency and Allocation Observatory | `Completed` | Stage timestamps, internal latency histograms, drop counters, backlog depth | One endpoint shows p50/p95/p99/max and drop/backlog metrics; baseline captured |
 | `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Replace `String`/`HashMap<String,...>` in hot path with `SymbolId` and array-style state | Hot-path profile no longer dominated by `String` allocation/sort/dedup |
-| `HFT-CP2` Lock-Free Strategy State | `Planned` | Remove `RwLock/Mutex` from strategy hot path, single-owner engine state, queue-fed updates | No `RwLock::write().await`/`Mutex::lock()` in hot strategy path; p99 tail stabilizes |
+| `HFT-CP2` Lock-Free Strategy State | `In Progress` | Remove `RwLock/Mutex` from strategy hot path, single-owner engine state, queue-fed updates | No `RwLock::write().await`/`Mutex::lock()` in hot strategy path; p99 tail stabilizes |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Planned` | Process only updated symbols via bitset/updated-id set | CPU scales with update rate, not universe size |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Planned` | Parse only required fields, map symbol to id early, avoid symbol copying in hot path | Parser is not dominant in profile, symbol-copy hot spots removed |
 | `HFT-CP5` Deterministic Replay Harness | `Planned` | Raw feed recorder + replay mode + decision equivalence checks | Any bug/regression is reproducible on replay with deterministic outcomes |

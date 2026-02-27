@@ -13,6 +13,7 @@ async fn handle_exchange_tick(
     side: ExchangeSide,
     result: Result<hft_lead_lag::domain::BookTicker, hft_lead_lag::domain::ExchangeError>,
     drained: Vec<hft_lead_lag::domain::BookTicker>,
+    strategy: &mut dyn RuntimeStrategy,
     context: &ExchangeTickContext<'_>,
 ) {
     match state.process_exchange_result(
@@ -34,14 +35,12 @@ async fn handle_exchange_tick(
                 .health_state
                 .runtime_signal_backlog_depth
                 .store(state.signal_backlog_depth(), Ordering::Relaxed);
-            state
-                .update_strategy_books(
-                    side,
-                    context.strategy,
-                    &processed.updated_strategy_symbol_ids,
-                    context.strategy_exchange_routing,
-                )
-                .await;
+            state.update_strategy_books(
+                side,
+                strategy,
+                &processed.updated_strategy_symbol_ids,
+                context.strategy_exchange_routing,
+            );
         }
         Err(e) => {
             side.maybe_mark_disconnected(context.health_state, &e);
@@ -51,7 +50,6 @@ async fn handle_exchange_tick(
 }
 
 struct ExchangeTickContext<'a> {
-    strategy: &'a dyn RuntimeStrategy,
     strategy_symbol_index: &'a StrategySymbolIndex,
     strategy_exchange_routing: StrategyExchangeRouting,
     screener: &'a ScreenerStore,
@@ -69,7 +67,7 @@ pub(super) struct EventLoopRuntimeContext<'a> {
 pub(super) async fn run_event_loop(
     binance: &mut BinanceMarketData,
     gate: &mut GateMarketData,
-    strategy: &dyn RuntimeStrategy,
+    strategy: &mut dyn RuntimeStrategy,
     strategy_symbols: &[String],
     runtime_context: EventLoopRuntimeContext<'_>,
 ) -> ! {
@@ -80,7 +78,6 @@ pub(super) async fn run_event_loop(
     portfolio_rebalance_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let strategy_symbol_index = StrategySymbolIndex::new(strategy_symbols);
     let tick_context = ExchangeTickContext {
-        strategy,
         strategy_symbol_index: &strategy_symbol_index,
         strategy_exchange_routing: runtime_context.strategy_exchange_routing,
         screener: runtime_context.screener,
@@ -96,6 +93,7 @@ pub(super) async fn run_event_loop(
                     ExchangeSide::Binance,
                     result,
                     binance.drain_book_tickers(),
+                    strategy,
                     &tick_context,
                 ).await;
                 runtime_context
@@ -110,6 +108,7 @@ pub(super) async fn run_event_loop(
                     ExchangeSide::Gate,
                     result,
                     gate.drain_book_tickers(),
+                    strategy,
                     &tick_context,
                 ).await;
                 runtime_context
@@ -119,9 +118,7 @@ pub(super) async fn run_event_loop(
             }
 
             _ = state.signal_interval.tick() => {
-                state
-                    .handle_signal_tick(strategy, runtime_context.health_state)
-                    .await;
+                state.handle_signal_tick(strategy, runtime_context.health_state);
             }
 
             _ = portfolio_rebalance_interval.tick() => {

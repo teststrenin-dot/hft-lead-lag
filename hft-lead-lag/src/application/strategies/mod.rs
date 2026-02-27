@@ -3,8 +3,6 @@
 //! - uniform interface used by main event loop
 //! - lead-lag adapter (current production strategy)
 
-use async_trait::async_trait;
-
 use crate::application::services::{LeadLagSignal, LeadLagStrategy, LeadLagStrategyConfig};
 use crate::config::{ConfigManager, ExchangeId as ConfigExchangeId, StrategyKind};
 use crate::domain::{BookTicker, ExchangeId, SymbolId};
@@ -24,12 +22,11 @@ pub struct StrategySignal {
     pub context: String,
 }
 
-#[async_trait]
-pub trait RuntimeStrategy: Send + Sync {
+pub trait RuntimeStrategy: Send {
     fn strategy_name(&self) -> &'static str;
-    async fn on_primary_book(&self, ticker: BookTicker);
-    async fn on_hedge_book(&self, ticker: BookTicker);
-    async fn check_signal(&self, symbol_id: SymbolId) -> Option<StrategySignal>;
+    fn on_primary_book(&mut self, ticker: BookTicker);
+    fn on_hedge_book(&mut self, ticker: BookTicker);
+    fn check_signal(&mut self, symbol_id: SymbolId, now_ns: i64) -> Option<StrategySignal>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -101,23 +98,22 @@ impl LeadLagRuntimeStrategy {
     }
 }
 
-#[async_trait]
 impl RuntimeStrategy for LeadLagRuntimeStrategy {
     fn strategy_name(&self) -> &'static str {
         "lead_lag_classic"
     }
 
-    async fn on_primary_book(&self, ticker: BookTicker) {
-        self.inner.update_primary_book(ticker).await;
+    fn on_primary_book(&mut self, ticker: BookTicker) {
+        self.inner.update_primary_book(ticker);
     }
 
-    async fn on_hedge_book(&self, ticker: BookTicker) {
-        self.inner.update_hedge_book(ticker).await;
+    fn on_hedge_book(&mut self, ticker: BookTicker) {
+        self.inner.update_hedge_book(ticker);
     }
 
-    async fn check_signal(&self, symbol_id: SymbolId) -> Option<StrategySignal> {
+    fn check_signal(&mut self, symbol_id: SymbolId, now_ns: i64) -> Option<StrategySignal> {
         let symbol = self.symbols.get(symbol_id as usize)?;
-        self.inner.check_signal(symbol).await.map(Into::into)
+        self.inner.check_signal(symbol, now_ns).map(Into::into)
     }
 }
 
@@ -169,17 +165,18 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn lead_lag_runtime_emits_normalized_signal() {
-        let runtime = LeadLagRuntimeStrategy::new(LeadLagStrategyConfig {
+    #[test]
+    fn lead_lag_runtime_emits_normalized_signal() {
+        let mut runtime = LeadLagRuntimeStrategy::new(LeadLagStrategyConfig {
             min_entry_spread_bps: 1.0,
             symbols: vec!["BTCUSDT".to_string()],
             ..Default::default()
         });
-        runtime.on_primary_book(ticker("BTCUSDT", 110, 111)).await;
-        runtime.on_hedge_book(ticker("BTCUSDT", 100, 101)).await;
+        let now_ns = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
+        runtime.on_primary_book(ticker("BTCUSDT", 110, 111));
+        runtime.on_hedge_book(ticker("BTCUSDT", 100, 101));
 
-        let signal = runtime.check_signal(0).await.expect("signal expected");
+        let signal = runtime.check_signal(0, now_ns).expect("signal expected");
         assert_eq!(signal.strategy, "lead_lag_classic");
         assert_eq!(signal.symbol, "BTCUSDT");
         assert!(signal.spread_bps > 1.0);

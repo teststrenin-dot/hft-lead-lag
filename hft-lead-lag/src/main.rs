@@ -273,7 +273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     subscribe_gate_symbols(&mut gate, &screener_symbols).await;
 
     // Build runtime strategy selected via config.
-    let strategy = match build_runtime_strategy(&config_manager, strategy_symbols.clone()) {
+    let mut strategy = match build_runtime_strategy(&config_manager, strategy_symbols.clone()) {
         Ok(strategy) => strategy,
         Err(e) => {
             error!("Failed to build runtime strategy: {}", e);
@@ -295,7 +295,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     run_event_loop(
         &mut binance,
         &mut gate,
-        strategy.as_ref(),
+        strategy.as_mut(),
         &strategy_symbols,
         EventLoopRuntimeContext {
             strategy_exchange_routing,
