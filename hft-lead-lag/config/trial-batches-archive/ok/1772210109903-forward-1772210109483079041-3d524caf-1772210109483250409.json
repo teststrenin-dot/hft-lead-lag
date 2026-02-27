@@ -1,0 +1,22 @@
+{
+  "run_id": "forward-1772210109483079041-3d524caf",
+  "configs": [
+    {
+      "spike_threshold_bps": 10.0,
+      "target_ratio": 0.2,
+      "stop_loss_bps": 35.0,
+      "max_hold_ms": 18000,
+      "max_spread_bps": 7.0,
+      "trailing_decay_ratio": 0.1,
+      "baseline_window_ms": 30000,
+      "fill_delay_ms": 6,
+      "cooldown_ms": 3000,
+      "warmup_ms": 30000,
+      "quote_freshness_ms": 1000,
+      "taker_fee": 0.0005,
+      "min_baseline_samples": 20
+    }
+  ],
+  "config_id_contract_version": 1,
+  "submission_id": "forward-1772210109483079041-3d524caf-1772210109483250409"
+}
