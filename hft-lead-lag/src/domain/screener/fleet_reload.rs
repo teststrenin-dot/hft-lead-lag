@@ -11,6 +11,11 @@ pub(super) fn try_apply_fleet_patch(
     new_configs: Vec<TraderConfig>,
     plan: FleetPatchPlan,
 ) -> Result<FleetReloadReport, FleetPatchApplyError> {
+    let _fleet_patch_guard = store
+        .fleet_patch_gate
+        .lock()
+        .expect("fleet patch mutex poisoned");
+
     let old_config_count = store.fleet_configs.load().len();
     let new_config_count = new_configs.len();
     let match_stats = validate_patch(store, &new_configs, &plan)?;

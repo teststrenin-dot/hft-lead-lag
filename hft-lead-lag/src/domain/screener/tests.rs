@@ -1104,6 +1104,56 @@ fn portfolio_paper_money_falls_back_to_active_owner_when_entry_snapshot_missing(
 }
 
 #[test]
+fn drained_trades_apply_guard_logic_in_chronological_order() {
+    let store = ScreenerStore::default();
+    let config_id = TraderConfig::default().config_id();
+
+    let mut loss_one = sample_closed_trade(2_200);
+    loss_one.pnl_pct = -0.2;
+    loss_one.exit_reason = "stop_loss";
+
+    let mut loss_two = sample_closed_trade(2_300);
+    loss_two.pnl_pct = -0.2;
+    loss_two.exit_reason = "stop_loss";
+
+    let mut win_earlier = sample_closed_trade(2_000);
+    win_earlier.pnl_pct = 0.3;
+    win_earlier.exit_reason = "target";
+
+    // Deliberately out-of-order input (wins/losses interleaved by config traversal order).
+    store.handle_drained_fleet_trades(vec![
+        FleetTrade {
+            config_id,
+            symbol: "BTCUSDT".to_string(),
+            run_id: None,
+            trade: loss_one,
+        },
+        FleetTrade {
+            config_id,
+            symbol: "BTCUSDT".to_string(),
+            run_id: None,
+            trade: loss_two,
+        },
+        FleetTrade {
+            config_id,
+            symbol: "BTCUSDT".to_string(),
+            run_id: None,
+            trade: win_earlier,
+        },
+    ]);
+
+    let guard_state = store.portfolio_guard_states_v1();
+    let btc_guard = guard_state
+        .iter()
+        .find(|(symbol, _)| symbol == "BTCUSDT")
+        .expect("BTCUSDT guard");
+    assert_eq!(
+        btc_guard.1.streak_count, 2,
+        "guard streak must reflect chronological processing (win first, then two stop-losses)"
+    );
+}
+
+#[test]
 fn stop_loss_streak_triggers_cooldown_exclusion_until_expiry() {
     let store = ScreenerStore::default();
     store.symbols.insert(

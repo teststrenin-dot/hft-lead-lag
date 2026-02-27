@@ -772,6 +772,7 @@ pub struct DbWriter {
     spillover_tx: mpsc::Sender<DbCommand>,
     backpressure_tx: mpsc::Sender<DbCommand>,
     next_seq: Arc<AtomicU64>,
+    enqueued_seq: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -779,6 +780,13 @@ enum DbCommand {
     Trades {
         seq: u64,
         trades: Vec<FleetTrade>,
+    },
+    PortfolioTradesWithSnapshotV1 {
+        seq: u64,
+        trades: Vec<FleetTrade>,
+        states: Vec<PortfolioStateRecordV1>,
+        guards: Vec<PortfolioGuardRecordV1>,
+        paper_states: Vec<PortfolioPaperStateRecordV1>,
     },
     PortfolioSnapshotV1 {
         seq: u64,
@@ -790,6 +798,17 @@ enum DbCommand {
         target_seq: u64,
         done: tokio::sync::oneshot::Sender<()>,
     },
+}
+
+impl DbCommand {
+    fn seq(&self) -> Option<u64> {
+        match self {
+            Self::Trades { seq, .. }
+            | Self::PortfolioTradesWithSnapshotV1 { seq, .. }
+            | Self::PortfolioSnapshotV1 { seq, .. } => Some(*seq),
+            Self::Flush { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -843,7 +862,23 @@ fn try_enqueue_command(
 }
 
 impl DbWriter {
-    fn enqueue_command(&self, command: DbCommand, command_label: &'static str) {
+    fn mark_enqueued_seq(&self, seq: u64) {
+        let mut current = self.enqueued_seq.load(Ordering::Relaxed);
+        while seq > current {
+            match self.enqueued_seq.compare_exchange_weak(
+                current,
+                seq,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn enqueue_command(&self, command: DbCommand, command_label: &'static str) -> bool {
+        let seq = command.seq();
         let outcome = try_enqueue_command(
             &self.tx,
             &self.overflow_tx,
@@ -861,14 +896,27 @@ impl DbWriter {
         };
 
         match outcome {
-            EnqueueOutcome::QueuedPrimary => {}
+            EnqueueOutcome::QueuedPrimary => {
+                if let Some(seq) = seq {
+                    self.mark_enqueued_seq(seq);
+                }
+                true
+            }
             EnqueueOutcome::QueuedOverflow => {
                 let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
                 log_deferred("primary queue full", n);
+                if let Some(seq) = seq {
+                    self.mark_enqueued_seq(seq);
+                }
+                true
             }
             EnqueueOutcome::QueuedRetry => {
                 let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
                 log_deferred("primary+overflow queues full, queued in retry buffer", n);
+                if let Some(seq) = seq {
+                    self.mark_enqueued_seq(seq);
+                }
+                true
             }
             EnqueueOutcome::QueuedSpillover => {
                 let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
@@ -876,6 +924,10 @@ impl DbWriter {
                     "primary+overflow+retry queues full, queued in spillover buffer",
                     n,
                 );
+                if let Some(seq) = seq {
+                    self.mark_enqueued_seq(seq);
+                }
+                true
             }
             EnqueueOutcome::NeedsBackpressure(command) => {
                 let n = OVERFLOWED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
@@ -884,24 +936,32 @@ impl DbWriter {
                     n,
                 );
                 match self.backpressure_tx.try_send(command) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        if let Some(seq) = seq {
+                            self.mark_enqueued_seq(seq);
+                        }
+                        true
+                    }
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                         let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
                         warn!(
                             "db writer backpressure queue full, dropping {command_label} (total dropped: {dropped})"
                         );
+                        false
                     }
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                         let dropped = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
                         warn!(
                             "db writer backpressure queue closed, dropping {command_label} (total dropped: {dropped})"
                         );
+                        false
                     }
                 }
             }
             EnqueueOutcome::DroppedClosed => {
                 let n = DROPPED_BATCHES.fetch_add(1, Ordering::Relaxed) + 1;
                 warn!("db writer channel closed, dropping {command_label} (total dropped: {n})");
+                false
             }
         }
     }
@@ -913,7 +973,26 @@ impl DbWriter {
         }
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let command = DbCommand::Trades { seq, trades };
-        self.enqueue_command(command, "trade batch");
+        let _ = self.enqueue_command(command, "trade batch");
+    }
+
+    /// Enqueue portfolio snapshot and drained trades as one durability unit.
+    pub fn send_portfolio_trades_with_snapshot_v1(
+        &self,
+        trades: Vec<FleetTrade>,
+        states: Vec<PortfolioStateRecordV1>,
+        guards: Vec<PortfolioGuardRecordV1>,
+        paper_states: Vec<PortfolioPaperStateRecordV1>,
+    ) {
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let command = DbCommand::PortfolioTradesWithSnapshotV1 {
+            seq,
+            trades,
+            states,
+            guards,
+            paper_states,
+        };
+        let _ = self.enqueue_command(command, "portfolio+trades snapshot");
     }
 
     /// Enqueue a portfolio snapshot (active/shortlist + guard + paper state).
@@ -930,7 +1009,7 @@ impl DbWriter {
             guards,
             paper_states,
         };
-        self.enqueue_command(command, "portfolio snapshot");
+        let _ = self.enqueue_command(command, "portfolio snapshot");
     }
 
     /// Flush all currently enqueued DB writer data to disk (best effort).
@@ -939,7 +1018,7 @@ impl DbWriter {
     /// were enqueued before this call, including those temporarily staged in
     /// overflow/retry/spillover/backpressure channels.
     pub async fn flush_all(&self) {
-        let target_seq = self.next_seq.load(Ordering::Acquire);
+        let target_seq = self.enqueued_seq.load(Ordering::Acquire);
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self
             .tx
@@ -1111,6 +1190,40 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
                             }
                             complete_ready_flushes(observed_max_seq, &mut pending_flushes);
                         }
+                        Some(DbCommand::PortfolioTradesWithSnapshotV1 {
+                            seq,
+                            trades,
+                            states,
+                            guards,
+                            paper_states,
+                        }) => {
+                            observed_max_seq = observed_max_seq.max(seq);
+                            flush_trade_buffer(&conn, &mut buf);
+                            if seq <= latest_portfolio_snapshot_seq {
+                                if !trades.is_empty() {
+                                    if let Err(e) = flush_trades(&conn, &trades) {
+                                        warn!("db flush error while persisting stale-seq trades: {e}");
+                                    }
+                                }
+                                warn!(
+                                    "db writer ignored stale portfolio snapshot in combined command seq={} latest={}",
+                                    seq,
+                                    latest_portfolio_snapshot_seq
+                                );
+                            } else {
+                                match replace_portfolio_snapshot_with_trades_v1(
+                                    &conn,
+                                    &states,
+                                    &guards,
+                                    &paper_states,
+                                    &trades,
+                                ) {
+                                    Ok(_) => latest_portfolio_snapshot_seq = seq,
+                                    Err(e) => warn!("db combined portfolio+trades flush error: {e}"),
+                                }
+                            }
+                            complete_ready_flushes(observed_max_seq, &mut pending_flushes);
+                        }
                         Some(DbCommand::Flush { target_seq, done }) => {
                             flush_trade_buffer(&conn, &mut buf);
                             if observed_max_seq >= target_seq {
@@ -1150,11 +1263,11 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
         spillover_tx,
         backpressure_tx,
         next_seq: Arc::new(AtomicU64::new(0)),
+        enqueued_seq: Arc::new(AtomicU64::new(0)),
     }
 }
 
-fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()> {
-    let tx = conn.unchecked_transaction()?;
+fn insert_trades_tx(tx: &rusqlite::Transaction<'_>, trades: &[FleetTrade]) -> rusqlite::Result<()> {
     {
         let mut stmt = tx.prepare_cached(
             "INSERT OR IGNORE INTO trades (config_id, symbol, direction, entry_ts_ms, exit_ts_ms,
@@ -1183,8 +1296,83 @@ fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()
             ])?;
         }
     }
+    Ok(())
+}
+
+fn flush_trades(conn: &Connection, trades: &[FleetTrade]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    insert_trades_tx(&tx, trades)?;
     tx.commit()?;
     info!("flushed {} trades to db", trades.len());
+    Ok(())
+}
+
+fn replace_portfolio_snapshot_with_trades_v1(
+    conn: &Connection,
+    states: &[PortfolioStateRecordV1],
+    guards: &[PortfolioGuardRecordV1],
+    paper_states: &[PortfolioPaperStateRecordV1],
+    trades: &[FleetTrade],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM portfolio_state_v1", [])?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO portfolio_state_v1 (
+                portfolio_id, shortlist_json, active_symbols_json, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for row in states {
+            let shortlist_json = encode_symbols_json(&row.shortlist)?;
+            let active_json = encode_symbols_json(&row.active_symbols)?;
+            stmt.execute(params![
+                row.portfolio_id,
+                shortlist_json,
+                active_json,
+                row.updated_at_ms
+            ])?;
+        }
+    }
+    tx.execute("DELETE FROM portfolio_symbol_guard_v1", [])?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO portfolio_symbol_guard_v1 (
+                symbol, streak_count, first_streak_ts_ms, cooldown_until_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for row in guards {
+            stmt.execute(params![
+                row.symbol,
+                row.streak_count as i64,
+                row.first_streak_ts_ms,
+                row.cooldown_until_ms,
+                row.updated_at_ms
+            ])?;
+        }
+    }
+    tx.execute("DELETE FROM portfolio_paper_state_v1", [])?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO portfolio_paper_state_v1 (
+                portfolio_id, equity_usd, realized_pnl_usd, closed_trades,
+                profitable_trades, losing_trades, last_trade_ts_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for row in paper_states {
+            stmt.execute(params![
+                row.portfolio_id,
+                row.equity_usd,
+                row.realized_pnl_usd,
+                row.closed_trades.min(i64::MAX as u64) as i64,
+                row.profitable_trades.min(i64::MAX as u64) as i64,
+                row.losing_trades.min(i64::MAX as u64) as i64,
+                row.last_trade_ts_ms,
+                row.updated_at_ms
+            ])?;
+        }
+    }
+    insert_trades_tx(&tx, trades)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1992,6 +2180,7 @@ mod tests {
             spillover_tx,
             backpressure_tx,
             next_seq: Arc::new(AtomicU64::new(0)),
+            enqueued_seq: Arc::new(AtomicU64::new(0)),
         };
 
         // Must not panic when called from async runtime.
@@ -2015,6 +2204,7 @@ mod tests {
         let writer = spawn_writer(&path);
         let seq = 1_u64;
         writer.next_seq.store(seq, Ordering::Release);
+        writer.enqueued_seq.store(seq, Ordering::Release);
         writer
             .backpressure_tx
             .send(DbCommand::Trades {
@@ -2044,6 +2234,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flush_all_ignores_unenqueued_sequences() {
+        let path = temp_db_path("flush-all-unenqueued-seq");
+        let conn = open_db(&path).expect("open db");
+        upsert_configs(&conn, &[TraderConfig::default()]).expect("seed config row");
+        drop(conn);
+
+        let writer = spawn_writer(&path);
+
+        // Simulate a dropped producer batch where seq was allocated but never enqueued.
+        writer.next_seq.store(5, Ordering::Release);
+        writer.enqueued_seq.store(0, Ordering::Release);
+
+        timeout(Duration::from_millis(500), writer.flush_all())
+            .await
+            .expect("flush_all must not wait for sequences that never reached writer queues");
+
+        drop(writer);
+        cleanup_temp_db(&path);
+    }
+
+    #[tokio::test]
     async fn writer_ignores_stale_portfolio_snapshot_sequence() {
         let path = temp_db_path("portfolio-snapshot-seq-guard");
         let conn = open_db(&path).expect("open db");
@@ -2051,6 +2262,7 @@ mod tests {
 
         let writer = spawn_writer(&path);
         writer.next_seq.store(3, Ordering::Release);
+        writer.enqueued_seq.store(3, Ordering::Release);
 
         let newer_states = vec![
             PortfolioStateRecordV1 {

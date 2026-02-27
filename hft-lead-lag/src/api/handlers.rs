@@ -31,7 +31,7 @@ use self::health_support::{
 };
 use self::helpers::{
     compute_fleet_stats, internal_error, load_symbol_best_configs, load_trial_run_summaries,
-    open_readonly_conn, resolve_forward_run_id, to_snapshots,
+    open_readonly_conn, resolve_forward_run_id, to_snapshots, with_readonly_conn,
 };
 use self::trial_axes_support::build_trial_axes_breakdown;
 use super::http_server::HealthState;
@@ -502,67 +502,68 @@ pub(crate) struct FleetConfigRank {
 pub(crate) async fn get_fleet_ranking(
     State(state): State<Arc<HttpState>>,
 ) -> Result<Json<Vec<FleetConfigRank>>, (axum::http::StatusCode, String)> {
-    let conn = open_readonly_conn(&state)?;
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
-                c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
-                c.trailing_decay_ratio, c.baseline_window_ms,
-                COUNT(*) as total,
-                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(t.pnl_pct) as total_pnl,
-                COUNT(DISTINCT t.symbol) as symbols
-         FROM trades t
-         JOIN configs c ON t.config_id = c.id
-         GROUP BY c.id
-         HAVING total >= 10
-         ORDER BY total_pnl / total DESC
-         LIMIT 50",
-        )
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("sql: {e}"),
+    let result = with_readonly_conn(state.clone(), "fleet ranking", move |conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
+                    c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                    c.trailing_decay_ratio, c.baseline_window_ms,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(t.pnl_pct) as total_pnl,
+                    COUNT(DISTINCT t.symbol) as symbols
+             FROM trades t
+             JOIN configs c ON t.config_id = c.id
+             GROUP BY c.id
+             HAVING total >= 10
+             ORDER BY total_pnl / total DESC
+             LIMIT 50",
             )
-        })?;
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("sql: {e}"),
+                )
+            })?;
 
-    let rows = stmt
-        .query_map([], |row| {
-            let total: i64 = row.get(8)?;
-            let wins: i64 = row.get(9)?;
-            let total_pnl: f64 = row.get(10)?;
-            let stats = compute_fleet_stats(total, wins, total_pnl);
-            Ok(FleetConfigRank {
-                config_id: row.get(0)?,
-                spike_threshold_bps: row.get(1)?,
-                target_ratio: row.get(2)?,
-                stop_loss_bps: row.get(3)?,
-                max_hold_ms: row.get(4)?,
-                max_spread_bps: row.get(5)?,
-                trailing_decay_ratio: row.get(6)?,
-                baseline_window_ms: row.get(7)?,
-                total_trades: total,
-                wins,
-                win_rate_pct: stats.win_rate_pct,
-                total_pnl_pct: total_pnl,
-                avg_pnl_pct: stats.avg_pnl_pct,
-                symbols_traded: row.get(11)?,
+        let rows = stmt
+            .query_map([], |row| {
+                let total: i64 = row.get(8)?;
+                let wins: i64 = row.get(9)?;
+                let total_pnl: f64 = row.get(10)?;
+                let stats = compute_fleet_stats(total, wins, total_pnl);
+                Ok(FleetConfigRank {
+                    config_id: row.get(0)?,
+                    spike_threshold_bps: row.get(1)?,
+                    target_ratio: row.get(2)?,
+                    stop_loss_bps: row.get(3)?,
+                    max_hold_ms: row.get(4)?,
+                    max_spread_bps: row.get(5)?,
+                    trailing_decay_ratio: row.get(6)?,
+                    baseline_window_ms: row.get(7)?,
+                    total_trades: total,
+                    wins,
+                    win_rate_pct: stats.win_rate_pct,
+                    total_pnl_pct: total_pnl,
+                    avg_pnl_pct: stats.avg_pnl_pct,
+                    symbols_traded: row.get(11)?,
+                })
             })
-        })
-        .map_err(|e| {
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("query: {e}"),
+                )
+            })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("query: {e}"),
+                format!("row decode: {e}"),
             )
-        })?;
-
-    let result: Vec<FleetConfigRank> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("row decode: {e}"),
-        )
-    })?;
+        })
+    })
+    .await?;
     Ok(Json(result))
 }
 
@@ -643,102 +644,102 @@ pub(crate) struct FleetRankedConfig {
 pub(crate) async fn get_fleet_ranked(
     State(state): State<Arc<HttpState>>,
 ) -> Result<Json<Vec<FleetRankedConfig>>, (axum::http::StatusCode, String)> {
-    let conn = open_readonly_conn(&state)?;
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
-                c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
-                c.trailing_decay_ratio, c.baseline_window_ms,
-                COUNT(*) as total,
-                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(t.pnl_pct) as total_pnl,
-                AVG(t.pnl_pct) as avg_pnl,
-                AVG(t.pnl_pct * t.pnl_pct) as avg_pnl_sq,
-                SUM(CASE WHEN t.pnl_pct > 0 THEN t.pnl_pct ELSE 0 END) as gross_win,
-                SUM(CASE WHEN t.pnl_pct < 0 THEN ABS(t.pnl_pct) ELSE 0 END) as gross_loss,
-                COUNT(DISTINCT t.symbol) as symbols
-         FROM trades t
-         JOIN configs c ON t.config_id = c.id
-         GROUP BY c.id
-         HAVING total >= 10
-         ORDER BY total DESC
-         LIMIT 100",
-        )
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("sql: {e}"),
+    let mut result = with_readonly_conn(state.clone(), "fleet ranked", move |conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
+                    c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                    c.trailing_decay_ratio, c.baseline_window_ms,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(t.pnl_pct) as total_pnl,
+                    AVG(t.pnl_pct) as avg_pnl,
+                    AVG(t.pnl_pct * t.pnl_pct) as avg_pnl_sq,
+                    SUM(CASE WHEN t.pnl_pct > 0 THEN t.pnl_pct ELSE 0 END) as gross_win,
+                    SUM(CASE WHEN t.pnl_pct < 0 THEN ABS(t.pnl_pct) ELSE 0 END) as gross_loss,
+                    COUNT(DISTINCT t.symbol) as symbols
+             FROM trades t
+             JOIN configs c ON t.config_id = c.id
+             GROUP BY c.id
+             HAVING total >= 10
+             ORDER BY total DESC
+             LIMIT 100",
             )
-        })?;
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("sql: {e}"),
+                )
+            })?;
 
-    let rows = stmt
-        .query_map([], |row| {
-            let total: i64 = row.get(8)?;
-            let wins: i64 = row.get(9)?;
-            let total_pnl: f64 = row.get(10)?;
-            let avg_pnl: f64 = row.get(11)?;
-            let avg_pnl_sq: f64 = row.get(12)?;
-            let gross_win: f64 = row.get(13)?;
-            let gross_loss: f64 = row.get(14)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let total: i64 = row.get(8)?;
+                let wins: i64 = row.get(9)?;
+                let total_pnl: f64 = row.get(10)?;
+                let avg_pnl: f64 = row.get(11)?;
+                let avg_pnl_sq: f64 = row.get(12)?;
+                let gross_win: f64 = row.get(13)?;
+                let gross_loss: f64 = row.get(14)?;
 
-            let variance = (avg_pnl_sq - avg_pnl * avg_pnl).max(0.0);
-            let stddev_pnl = variance.sqrt();
-            let sharpe = if stddev_pnl > 1e-9 {
-                avg_pnl / stddev_pnl
-            } else {
-                0.0
-            };
-            let profit_factor = if gross_loss > 1e-9 {
-                gross_win / gross_loss
-            } else {
-                if gross_win > 0.0 {
+                let variance = (avg_pnl_sq - avg_pnl * avg_pnl).max(0.0);
+                let stddev_pnl = variance.sqrt();
+                let sharpe = if stddev_pnl > 1e-9 {
+                    avg_pnl / stddev_pnl
+                } else {
+                    0.0
+                };
+                let profit_factor = if gross_loss > 1e-9 {
+                    gross_win / gross_loss
+                } else if gross_win > 0.0 {
                     99.0
                 } else {
                     0.0
-                }
-            };
-            let pf_capped = profit_factor.min(3.0);
-            let composite = sharpe * (total as f64).sqrt() * pf_capped;
+                };
+                let pf_capped = profit_factor.min(3.0);
+                let composite = sharpe * (total as f64).sqrt() * pf_capped;
 
-            Ok(FleetRankedConfig {
-                config_id: row.get(0)?,
-                spike_threshold_bps: row.get(1)?,
-                target_ratio: row.get(2)?,
-                stop_loss_bps: row.get(3)?,
-                max_hold_ms: row.get(4)?,
-                max_spread_bps: row.get(5)?,
-                trailing_decay_ratio: row.get(6)?,
-                baseline_window_ms: row.get(7)?,
-                total_trades: total,
-                wins,
-                win_rate_pct: if total > 0 {
-                    (wins as f64 / total as f64) * 100.0
-                } else {
-                    0.0
-                },
-                total_pnl_pct: total_pnl,
-                avg_pnl_pct: avg_pnl,
-                stddev_pnl_pct: stddev_pnl,
-                sharpe,
-                profit_factor,
-                composite,
-                symbols_traded: row.get(15)?,
+                Ok(FleetRankedConfig {
+                    config_id: row.get(0)?,
+                    spike_threshold_bps: row.get(1)?,
+                    target_ratio: row.get(2)?,
+                    stop_loss_bps: row.get(3)?,
+                    max_hold_ms: row.get(4)?,
+                    max_spread_bps: row.get(5)?,
+                    trailing_decay_ratio: row.get(6)?,
+                    baseline_window_ms: row.get(7)?,
+                    total_trades: total,
+                    wins,
+                    win_rate_pct: if total > 0 {
+                        (wins as f64 / total as f64) * 100.0
+                    } else {
+                        0.0
+                    },
+                    total_pnl_pct: total_pnl,
+                    avg_pnl_pct: avg_pnl,
+                    stddev_pnl_pct: stddev_pnl,
+                    sharpe,
+                    profit_factor,
+                    composite,
+                    symbols_traded: row.get(15)?,
+                })
             })
-        })
-        .map_err(|e| {
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("query: {e}"),
+                )
+            })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("query: {e}"),
+                format!("row decode: {e}"),
             )
-        })?;
+        })
+    })
+    .await?;
 
-    let mut result: Vec<FleetRankedConfig> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("row decode: {e}"),
-        )
-    })?;
     result.sort_by(|a, b| {
         b.composite
             .partial_cmp(&a.composite)
@@ -850,80 +851,81 @@ pub(crate) async fn get_trial_configs(
     State(state): State<Arc<HttpState>>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Result<Json<Vec<TrialConfigDetail>>, (axum::http::StatusCode, String)> {
-    let conn = open_readonly_conn(&state)?;
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
-                c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
-                c.trailing_decay_ratio, c.baseline_window_ms,
-                COUNT(*) as total,
-                SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(t.pnl_pct) as total_pnl,
-                SUM(CASE WHEN t.exit_reason = 'stop_loss' THEN 1 ELSE 0 END) as sl_count,
-                AVG(t.hold_ms) as avg_hold
-         FROM trades t
-         JOIN configs c ON t.config_id = c.id
-         WHERE t.run_id = ?1
-         GROUP BY c.id
-         ORDER BY SUM(t.pnl_pct) / COUNT(*) DESC",
-        )
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("sql: {e}"),
+    let result = with_readonly_conn(state.clone(), "trial configs", move |conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.spike_threshold_bps, c.target_ratio,
+                    c.stop_loss_bps, c.max_hold_ms, c.max_spread_bps,
+                    c.trailing_decay_ratio, c.baseline_window_ms,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN t.pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(t.pnl_pct) as total_pnl,
+                    SUM(CASE WHEN t.exit_reason = 'stop_loss' THEN 1 ELSE 0 END) as sl_count,
+                    AVG(t.hold_ms) as avg_hold
+             FROM trades t
+             JOIN configs c ON t.config_id = c.id
+             WHERE t.run_id = ?1
+             GROUP BY c.id
+             ORDER BY SUM(t.pnl_pct) / COUNT(*) DESC",
             )
-        })?;
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("sql: {e}"),
+                )
+            })?;
 
-    let rows = stmt
-        .query_map(rusqlite::params![run_id], |row| {
-            let total: i64 = row.get(8)?;
-            let wins: i64 = row.get(9)?;
-            let total_pnl: f64 = row.get(10)?;
-            let sl_count: i64 = row.get(11)?;
-            Ok(TrialConfigDetail {
-                config_id: row.get(0)?,
-                spike_threshold_bps: row.get(1)?,
-                target_ratio: row.get(2)?,
-                stop_loss_bps: row.get(3)?,
-                max_hold_ms: row.get(4)?,
-                max_spread_bps: row.get(5)?,
-                trailing_decay_ratio: row.get(6)?,
-                baseline_window_ms: row.get(7)?,
-                total_trades: total,
-                wins,
-                win_rate_pct: if total > 0 {
-                    (wins as f64 / total as f64) * 100.0
-                } else {
-                    0.0
-                },
-                avg_pnl_pct: if total > 0 {
-                    total_pnl / total as f64
-                } else {
-                    0.0
-                },
-                total_pnl_pct: total_pnl,
-                stop_loss_share_pct: if total > 0 {
-                    (sl_count as f64 / total as f64) * 100.0
-                } else {
-                    0.0
-                },
-                avg_hold_ms: row.get(12)?,
+        let rows = stmt
+            .query_map(rusqlite::params![run_id], |row| {
+                let total: i64 = row.get(8)?;
+                let wins: i64 = row.get(9)?;
+                let total_pnl: f64 = row.get(10)?;
+                let sl_count: i64 = row.get(11)?;
+                Ok(TrialConfigDetail {
+                    config_id: row.get(0)?,
+                    spike_threshold_bps: row.get(1)?,
+                    target_ratio: row.get(2)?,
+                    stop_loss_bps: row.get(3)?,
+                    max_hold_ms: row.get(4)?,
+                    max_spread_bps: row.get(5)?,
+                    trailing_decay_ratio: row.get(6)?,
+                    baseline_window_ms: row.get(7)?,
+                    total_trades: total,
+                    wins,
+                    win_rate_pct: if total > 0 {
+                        (wins as f64 / total as f64) * 100.0
+                    } else {
+                        0.0
+                    },
+                    avg_pnl_pct: if total > 0 {
+                        total_pnl / total as f64
+                    } else {
+                        0.0
+                    },
+                    total_pnl_pct: total_pnl,
+                    stop_loss_share_pct: if total > 0 {
+                        (sl_count as f64 / total as f64) * 100.0
+                    } else {
+                        0.0
+                    },
+                    avg_hold_ms: row.get(12)?,
+                })
             })
-        })
-        .map_err(|e| {
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("query: {e}"),
+                )
+            })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("query: {e}"),
+                format!("row decode: {e}"),
             )
-        })?;
-
-    let result: Vec<TrialConfigDetail> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("row decode: {e}"),
-        )
-    })?;
+        })
+    })
+    .await?;
     Ok(Json(result))
 }
 
@@ -954,9 +956,12 @@ pub(crate) async fn get_trial_axes(
     State(state): State<Arc<HttpState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<TrialAxesBreakdown>, (axum::http::StatusCode, String)> {
-    let conn = open_readonly_conn(&state)?;
     let run_id = params.get("run_id").cloned();
-    build_trial_axes_breakdown(&conn, run_id).map(Json)
+    let breakdown = with_readonly_conn(state.clone(), "trial axes", move |conn| {
+        build_trial_axes_breakdown(&conn, run_id)
+    })
+    .await?;
+    Ok(Json(breakdown))
 }
 
 #[derive(Debug, Deserialize)]

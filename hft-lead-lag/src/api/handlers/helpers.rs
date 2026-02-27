@@ -1,5 +1,6 @@
 use super::{HttpState, SymbolBestConfig, SymbolSnapshot, TrialRunSummary};
 use crate::infrastructure::rest::Ticker24h;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct FleetStats {
@@ -110,6 +111,28 @@ pub(super) fn open_readonly_conn(
             format!("db: {e}"),
         )
     })
+}
+
+pub(super) async fn with_readonly_conn<T, F>(
+    state: Arc<HttpState>,
+    operation_name: &'static str,
+    work: F,
+) -> Result<T, (axum::http::StatusCode, String)>
+where
+    T: Send + 'static,
+    F: FnOnce(rusqlite::Connection) -> Result<T, (axum::http::StatusCode, String)> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let conn = open_readonly_conn(state.as_ref())?;
+        work(conn)
+    })
+    .await
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{operation_name} join error: {e}"),
+        )
+    })?
 }
 
 fn decode_symbol_best_config_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolBestConfig> {

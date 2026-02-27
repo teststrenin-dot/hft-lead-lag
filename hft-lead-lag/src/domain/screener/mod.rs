@@ -152,6 +152,7 @@ pub struct ScreenerStore {
     symbols: Arc<DashMap<String, SymbolState>>,
     trade_accumulators: Arc<DashMap<String, TradeAccumulator>>,
     portfolio_runtime: Arc<Mutex<PortfolioRuntimeState>>,
+    fleet_patch_gate: Arc<Mutex<()>>,
     window_ms: i64,
     fleet_configs: Arc<ArcSwap<Vec<TraderConfig>>>,
     db_writer: Option<DbWriter>,
@@ -260,6 +261,7 @@ impl ScreenerStore {
             symbols: Arc::new(DashMap::new()),
             trade_accumulators: Arc::new(DashMap::new()),
             portfolio_runtime: Arc::new(Mutex::new(portfolio_runtime)),
+            fleet_patch_gate: Arc::new(Mutex::new(())),
             window_ms,
             fleet_configs: Arc::new(ArcSwap::from_pointee(generate_grid())),
             db_writer: None,
@@ -565,6 +567,7 @@ impl ScreenerStore {
         );
     }
 
+    #[cfg(test)]
     fn observe_closed_trade_for_portfolio_with_entry_ts(
         &self,
         symbol: &str,
@@ -629,20 +632,94 @@ impl ScreenerStore {
         if drained_trades.is_empty() {
             return 0;
         }
+
+        // Normalize event ordering by market chronology so guard/cooldown behavior
+        // is independent from fleet config traversal order.
+        let mut drained_trades = drained_trades;
+        drained_trades.sort_by(|left, right| {
+            left.symbol
+                .cmp(&right.symbol)
+                .then_with(|| left.trade.ts_ms.cmp(&right.trade.ts_ms))
+                .then_with(|| left.trade.entry_ts_ms.cmp(&right.trade.entry_ts_ms))
+                .then_with(|| left.config_id.cmp(&right.config_id))
+        });
+
         for ft in &drained_trades {
-            self.observe_closed_trade_for_portfolio_with_entry_ts(
-                &ft.symbol,
-                ft.trade.pnl_pct,
-                ft.trade.exit_reason == "stop_loss",
-                ft.trade.ts_ms,
-                Some(ft.trade.entry_ts_ms),
-            );
+            self.trade_accumulators
+                .entry(ft.symbol.clone())
+                .or_default()
+                .value_mut()
+                .observe(ft.trade.pnl_pct, ft.trade.ts_ms);
         }
 
         let drained_count = drained_trades.len();
+        let snapshot_ts_ms = drained_trades
+            .last()
+            .map(|ft| ft.trade.ts_ms)
+            .unwrap_or(now_ms());
+        let maybe_snapshot = {
+            let mut runtime = self
+                .portfolio_runtime
+                .lock()
+                .expect("portfolio runtime mutex poisoned");
+            Self::ensure_portfolio_paper_state_slots(&mut runtime);
+
+            let mut changed = false;
+            for ft in &drained_trades {
+                let before = runtime.engine.guard_state(&ft.symbol);
+                runtime.engine.record_closed_trade(
+                    &ft.symbol,
+                    ft.trade.pnl_pct,
+                    ft.trade.exit_reason == "stop_loss",
+                    ft.trade.ts_ms,
+                );
+                let after = runtime.engine.guard_state(&ft.symbol);
+                changed |= before != after;
+
+                let mut paper_updated = false;
+                if let Some(portfolio_id) =
+                    Self::owner_at_entry_portfolio_id(&runtime, &ft.symbol, ft.trade.entry_ts_ms)
+                {
+                    if let Some(paper_state) = runtime.paper_state.get_mut(&portfolio_id) {
+                        paper_state.observe_trade(ft.trade.pnl_pct, ft.trade.ts_ms);
+                        paper_updated = true;
+                    }
+                }
+                if !paper_updated {
+                    if let Some(portfolio_id) =
+                        Self::active_owner_portfolio_id(&runtime, &ft.symbol)
+                    {
+                        let paper_state = runtime
+                            .paper_state
+                            .get_mut(&portfolio_id)
+                            .expect("portfolio paper-state slot missing for active owner");
+                        paper_state.observe_trade(ft.trade.pnl_pct, ft.trade.ts_ms);
+                        paper_updated = true;
+                    }
+                }
+                changed |= paper_updated;
+            }
+
+            if changed {
+                Some(Self::portfolio_snapshot_records(&runtime, snapshot_ts_ms))
+            } else {
+                None
+            }
+        };
+
         if let Some(writer) = self.db_writer.clone() {
-            writer.send(drained_trades);
+            if let Some((states, guards, paper_states)) = maybe_snapshot {
+                writer.send_portfolio_trades_with_snapshot_v1(
+                    drained_trades,
+                    states,
+                    guards,
+                    paper_states,
+                );
+            } else {
+                writer.send(drained_trades);
+            }
         }
+
         drained_count
     }
 

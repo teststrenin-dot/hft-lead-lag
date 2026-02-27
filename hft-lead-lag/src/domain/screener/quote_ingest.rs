@@ -93,6 +93,11 @@ pub(super) fn update(
         return;
     }
 
+    let _fleet_patch_guard = store
+        .fleet_patch_gate
+        .lock()
+        .expect("fleet patch mutex poisoned");
+
     let clocks = TimeDomainSample::from_raw(timestamp_ns, local_receive_ts_ns, now_ms());
     let adjusted_exchange_ts_ms =
         store.corrected_exchange_ts_ms(exchange, clocks.exchange_event_ts_ms, clocks.ingress_ts_ms);
