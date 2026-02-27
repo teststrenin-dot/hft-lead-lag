@@ -740,6 +740,105 @@ fn portfolio_candidate_history_restore_bootstraps_stats_without_live_ticks() {
 }
 
 #[test]
+fn setting_run_id_resets_candidate_history_when_run_changes() {
+    let store = ScreenerStore::default();
+    store.observe_closed_trade_for_portfolio("BTCUSDT", 0.25, false, 10_000);
+    assert_eq!(store.portfolio_candidate_stats_v1(60_000).len(), 1);
+
+    store.set_run_id(Some("run-a".to_string()));
+
+    assert!(
+        store.portfolio_candidate_stats_v1(60_000).is_empty(),
+        "candidate history must reset when switching into a specific run scope"
+    );
+}
+
+#[test]
+fn drained_trades_ignore_non_active_run_for_candidate_math() {
+    let store = ScreenerStore::default();
+    store.set_run_id(Some("forward-1".to_string()));
+
+    let mut trade = sample_closed_trade(50_000);
+    trade.entry_ts_ms = 10_000;
+    store.handle_drained_fleet_trades(vec![FleetTrade {
+        config_id: TraderConfig::default().config_id(),
+        symbol: "BTCUSDT".to_string(),
+        run_id: Some("forward-other".to_string()),
+        trade,
+    }]);
+
+    assert!(
+        store.portfolio_candidate_stats_v1(120_000).is_empty(),
+        "candidate stats must not ingest trades from a different run_id"
+    );
+}
+
+#[test]
+fn drained_trades_collapse_same_symbol_timestamp_for_candidate_math() {
+    let store = ScreenerStore::default();
+    let mut first = sample_closed_trade(80_000);
+    first.entry_ts_ms = 20_000;
+    first.pnl_pct = 0.4;
+    first.exit_reason = "target";
+
+    let mut second = sample_closed_trade(80_000);
+    second.entry_ts_ms = 20_000;
+    second.pnl_pct = -0.2;
+    second.exit_reason = "stop_loss";
+
+    store.handle_drained_fleet_trades(vec![
+        FleetTrade {
+            config_id: 11,
+            symbol: "BTCUSDT".to_string(),
+            run_id: None,
+            trade: first,
+        },
+        FleetTrade {
+            config_id: 12,
+            symbol: "BTCUSDT".to_string(),
+            run_id: None,
+            trade: second,
+        },
+    ]);
+
+    let stats = store.portfolio_candidate_stats_v1(300_000);
+    let btc = stats
+        .iter()
+        .find(|row| row.symbol == "BTCUSDT")
+        .expect("candidate stats for BTCUSDT");
+    assert_eq!(
+        btc.closed_trades, 1,
+        "same-symbol same-ts closes should contribute one candidate event"
+    );
+    assert!((btc.avg_pnl_pct - 0.1).abs() < 1e-12);
+}
+
+#[test]
+fn drained_trade_candidate_age_uses_entry_timestamp_basis() {
+    let store = ScreenerStore::default();
+    let mut trade = sample_closed_trade(300_000);
+    trade.entry_ts_ms = 0;
+    trade.pnl_pct = 0.3;
+
+    store.handle_drained_fleet_trades(vec![FleetTrade {
+        config_id: TraderConfig::default().config_id(),
+        symbol: "ETHUSDT".to_string(),
+        run_id: None,
+        trade,
+    }]);
+
+    let stats = store.portfolio_candidate_stats_v1(360_000);
+    let eth = stats
+        .iter()
+        .find(|row| row.symbol == "ETHUSDT")
+        .expect("candidate stats for ETHUSDT");
+    assert_eq!(
+        eth.age_minutes_from_first_tick, 6,
+        "candidate age basis must stay consistent with restore semantics"
+    );
+}
+
+#[test]
 fn portfolio_rebalance_cadence_and_no_overlap_active_symbols() {
     let store = ScreenerStore::default();
     for symbol in ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT"] {

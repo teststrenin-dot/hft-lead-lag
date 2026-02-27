@@ -104,7 +104,12 @@ struct TradeAccumulator {
 }
 
 impl TradeAccumulator {
+    #[cfg(test)]
     fn observe(&mut self, pnl_pct: f64, ts_ms: i64) {
+        self.observe_with_first_observed_ts(pnl_pct, ts_ms);
+    }
+
+    fn observe_with_first_observed_ts(&mut self, pnl_pct: f64, first_observed_ts_ms: i64) {
         self.closed_trades = self.closed_trades.saturating_add(1);
         if pnl_pct > 0.0 {
             self.profitable_trades = self.profitable_trades.saturating_add(1);
@@ -114,8 +119,8 @@ impl TradeAccumulator {
         self.pnl_sum_pct += pnl_pct;
         self.first_observed_ts_ms = Some(
             self.first_observed_ts_ms
-                .map(|existing| existing.min(ts_ms))
-                .unwrap_or(ts_ms),
+                .map(|existing| existing.min(first_observed_ts_ms))
+                .unwrap_or(first_observed_ts_ms),
         );
     }
 
@@ -294,6 +299,10 @@ impl ScreenerStore {
     }
 
     pub fn set_run_id(&self, run_id: Option<String>) {
+        let previous = (**self.current_run_id.load()).clone();
+        if previous != run_id {
+            self.trade_accumulators.clear();
+        }
         self.current_run_id.store(Arc::new(run_id));
     }
 
@@ -644,16 +653,39 @@ impl ScreenerStore {
                 .then_with(|| left.config_id.cmp(&right.config_id))
         });
 
-        for ft in &drained_trades {
+        let active_run_id = self.current_run_id();
+        let active_trades: Vec<FleetTrade> = drained_trades
+            .iter()
+            .filter(|ft| match active_run_id.as_deref() {
+                Some(active) => ft.run_id.as_deref() == Some(active),
+                None => true,
+            })
+            .cloned()
+            .collect();
+
+        let mut candidate_events: BTreeMap<(String, i64), (f64, usize, i64)> = BTreeMap::new();
+        for ft in &active_trades {
+            let key = (ft.symbol.clone(), ft.trade.ts_ms);
+            let entry = candidate_events
+                .entry(key)
+                .or_insert((0.0, 0usize, ft.trade.entry_ts_ms));
+            entry.0 += ft.trade.pnl_pct;
+            entry.1 = entry.1.saturating_add(1);
+            entry.2 = entry.2.min(ft.trade.entry_ts_ms);
+        }
+        for ((symbol, _ts_ms), (pnl_sum, count, first_observed_ts_ms)) in candidate_events {
+            if count == 0 {
+                continue;
+            }
             self.trade_accumulators
-                .entry(ft.symbol.clone())
+                .entry(symbol)
                 .or_default()
                 .value_mut()
-                .observe(ft.trade.pnl_pct, ft.trade.ts_ms);
+                .observe_with_first_observed_ts(pnl_sum / count as f64, first_observed_ts_ms);
         }
 
         let drained_count = drained_trades.len();
-        let snapshot_ts_ms = drained_trades
+        let snapshot_ts_ms = active_trades
             .last()
             .map(|ft| ft.trade.ts_ms)
             .unwrap_or(now_ms());
@@ -665,7 +697,7 @@ impl ScreenerStore {
             Self::ensure_portfolio_paper_state_slots(&mut runtime);
 
             let mut changed = false;
-            for ft in &drained_trades {
+            for ft in &active_trades {
                 let before = runtime.engine.guard_state(&ft.symbol);
                 runtime.engine.record_closed_trade(
                     &ft.symbol,
