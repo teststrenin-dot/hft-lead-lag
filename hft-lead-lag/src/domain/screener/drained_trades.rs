@@ -20,6 +20,29 @@ pub(super) fn sort_drained_trades_in_place(drained_trades: &mut [FleetTrade]) {
     });
 }
 
+pub(super) fn dedupe_drained_trades_by_natural_key_in_place(drained_trades: &mut Vec<FleetTrade>) {
+    if drained_trades.len() < 2 {
+        return;
+    }
+
+    let mut deduped: Vec<FleetTrade> = Vec::with_capacity(drained_trades.len());
+    let mut last_key: Option<(u64, String, i64, i64)> = None;
+    for ft in drained_trades.drain(..) {
+        let key = (
+            ft.config_id,
+            ft.symbol.clone(),
+            ft.trade.entry_ts_ms,
+            ft.trade.ts_ms,
+        );
+        if last_key.as_ref() == Some(&key) {
+            continue;
+        }
+        last_key = Some(key);
+        deduped.push(ft);
+    }
+    *drained_trades = deduped;
+}
+
 pub(super) fn filter_active_run_trades(
     drained_trades: &[FleetTrade],
     active_run_id: Option<&str>,
@@ -133,6 +156,26 @@ mod tests {
                 ("ETHUSDT".to_string(), 1_000, 200, 2),
             ]
         );
+    }
+
+    #[test]
+    fn dedupe_drained_trades_by_natural_key_keeps_first_entry() {
+        let mut first = sample_trade("BTCUSDT", 7, 100, 1_000, 0.1);
+        first.run_id = Some("run-a".to_string());
+        let mut duplicate = first.clone();
+        duplicate.trade.pnl_pct = -0.5;
+        duplicate.run_id = Some("run-b".to_string());
+        let keep = sample_trade("BTCUSDT", 8, 100, 1_000, 0.2);
+
+        let mut rows = vec![first.clone(), duplicate, keep.clone()];
+        sort_drained_trades_in_place(&mut rows);
+        dedupe_drained_trades_by_natural_key_in_place(&mut rows);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].config_id, first.config_id);
+        assert!((rows[0].trade.pnl_pct - first.trade.pnl_pct).abs() < 1e-12);
+        assert_eq!(rows[0].run_id.as_deref(), first.run_id.as_deref());
+        assert_eq!(rows[1].config_id, keep.config_id);
     }
 
     #[test]

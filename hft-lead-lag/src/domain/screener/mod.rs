@@ -39,7 +39,8 @@ use dashmap::DashMap;
 use serde::Serialize;
 
 use self::drained_trades::{
-    collapse_candidate_events, filter_active_run_trades, sort_drained_trades_in_place,
+    collapse_candidate_events, dedupe_drained_trades_by_natural_key_in_place,
+    filter_active_run_trades, sort_drained_trades_in_place,
 };
 use self::fleet_patch::{FleetPatchMode, FleetPatchPlan};
 use self::shadow_fleet::{generate_grid, FleetTrade};
@@ -653,6 +654,7 @@ impl ScreenerStore {
 
         let mut drained_trades = drained_trades;
         sort_drained_trades_in_place(&mut drained_trades);
+        dedupe_drained_trades_by_natural_key_in_place(&mut drained_trades);
 
         let active_run_id = self.current_run_id();
         let active_trades = filter_active_run_trades(&drained_trades, active_run_id.as_deref());

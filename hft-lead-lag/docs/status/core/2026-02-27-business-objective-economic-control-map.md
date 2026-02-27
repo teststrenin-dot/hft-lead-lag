@@ -2,7 +2,7 @@
 
 Date: 2026-02-27
 Status: Active strategic anchor for CP4+
-Last implementation sync: `CP4.6-R1` (ASHA per-config + runtime auto-prune + review remediations)
+Last implementation sync: `CP4.6-R1` + `CP5-R1` (drained-trade idempotency hardening)
 
 ## 1) Locked Business Objective
 Maximize risk-adjusted return under constrained capital by continuously selecting robust alpha contexts (symbols/configs/portfolios) from shadow validation into paper execution, while strictly containing drawdown and operational failure risk.
@@ -35,6 +35,10 @@ Control chain:
 2. `Risk`: early-stopped ASHA trials are now auto-pruned from runtime via incremental patches, reducing runtime load during forward execution.
 3. `Risk` remediation: incremental prune matching now uses full active fleet config set (not only symbol-attached fleets), preventing false rejects on untouched config removal.
 4. `Feedback` hygiene: `forward` now clears active `run_id` lease on completion, preventing stale background execution after trial end.
+
+## 3.2) CP5 Runtime Note (latest)
+1. `Risk` + `Feedback`: drained trades are now deduped by natural key before runtime apply, preventing duplicate guard/paper updates on replay.
+2. Alignment rule: runtime idempotency now matches DB natural key semantics (`config_id,symbol,entry_ts_ms,exit_ts_ms`).
 
 Binding by checkpoint:
 1. `CP0`: freeze contracts that expose node boundaries.

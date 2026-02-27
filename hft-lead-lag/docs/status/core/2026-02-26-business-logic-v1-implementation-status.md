@@ -1,9 +1,10 @@
 # Business Logic v1 — Implementation Status Tracker
 
 Date: 2026-02-26
-Last sync: commits up to `ad041ca`
+Last sync: working tree after `58ac5ff` + `CP5-R1` idempotency remediation
 Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+Operating model spec: `docs/status/core/2026-02-27-operating-model-spec-v1.md`
 
 ## Strategic Objective Snapshot
 Locked objective for all CP4+ work:
@@ -46,6 +47,7 @@ Locked objective for all CP4+ work:
 | ASHA trial granularity (`CP4.5`) | `Implemented` | `ray_driver/cli.py:213`, `ray_driver/trainable.py:11`, `ray_driver/config_store.py:78`, `ray_driver/tests/test_trainable.py:21` | Forward запускает единый runtime batch и затем оценивает каждый `config_id` отдельным Ray trial (`grid_search`), что убирает batch-агрегацию метрик внутри ASHA. |
 | Runtime auto-prune during forward (`CP4.6`) | `Implemented` | `ray_driver/cli.py:19`, `ray_driver/cli.py:291`, `ray_driver/ipc.py:42`, `ray_driver/tests/test_forward_limits.py:247` | Ранние `ASHA STOP` автоматически собираются в batched incremental patch и удаляются из runtime active set, снижая нагрузку прямо в процессе forward-run. |
 | CP4.6 review remediation (`CP4.6-R1`) | `Implemented` | `src/domain/screener/fleet_reload.rs:130`, `src/domain/screener/tests.rs:569`, `ray_driver/cli.py:383`, `ray_driver/tests/test_forward_limits.py:133` | Исправлены два P1 из review: incremental prune больше не отклоняется для “untouched” config_id, и forward гарантированно очищает `run_id` lease после завершения/ошибки. |
+| Drained-trade natural-key idempotency (`CP5-R1`) | `Implemented` | `src/domain/screener/drained_trades.rs:23`, `src/domain/screener/mod.rs:655`, `src/domain/screener/tests.rs:1344` | Runtime перед обработкой сделок дедуплицирует дубликаты по натуральному ключу (`config_id,symbol,entry_ts,exit_ts`), чтобы guard/paper state не получали double-count при replay/повторной подаче батча. |
 
 ## 3) Portfolio Topology
 | Item | Status | Evidence | Notes |
@@ -70,7 +72,7 @@ Locked objective for all CP4+ work:
 | Метрики по всему флоту | `Implemented` | `src/domain/screener/mod.rs:408` | Глобальная агрегация по всем символам в accumulators. |
 | Полная история (без rolling window) | `Implemented` | `src/infrastructure/db.rs:731`, `src/domain/screener/mod.rs:666`, `src/runtime_setup.rs:236` | История агрегируется и восстанавливается event-level collapse-правилом `(symbol, exit_ts_ms)`; при активном `run_id` учитывается только текущий scope. |
 | avg pnl >= 0 | `Implemented` | `src/domain/screener/portfolio_runtime.rs:58` | В `eligible`. |
-| shortlist top-5 per portfolio | `Implemented` | `src/domain/screener/portfolio_runtime.rs:4`, `src/domain/screener/portfolio_runtime.rs:142`, `src/domain/screener/portfolio_runtime.rs:249` | Shortlist строятся независимо по портфелям через round-robin распределение глобального ranked pool; при дефиците символов shortlist заполняются частично. |
+| shortlist top-5 per portfolio (allocation model) | `Implemented` | `src/domain/screener/portfolio_runtime.rs:4`, `src/domain/screener/portfolio_runtime.rs:195`, `src/domain/screener/portfolio_runtime.rs:301` | Используется allocation-модель: один глобальный ranked pool распределяется по портфелям disjoint round-robin (без overlap shortlist). |
 | Нет overlap между активными символами портфелей | `Implemented` | `src/domain/screener/portfolio_runtime.rs:143`, `src/domain/screener/portfolio_runtime.rs:287` | Активные символы раскладываются по портфелям без пересечений. |
 | Конфликт по «лучшей» метрике | `Implemented` | `src/domain/screener/portfolio_runtime.rs:70`, `src/domain/screener/portfolio_runtime.rs:101` | Победитель определяется tuple-компаратором; при равном rank символы распределяются по портфелям через баланс по заполненности. |
 
@@ -116,6 +118,7 @@ Locked objective for all CP4+ work:
 4. `P1` (`CP4.5`): forward переведён на модель `1 config = 1 trial` в ASHA (пер-config метрики вместо batch-агрегата).
 5. `P1` (`CP4.6`): ранние ASHA-stop теперь автоматически prun-ятся в runtime через incremental patch.
 6. `P1` (`CP4.6-R1`): закрыты review-баги incremental prune matching и stale run lease cleanup.
+7. `P1` (`CP5-R1`): закрыт риск double-count для guard/paper при повторной подаче одинаковых drained trades (natural-key idempotency).
 
 ## Что Нужно Сделать Для 100% Бизнес-Логики
 1. Реализовать явный runtime слой `portfolio -> bot` (изолированный execution loop, health, restart policy по каждому портфелю).

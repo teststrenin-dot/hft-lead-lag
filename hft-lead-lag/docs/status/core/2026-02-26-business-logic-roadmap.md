@@ -1,7 +1,7 @@
 # Business Logic v1 — 8 Checkpoints Roadmap
 
 Date: 2026-02-26  
-Last sync: commits up to `a03aec4`
+Last sync: working tree after `58ac5ff` + `CP5-R1`
 
 Scope: верхнеуровневая дорожная карта из 8 чекпоинтов.  
 Принцип: ревью выполняется **по одному большому чекпоинту**, но с детальным разбором подпунктов.
@@ -9,6 +9,7 @@ Scope: верхнеуровневая дорожная карта из 8 чек�
 ## Strategic Anchor (Mandatory)
 Canonical source:
 - `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+- `docs/status/core/2026-02-27-operating-model-spec-v1.md`
 
 Locked objective:
 - maximize risk-adjusted return under constrained capital through controlled path `Signal -> Validation -> Competition -> Risk -> Capital -> Feedback`.
@@ -29,7 +30,7 @@ Checkpoint ownership over economic nodes:
 | `CP2` Lead-Lag и shadow execution | `Done` | Сигналы, shadow lifecycle, stop/exit-ветки и базовая устойчивость закрыты. |
 | `CP3` Математика кандидатов | `Done` | Eligibility/ranking/pm_raw/useful_winrate в рабочем контуре. |
 | `CP4` Портфельная гонка (paper runtime) | `In Progress` | Assignment/paper-state работает; `CP4.1` (operator UI `/portfolio`), `CP4.2` (startup command-gating hotfix), `CP4.3` (bounded forward hotfix), `CP4.4` (forward fairness + hard guardrails), `CP4.5` (`1 config = 1 ASHA trial`) и `CP4.6` (runtime auto-prune ранних ASHA-stop) реализованы. После review-remediation добавлены: безопасный `run_id` cleanup после forward и корректный incremental-match для prune even-without-symbol-state. |
-| `CP5` Надёжность состояния | `In Progress` | Persistence/restore усилены, нужны доп. e2e-гарантии restart/recovery на уровне checkpoint. |
+| `CP5` Надёжность состояния | `In Progress` | Persistence/restore усилены; закрыт `CP5-R1` (natural-key idempotency для drained-trade apply), остаются e2e restart/recovery гарантии уровня checkpoint. |
 | `CP6` Контрольный слой и UI | `In Progress` | Базовые API/health/read-model есть; фокус на operational UX, алертах и incident-сценариях. |
 | `CP7` Предзапуск к rebalance/live | `Planned` | Rebalance/live safety layer ещё не включены в runtime. |
 
@@ -70,6 +71,7 @@ Checkpoint ownership over economic nodes:
 1. Persistence/restore runtime и paper-state.
 2. Restart consistency и idempotency.
 3. Поведение при частичных/устаревших snapshot.
+4. `CP5-R1` Runtime natural-key idempotency: повторная подача одинакового drained trade не должна повторно менять guard/paper state. `Done`.
 
 ### `CP6` Контрольный слой и UI (operational hardening)
 1. API контракты (active/candidates/guards/performance).

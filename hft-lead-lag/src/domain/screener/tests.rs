@@ -1339,6 +1339,48 @@ fn drained_trades_apply_guard_logic_in_chronological_order() {
 }
 
 #[test]
+fn duplicate_drained_trade_natural_key_is_idempotent_for_guard_and_paper() {
+    let store = ScreenerStore::default();
+    store.restore_portfolio_runtime_v1_from_db_rows(
+        &[crate::infrastructure::db::PortfolioStateRecordV1 {
+            portfolio_id: "A".to_string(),
+            shortlist: vec!["BTCUSDT".to_string()],
+            active_symbols: vec!["BTCUSDT".to_string()],
+            updated_at_ms: 1_000,
+        }],
+        &[],
+    );
+
+    let config_id = TraderConfig::default().config_id();
+    let mut loss = sample_closed_trade(2_500);
+    loss.entry_ts_ms = 2_000;
+    loss.pnl_pct = -1.0;
+    loss.exit_reason = ExitReason::StopLoss;
+
+    let dup = FleetTrade {
+        config_id,
+        symbol: "BTCUSDT".to_string(),
+        run_id: None,
+        trade: loss,
+    };
+
+    store.handle_drained_fleet_trades(vec![dup.clone(), dup]);
+
+    let paper = store.portfolio_paper_states_v1();
+    let a = paper.get("A").expect("portfolio A");
+    assert_eq!(a.closed_trades, 1);
+    assert_eq!(a.losing_trades, 1);
+    assert!((a.realized_pnl_usd + 1.0).abs() < 1e-9);
+
+    let guards = store.portfolio_guard_states_v1();
+    let btc_guard = guards
+        .iter()
+        .find(|(symbol, _)| symbol == "BTCUSDT")
+        .expect("BTCUSDT guard");
+    assert_eq!(btc_guard.1.streak_count, 1);
+}
+
+#[test]
 fn stop_loss_streak_triggers_cooldown_exclusion_until_expiry() {
     let store = ScreenerStore::default();
     store.symbols.insert(
