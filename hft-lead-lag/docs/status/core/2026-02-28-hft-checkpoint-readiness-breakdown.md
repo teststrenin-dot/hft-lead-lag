@@ -68,6 +68,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 1. Done and not touched:
    - Fast float parsing and tick conversion.
    - Symbol cache now interns raw byte keys/values directly (`Vec<u8> -> Bytes`) without UTF-8 fallback conversion.
+   - Dynamic extractor wrappers with `format!` (`extract_json_*_field(field: &str)`) are now test-only (`#[cfg(test)]`), keeping runtime on pattern-based extractors.
 2. Done but must be reworked:
    - Generic extractors using repeated `format!`.
    - Remaining byte-copy points in parse path still require profiling and targeted elimination.

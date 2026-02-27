@@ -1,5 +1,6 @@
 //! Common utilities for exchange connectors
 
+#[cfg(test)]
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use memchr::memmem;
@@ -153,6 +154,7 @@ fn find_json_field_value_start(
     (pos < json.len()).then_some(pos)
 }
 
+#[cfg(test)]
 pub fn extract_json_string_field(json: &[u8], field: &str) -> Option<Bytes> {
     let field_pattern = format!("\"{}\"", field);
     let field_bytes = field_pattern.as_bytes();
@@ -160,6 +162,7 @@ pub fn extract_json_string_field(json: &[u8], field: &str) -> Option<Bytes> {
     extract_json_string_field_ref_by_pattern(json, field_bytes).map(Bytes::copy_from_slice)
 }
 
+#[cfg(test)]
 pub fn extract_json_string_field_ref<'a>(json: &'a [u8], field: &str) -> Option<&'a [u8]> {
     let field_pattern = format!("\"{}\"", field);
     let field_bytes = field_pattern.as_bytes();
@@ -191,6 +194,7 @@ pub fn extract_json_string_field_ref_by_pattern<'a>(
 
 /// Extract bool value from JSON field.
 /// Supports native booleans (`true`/`false`) and numeric fallback (`0`/`1`).
+#[cfg(test)]
 pub fn extract_json_bool_field(json: &[u8], field: &str) -> Option<bool> {
     let field_pattern = format!("\"{}\"", field);
     let field_bytes = field_pattern.as_bytes();
@@ -216,6 +220,7 @@ pub fn extract_json_bool_field_by_pattern(json: &[u8], field_bytes: &[u8]) -> Op
 }
 
 /// Extract i64 value from JSON field
+#[cfg(test)]
 pub fn extract_json_i64_field(json: &[u8], field: &str) -> Option<i64> {
     let field_pattern = format!("\"{}\"", field);
     let field_bytes = field_pattern.as_bytes();
