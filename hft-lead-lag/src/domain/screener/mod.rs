@@ -26,7 +26,7 @@ use std::fmt;
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -157,7 +157,7 @@ pub struct ScreenerStore {
     symbols: Arc<DashMap<String, SymbolState>>,
     trade_accumulators: Arc<DashMap<String, TradeAccumulator>>,
     portfolio_runtime: Arc<Mutex<PortfolioRuntimeState>>,
-    fleet_patch_gate: Arc<Mutex<()>>,
+    fleet_patch_gate: Arc<RwLock<()>>,
     window_ms: i64,
     fleet_configs: Arc<ArcSwap<Vec<TraderConfig>>>,
     db_writer: Option<DbWriter>,
@@ -266,7 +266,7 @@ impl ScreenerStore {
             symbols: Arc::new(DashMap::new()),
             trade_accumulators: Arc::new(DashMap::new()),
             portfolio_runtime: Arc::new(Mutex::new(portfolio_runtime)),
-            fleet_patch_gate: Arc::new(Mutex::new(())),
+            fleet_patch_gate: Arc::new(RwLock::new(())),
             window_ms,
             fleet_configs: Arc::new(ArcSwap::from_pointee(generate_grid())),
             db_writer: None,

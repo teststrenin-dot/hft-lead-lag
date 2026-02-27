@@ -189,6 +189,20 @@ fn update_partial_book_with_existing_portfolio_stats_does_not_block() {
 }
 
 #[test]
+fn partial_book_update_does_not_emit_live_row() {
+    let store = ScreenerStore::default();
+    let ts_ns = 1_700_000_100_000_000_000_i64;
+
+    store.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
+
+    let rows = store.rows_sorted();
+    assert!(
+        rows.is_empty(),
+        "single-sided book must not be exposed as ws_live row"
+    );
+}
+
+#[test]
 fn update_rejects_dirty_spread_and_does_not_create_state() {
     let store = ScreenerStore::default();
     let ts_ns = 1_700_000_000_000_000_000_i64;
@@ -250,6 +264,52 @@ fn update_rejects_exchange_timestamp_regression_per_side() {
     assert_eq!(
         after_binance.ask, before_binance.ask,
         "older binance quote must not overwrite ask"
+    );
+}
+
+#[test]
+fn corrected_timestamp_step_back_does_not_drop_newer_raw_events() {
+    let store = ScreenerStore::default();
+    let base_ms = 1_700_000_000_000_i64;
+
+    // First sample establishes a large positive offset.
+    store.update(
+        "BTCUSDT",
+        "binance",
+        100.0,
+        100.1,
+        (base_ms + 10) * 1_000_000,
+        (base_ms + 1_010) * 1_000_000,
+    );
+
+    // Feed enough near-zero-offset samples to trigger median recompute.
+    for i in 0..64_i64 {
+        let event_ms = base_ms + 20 + i;
+        store.update(
+            "BTCUSDT",
+            "binance",
+            100.0 + i as f64 * 0.001,
+            100.1 + i as f64 * 0.001,
+            event_ms * 1_000_000,
+            event_ms * 1_000_000,
+        );
+    }
+
+    // This update has newer raw exchange timestamp and must be accepted even if corrected ts steps back.
+    store.update(
+        "BTCUSDT",
+        "binance",
+        123.0,
+        123.1,
+        (base_ms + 200) * 1_000_000,
+        (base_ms + 200) * 1_000_000,
+    );
+
+    let state = store.symbols.get("BTCUSDT").expect("state");
+    let binance = state.binance.as_ref().expect("binance quote");
+    assert_eq!(
+        binance.bid, 123.0,
+        "newer raw event must not be rejected by corrected-ts step-back"
     );
 }
 

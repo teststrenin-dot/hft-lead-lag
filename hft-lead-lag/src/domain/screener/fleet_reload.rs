@@ -13,8 +13,8 @@ pub(super) fn try_apply_fleet_patch(
 ) -> Result<FleetReloadReport, FleetPatchApplyError> {
     let _fleet_patch_guard = store
         .fleet_patch_gate
-        .lock()
-        .expect("fleet patch mutex poisoned");
+        .write()
+        .expect("fleet patch rwlock poisoned");
 
     let old_config_count = store.fleet_configs.load().len();
     let new_config_count = new_configs.len();

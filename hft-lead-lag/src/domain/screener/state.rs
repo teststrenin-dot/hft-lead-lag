@@ -48,6 +48,8 @@ pub struct SymbolState {
     pub(crate) first_tick_ms: Option<i64>,
     pub(crate) binance: Option<Quote>,
     pub(crate) gate: Option<Quote>,
+    pub(crate) binance_event_ts_ms: Option<i64>,
+    pub(crate) gate_event_ts_ms: Option<i64>,
     pub(crate) leader_exchange: &'static str,
     pub(crate) lag_ms: f64,
     pub(crate) lag_samples: VecDeque<(i64, f64)>,
@@ -71,23 +73,29 @@ impl SymbolState {
         &mut self,
         exchange: &str,
         quote: Quote,
+        exchange_event_ts_ms: i64,
         ws_drift: Option<f64>,
         ingress_ws_drift: Option<f64>,
     ) -> bool {
         if quote.ask < quote.bid {
             return false;
         }
+        let monotonic_ts_ms = if exchange_event_ts_ms > 0 {
+            exchange_event_ts_ms
+        } else {
+            quote.ts_ms
+        };
 
         match exchange {
             "binance" => {
                 if self
-                    .binance
-                    .as_ref()
-                    .is_some_and(|previous| quote.ts_ms < previous.ts_ms)
+                    .binance_event_ts_ms
+                    .is_some_and(|previous_ts_ms| monotonic_ts_ms < previous_ts_ms)
                 {
                     return false;
                 }
                 self.binance = Some(quote);
+                self.binance_event_ts_ms = Some(monotonic_ts_ms);
                 if let Some(v) = ws_drift {
                     self.drifts.binance = Some(v);
                 }
@@ -97,13 +105,13 @@ impl SymbolState {
             }
             "gate" => {
                 if self
-                    .gate
-                    .as_ref()
-                    .is_some_and(|previous| quote.ts_ms < previous.ts_ms)
+                    .gate_event_ts_ms
+                    .is_some_and(|previous_ts_ms| monotonic_ts_ms < previous_ts_ms)
                 {
                     return false;
                 }
                 self.gate = Some(quote);
+                self.gate_event_ts_ms = Some(monotonic_ts_ms);
                 if let Some(v) = ws_drift {
                     self.drifts.gate = Some(v);
                 }

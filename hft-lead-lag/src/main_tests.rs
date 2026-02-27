@@ -1209,9 +1209,10 @@ fn ingest_latest_batch_updates_counter_metrics_screener_and_ws() {
     assert_eq!(event.timestamp_ns, 100_000_000);
 
     let rows = screener.rows_sorted();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].symbol, "BTCUSDT");
-    assert_eq!(rows[0].leader_exchange, "gate");
+    assert!(
+        rows.is_empty(),
+        "single-exchange batch must not emit ws_live screener rows"
+    );
 }
 
 #[test]
@@ -1268,9 +1269,10 @@ fn process_exchange_batch_rebuilds_and_ingests_latest_state() {
     ));
 
     let rows = screener.rows_sorted();
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].leader_exchange, "binance");
-    assert_eq!(rows[1].leader_exchange, "binance");
+    assert!(
+        rows.is_empty(),
+        "single-exchange batch must not emit ws_live screener rows"
+    );
 }
 
 #[test]

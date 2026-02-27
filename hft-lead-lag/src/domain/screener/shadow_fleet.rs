@@ -459,11 +459,7 @@ impl ShadowFleet {
                 let sym = meta.symbol.to_string();
                 for trade_idx in start..deque.len() {
                     let trade = &deque[trade_idx];
-                    let trade_run_id = run_ids
-                        .get(trade_idx)
-                        .cloned()
-                        .flatten()
-                        .or_else(|| meta.run_id.map(|s| s.to_string()));
+                    let trade_run_id = run_ids.get(trade_idx).cloned().flatten();
                     self.policy[idx].observe_trade(trade);
                     self.pending_trades.push_back(FleetTrade {
                         config_id: *config_id,
@@ -879,5 +875,103 @@ mod tests {
         let drained = fleet.drain_trades();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].run_id.as_deref(), Some("run-old"));
+    }
+
+    #[test]
+    fn fleet_trade_run_id_stays_none_when_entry_run_id_absent() {
+        let cfg = TraderConfig {
+            spike_threshold_bps: 10.0,
+            target_ratio: 0.9,
+            stop_loss_bps: 999.0,
+            max_hold_ms: 1,
+            max_spread_bps: 0.0,
+            trailing_decay_ratio: 0.5,
+            baseline_window_ms: 10_000,
+            fill_delay_ms: 0,
+            cooldown_ms: 0,
+            warmup_ms: 0,
+            quote_freshness_ms: 1_000,
+            taker_fee: 0.000_5,
+            min_baseline_samples: 2,
+        };
+        let mut fleet = ShadowFleet::new(&[cfg]);
+
+        let mut samples = PriceSamples::default();
+        for i in 0..5 {
+            samples.push(PriceSample {
+                ts_ms: 900 + i * 10,
+                gate_bid: 100.0,
+                gate_ask: 100.0,
+                binance_bid: 100.0,
+                binance_ask: 100.0,
+            });
+        }
+        let bn = Quote {
+            bid: 100.2,
+            ask: 100.2,
+            ts_ms: 1_000,
+        };
+        let gt = Quote {
+            bid: 100.0,
+            ask: 100.0,
+            ts_ms: 1_000,
+        };
+        let window_ms = 120_000;
+
+        // Entry created and filled without run_id.
+        fleet.tick_all(
+            1_000,
+            &bn,
+            &gt,
+            &samples,
+            window_ms,
+            FleetTickMeta {
+                symbol: "BTCUSDT",
+                gate_natr_30m_pct_at_entry: 0.0,
+                run_id: None,
+            },
+        );
+        fleet.tick_all(
+            1_001,
+            &bn,
+            &gt,
+            &samples,
+            window_ms,
+            FleetTickMeta {
+                symbol: "BTCUSDT",
+                gate_natr_30m_pct_at_entry: 0.0,
+                run_id: None,
+            },
+        );
+
+        // Exit under another tick context must not backfill run_id.
+        fleet.tick_all(
+            1_003,
+            &bn,
+            &gt,
+            &samples,
+            window_ms,
+            FleetTickMeta {
+                symbol: "BTCUSDT",
+                gate_natr_30m_pct_at_entry: 0.0,
+                run_id: Some("run-new"),
+            },
+        );
+        fleet.tick_all(
+            1_004,
+            &bn,
+            &gt,
+            &samples,
+            window_ms,
+            FleetTickMeta {
+                symbol: "BTCUSDT",
+                gate_natr_30m_pct_at_entry: 0.0,
+                run_id: Some("run-new"),
+            },
+        );
+
+        let drained = fleet.drain_trades();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].run_id, None);
     }
 }

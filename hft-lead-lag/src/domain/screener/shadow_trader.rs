@@ -243,24 +243,30 @@ impl ShadowTrader {
         self.latest_ts_ms = ts_ms;
         self.cleanup_spikes(ts_ms);
 
-        let cfg = &self.config;
+        let quote_freshness_ms = self.config.quote_freshness_ms as u64;
+        let warmup_ms = self.config.warmup_ms;
+        let binance_fresh = (ts_ms - binance.ts_ms).unsigned_abs() <= quote_freshness_ms;
+        let gate_fresh = (ts_ms - gate.ts_ms).unsigned_abs() <= quote_freshness_ms;
 
-        if (ts_ms - binance.ts_ms).unsigned_abs() > cfg.quote_freshness_ms as u64
-            || (ts_ms - gate.ts_ms).unsigned_abs() > cfg.quote_freshness_ms as u64
-        {
-            return;
+        // Exit lifecycle is gate-side only; stale opposite side must not freeze fills/timeouts.
+        if gate_fresh {
+            self.try_fill(ts_ms, gate, window_ms);
+            if self.pending.is_some() {
+                return;
+            }
+            self.try_exit(ts_ms, gate);
+            if self.pending.is_some() {
+                return;
+            }
         }
 
+        if !binance_fresh || !gate_fresh {
+            return;
+        }
         let elapsed = ts_ms.saturating_sub(self.start_ts_ms.unwrap_or(ts_ms));
-        if elapsed < cfg.warmup_ms {
+        if elapsed < warmup_ms {
             return;
         }
-
-        self.try_fill(ts_ms, gate, window_ms);
-        if self.pending.is_some() {
-            return;
-        }
-        self.try_exit(ts_ms, gate);
         self.try_entry(
             ts_ms,
             binance,
@@ -447,7 +453,7 @@ impl ShadowTrader {
         let (mut ask_gap_sum, mut bid_gap_sum) = (0.0_f64, 0.0_f64);
         let (mut ask_count, mut bid_count) = (0_u32, 0_u32);
         for s in samples.iter() {
-            if s.ts_ms < cutoff {
+            if s.ts_ms < cutoff || s.ts_ms >= ts_ms {
                 continue;
             }
             if s.gate_ask > 0.0 && s.binance_ask > 0.0 {
@@ -898,6 +904,42 @@ mod tests {
         assert!(trader.detect_gap(50_100, &bn, &gt, &samples).is_none());
     }
 
+    #[test]
+    fn baseline_excludes_current_tick_sample() {
+        let trader = make_trader(|c| {
+            c.spike_threshold_bps = 80.0;
+            c.min_baseline_samples = 1;
+            c.baseline_window_ms = 10_000;
+            c.warmup_ms = 0;
+        });
+
+        let mut samples = PriceSamples::default();
+        // Historical baseline point: 0 bps.
+        samples.push(PriceSample {
+            ts_ms: 50_000,
+            gate_bid: 100.0,
+            gate_ask: 100.0,
+            binance_bid: 100.0,
+            binance_ask: 100.0,
+        });
+        // Current tick sample (same ts as decision tick): 100 bps.
+        samples.push(PriceSample {
+            ts_ms: 50_100,
+            gate_bid: 100.0,
+            gate_ask: 100.0,
+            binance_bid: 101.0,
+            binance_ask: 101.0,
+        });
+
+        let bn = quote(101.0, 101.0, 50_100);
+        let gt = quote(100.0, 100.0, 50_100);
+        let result = trader.detect_gap(50_100, &bn, &gt, &samples);
+        assert!(
+            result.is_some(),
+            "current-tick sample must not dilute baseline"
+        );
+    }
+
     // -- PnL with fees ----------------------------------------------------------
 
     #[test]
@@ -971,6 +1013,40 @@ mod tests {
         assert_eq!(trader.position_label(), "FLAT");
         let t = &trader.completed_trades()[0];
         assert_eq!(t.exit_reason, "stop_loss");
+    }
+
+    #[test]
+    fn stale_binance_does_not_block_gate_based_timeout_exit() {
+        let mut trader = make_trader(|c| {
+            c.spike_threshold_bps = 10.0;
+            c.warmup_ms = 0;
+            c.fill_delay_ms = 0;
+            c.cooldown_ms = 0;
+            c.min_baseline_samples = 5;
+            c.max_spread_bps = 0.0;
+            c.quote_freshness_ms = 100;
+            c.max_hold_ms = 50;
+            c.stop_loss_bps = 999.0;
+            c.target_ratio = 99.0;
+        });
+        let samples = stable_samples(10, 100.0, 100.0, 50_000);
+
+        let bn_fresh = quote(100.20, 100.20, 50_100);
+        let gt_entry = quote(100.0, 100.0, 50_100);
+        trader.tick(50_100, &bn_fresh, &gt_entry, &samples, WINDOW_MS);
+        trader.tick(50_120, &bn_fresh, &gt_entry, &samples, WINDOW_MS); // fill entry
+        assert_eq!(trader.position_label(), "LONG_GT");
+
+        // Binance is stale relative to decision ts, but Gate is fresh and should allow timeout exit.
+        let bn_stale = quote(100.20, 100.20, 50_100);
+        let gt_fresh = quote(100.0, 100.0, 50_260);
+        trader.tick(50_260, &bn_stale, &gt_fresh, &samples, WINDOW_MS);
+        trader.tick(50_270, &bn_stale, &gt_fresh, &samples, WINDOW_MS); // fill exit
+
+        assert_eq!(trader.position_label(), "FLAT");
+        let trades = trader.completed_trades();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].exit_reason, "timeout");
     }
 
     #[test]

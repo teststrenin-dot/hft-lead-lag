@@ -15,6 +15,7 @@ fn update_symbol_state_and_drain_trades(
     exchange: &'static str,
     bid: f64,
     ask: f64,
+    exchange_event_ts_ms: i64,
     clocks: TimeDomainSample,
     adjusted_exchange_ts_ms: i64,
 ) -> QuoteUpdateResult {
@@ -28,7 +29,13 @@ fn update_symbol_state_and_drain_trades(
         ts_ms: adjusted_exchange_ts_ms,
     };
 
-    if !state.ingest_quote(exchange, quote, ws_drift, ingress_ws_drift) {
+    if !state.ingest_quote(
+        exchange,
+        quote,
+        exchange_event_ts_ms,
+        ws_drift,
+        ingress_ws_drift,
+    ) {
         return QuoteUpdateResult::Rejected;
     }
 
@@ -41,7 +48,7 @@ fn update_symbol_state_and_drain_trades(
 
     if state.binance.is_none() || state.gate.is_none() {
         state.updated_at_ms = adjusted_exchange_ts_ms;
-        state.leader_exchange = exchange;
+        state.leader_exchange = "";
         state.lag_ms = 0.0;
         return QuoteUpdateResult::PartialBookOnly;
     }
@@ -95,8 +102,8 @@ pub(super) fn update(
 
     let _fleet_patch_guard = store
         .fleet_patch_gate
-        .lock()
-        .expect("fleet patch mutex poisoned");
+        .read()
+        .expect("fleet patch rwlock poisoned");
 
     let clocks = TimeDomainSample::from_raw(timestamp_ns, local_receive_ts_ns, now_ms());
     let adjusted_exchange_ts_ms =
@@ -109,6 +116,7 @@ pub(super) fn update(
         exchange,
         bid,
         ask,
+        clocks.exchange_event_ts_ms,
         clocks,
         adjusted_exchange_ts_ms,
     ) {
