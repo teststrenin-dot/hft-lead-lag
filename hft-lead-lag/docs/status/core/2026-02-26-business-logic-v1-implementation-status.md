@@ -26,7 +26,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 | `HFT-CP0` Latency and Allocation Observatory | `In Progress` | `/health` now includes staged timestamps, ingest/decision/e2e latency stats, runtime backlog depths | `order_intent_enqueued_ts` is currently proxy-level until CP6 execution queue is live |
 | `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Hot-path ingest now dedupes latest-per-symbol, runtime consumes connector-attached `strategy_symbol_id`, and connectors/runtime use canonical `symbol->id` builder with fail-fast capacity guard | None |
 | `HFT-CP2` Lock-Free Strategy State | `Completed` | `LeadLagStrategy` migrated to single-owner state (no `RwLock/Mutex` in hot path); runtime strategy interface is `&mut self` sync; strategy updates pass through explicit event-loop queue boundary; p99 capture recorded | None (`docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md`) |
-| `HFT-CP3` Event-Driven Updated-Only Processing | `In Progress` | Updated-symbol batch de-duplicates without sort; pending-signal queue uses `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue carries tickers directly into strategy apply (no runtime cache-lookup clone in flush path) | Full rate-proportional processing proof still required |
+| `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated-symbol batch de-duplicates without sort; pending-signal queue uses `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue carries tickers directly into strategy apply (no runtime cache-lookup clone in flush path) | None (`docs/status/core/2026-02-28-cp3-updated-only-proof.md`) |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Partial` | ticks and fast parse are in place | Symbol bytes are still copied/converted in hot segments |
 | `HFT-CP5` Deterministic Replay Harness | `Planned` | N/A | No raw feed recorder + deterministic replay equivalence checks |
 | `HFT-CP6` Execution Fast Path | `Planned` | N/A | No explicit non-blocking `OrderIntent` queue SLA contract |
@@ -44,10 +44,9 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## 6) Top open gaps (priority)
 1. `P0`: validate `HFT-CP0` metrics under live load and finalize dashboard/read-model for operator use.
-2. `P1`: complete `HFT-CP3` with `SymbolId` bitset and clone-free strategy feed path.
-3. `P1`: close `HFT-CP4` and remove remaining symbol-copy overhead.
-4. `P1`: implement `HFT-CP5` replay harness for deterministic bug/perf validation.
-5. `P2`: implement `HFT-CP6` execution SLA contracts and `HFT-CP7` ops hardening.
+2. `P1`: close `HFT-CP4` and remove remaining symbol-copy overhead.
+3. `P1`: implement `HFT-CP5` replay harness for deterministic bug/perf validation.
+4. `P2`: implement `HFT-CP6` execution SLA contracts and `HFT-CP7` ops hardening.
 
 ## 7) Tracking rule
 For every status change:

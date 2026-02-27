@@ -1731,6 +1731,29 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
 }
 
 #[tokio::test]
+async fn handle_signal_tick_scales_with_updates_not_universe_size() {
+    let mut state = EventLoopState::new();
+    let mut strategy = RecordingRuntimeStrategy::default();
+    let health = HealthState::new();
+
+    let symbols: Vec<String> = (0..5000).map(|idx| format!("SYM{idx:04}")).collect();
+    let strategy_symbol_index = StrategySymbolIndex::new(&symbols);
+
+    let first = strategy_symbol_index
+        .symbol_id("SYM0010".as_bytes())
+        .expect("first id exists");
+    let second = strategy_symbol_index
+        .symbol_id("SYM4999".as_bytes())
+        .expect("second id exists");
+
+    state.mark_pending_signal_symbols(&[first, second]);
+    state.handle_signal_tick(&mut strategy, &health);
+
+    assert_eq!(strategy.checked_symbols, vec![first, second]);
+    assert!(state.pending_signal_symbols.is_empty());
+}
+
+#[tokio::test]
 async fn handle_signal_tick_skips_when_no_pending_symbols() {
     let mut state = EventLoopState::new();
     let mut strategy = RecordingRuntimeStrategy::default();
