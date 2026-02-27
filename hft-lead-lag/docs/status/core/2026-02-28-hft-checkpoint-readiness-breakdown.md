@@ -47,10 +47,11 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - `LeadLagStrategy` hot-path state is now single-owner (`HashMap` + direct fields), with no `Arc<RwLock<...>>`/`Arc<Mutex<...>>`.
    - Runtime strategy API switched to sync `&mut self` path; event loop feeds strategy updates/checks without async lock points.
    - Event loop now uses explicit strategy-update queue boundary (`enqueue_strategy_updates` -> `flush_strategy_updates`) between ingest and strategy apply.
+   - Live p99 evidence captured and stored in `docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md`.
 2. Done but must be reworked:
    - None.
 3. Missing and required:
-   - p99 tail evidence capture after lock removal.
+   - None.
 
 ## `HFT-CP3` Event-Driven Updated-Only Processing
 1. Done and not touched:
