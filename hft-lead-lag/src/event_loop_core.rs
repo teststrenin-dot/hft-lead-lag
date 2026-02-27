@@ -1,9 +1,12 @@
 use super::{
-    process_exchange_batch, updated_symbols_from_batch, BatchIngestContext, ConfigManager,
-    HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore, SIGNAL_CHECK_BUDGET_PER_TICK,
+    process_exchange_batch, updated_strategy_symbol_ids_from_batch, BatchIngestContext,
+    ConfigManager, HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore,
+    SIGNAL_CHECK_BUDGET_PER_TICK,
 };
 use bytes::Bytes;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{error, info, warn};
@@ -197,6 +200,7 @@ impl StrategySymbolIndex {
             .map(String::as_str)
     }
 
+    #[cfg(test)]
     pub(super) fn symbol_ids(&self, updated_symbols: &[Bytes]) -> Vec<SymbolId> {
         let mut ids = Vec::with_capacity(updated_symbols.len());
         let mut seen = HashSet::with_capacity(updated_symbols.len());
@@ -379,8 +383,8 @@ impl EventLoopState {
     ) -> Result<ProcessExchangeResult, hft_lead_lag::domain::ExchangeError> {
         let parsed_ts_ns = Self::now_ns();
         let ticker = result?;
-        let updated_symbols = updated_symbols_from_batch(&ticker, &drained);
-        let updated_strategy_symbol_ids = strategy_symbol_index.symbol_ids(&updated_symbols);
+        let updated_strategy_symbol_ids =
+            updated_strategy_symbol_ids_from_batch(&ticker, &drained, strategy_symbol_index);
         let mut ctx = BatchIngestContext {
             exchange: side.exchange_name(),
             ticker_count: &mut self.ticker_count,

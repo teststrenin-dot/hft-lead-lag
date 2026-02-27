@@ -28,13 +28,17 @@ mod trial_batch_protocol;
 mod trial_queue_io;
 use event_loop_core::{
     resolve_strategy_exchange_routing, EventLoopMetrics, EventLoopState, ExchangeSide,
-    StrategyExchangeRouting, StrategySymbolIndex,
+    StrategyExchangeRouting, StrategySymbolIndex, SymbolId,
 };
 #[cfg(test)]
 use event_loop_ingest::ingest_latest_batch;
 #[cfg(test)]
 use event_loop_ingest::strategy_ticks_in_order;
-use event_loop_ingest::{process_exchange_batch, updated_symbols_from_batch, BatchIngestContext};
+#[cfg(test)]
+use event_loop_ingest::updated_symbols_from_batch;
+use event_loop_ingest::{
+    process_exchange_batch, updated_strategy_symbol_ids_from_batch, BatchIngestContext,
+};
 use event_loop_runtime::{run_event_loop, EventLoopRuntimeContext};
 use file_fingerprint::{
     file_fingerprint_changed, hash_content_deterministic, read_file_fingerprint, FileFingerprint,

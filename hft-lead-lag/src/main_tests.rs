@@ -1078,6 +1078,26 @@ fn updated_symbols_from_batch_deduplicates_and_preserves_first_seen_order() {
 }
 
 #[test]
+fn updated_strategy_symbol_ids_from_batch_deduplicates_and_filters_unknown_symbols() {
+    let index = StrategySymbolIndex::new(&[
+        "BTCUSDT".to_string(),
+        "ETHUSDT".to_string(),
+        "ADAUSDT".to_string(),
+    ]);
+    let ids = updated_strategy_symbol_ids_from_batch(
+        &test_ticker("BTCUSDT", 10),
+        &[
+            test_ticker("ETHUSDT", 20),
+            test_ticker("BTCUSDT", 30),
+            test_ticker("DOGEUSDT", 40),
+            test_ticker("ADAUSDT", 50),
+        ],
+        &index,
+    );
+    assert_eq!(ids, vec![0, 1, 2]);
+}
+
+#[test]
 fn select_runtime_symbols_uses_common_when_present() {
     let common = vec!["XRPUSDT".to_string(), "ADAUSDT".to_string()];
     let (strategy, screener, used_fallback) = select_runtime_symbols(&common);
