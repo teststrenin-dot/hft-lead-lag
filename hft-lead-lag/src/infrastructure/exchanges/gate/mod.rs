@@ -20,8 +20,8 @@ use crate::domain::{
 };
 use crate::infrastructure::exchanges::common::{
     contains_bytes, extract_json_bool_field_by_pattern, extract_json_i64_field_by_pattern,
-    extract_json_string_field_ref, extract_json_string_field_ref_by_pattern, now_ns,
-    price_to_ticks, qty_to_ticks, timestamp_ms, timestamp_sec, HmacSha512, StampedBytes,
+    extract_json_string_field_ref_by_pattern, now_ns, price_to_ticks, qty_to_ticks, timestamp_ms,
+    timestamp_sec, HmacSha512, StampedBytes,
 };
 
 /// Gate.io Futures WebSocket endpoint
@@ -48,6 +48,10 @@ const FIELD_CREATE_TIME_MS: &[u8] = b"\"create_time_ms\"";
 const EVENT_BOOK_TICKER: &[u8] = b"book_ticker";
 const EVENT_BOOK_TICKER_CHANNEL: &[u8] = b"futures.book_ticker";
 const EVENT_TRADES_CHANNEL: &[u8] = b"futures.trades";
+const PARENT_DATA: &[u8] = b"\"data\"";
+const FIELD_P: &[u8] = b"\"p\"";
+const FIELD_SIDE_SIZE_S: &[u8] = b"\"s\"";
+const FIELD_SIDE: &[u8] = b"\"side\"";
 
 /// Cumulative count of market-data messages dropped due to channel backpressure.
 static DROPPED_MESSAGES: AtomicU64 = AtomicU64::new(0);
@@ -183,16 +187,18 @@ impl GateMarketData {
     }
 
     /// Extract price from nested object (e.g., data.b.p)
-    fn extract_nested_price(data: &[u8], parent: &str, field: &str) -> Option<i64> {
-        let parent_pattern = format!("\"{}\"", parent);
+    fn extract_nested_price_by_pattern(
+        data: &[u8],
+        parent_pattern: &[u8],
+        field_pattern: &[u8],
+    ) -> Option<i64> {
         if let Some(parent_pos) = data
             .windows(parent_pattern.len())
-            .position(|w| w == parent_pattern.as_bytes())
+            .position(|w| w == parent_pattern)
         {
             let start = parent_pos + parent_pattern.len();
             if let Some(brace_pos) = data[start..].iter().position(|&b| b == b'{') {
                 let obj_start = start + brace_pos;
-                let field_pattern = format!("\"{}\"", field);
                 let search_end = data[obj_start..]
                     .iter()
                     .position(|&b| b == b'}')
@@ -201,7 +207,7 @@ impl GateMarketData {
 
                 if let Some(field_pos) = obj_data
                     .windows(field_pattern.len())
-                    .position(|w| w == field_pattern.as_bytes())
+                    .position(|w| w == field_pattern)
                 {
                     let mut num_start = obj_start + field_pos + field_pattern.len();
                     for &b in &data[num_start..] {
@@ -221,22 +227,35 @@ impl GateMarketData {
         None
     }
 
+    #[cfg(test)]
+    fn extract_nested_price(data: &[u8], parent: &str, field: &str) -> Option<i64> {
+        let parent_pattern = format!("\"{}\"", parent);
+        let field_pattern = format!("\"{}\"", field);
+        Self::extract_nested_price_by_pattern(data, parent_pattern.as_bytes(), field_pattern.as_bytes())
+    }
+
     /// Extract quantity from nested object
-    fn extract_nested_qty(data: &[u8], parent: &str, field: &str) -> Option<i64> {
-        Self::extract_nested_price(data, parent, field)
+    fn extract_nested_qty_by_pattern(
+        data: &[u8],
+        parent_pattern: &[u8],
+        field_pattern: &[u8],
+    ) -> Option<i64> {
+        Self::extract_nested_price_by_pattern(data, parent_pattern, field_pattern)
     }
 
     /// Extract signed integer from nested object (e.g., data.s side/size signal).
-    fn extract_nested_i64(data: &[u8], parent: &str, field: &str) -> Option<i64> {
-        let parent_pattern = format!("\"{}\"", parent);
+    fn extract_nested_i64_by_pattern(
+        data: &[u8],
+        parent_pattern: &[u8],
+        field_pattern: &[u8],
+    ) -> Option<i64> {
         if let Some(parent_pos) = data
             .windows(parent_pattern.len())
-            .position(|w| w == parent_pattern.as_bytes())
+            .position(|w| w == parent_pattern)
         {
             let start = parent_pos + parent_pattern.len();
             if let Some(brace_pos) = data[start..].iter().position(|&b| b == b'{') {
                 let obj_start = start + brace_pos;
-                let field_pattern = format!("\"{}\"", field);
                 let search_end = data[obj_start..]
                     .iter()
                     .position(|&b| b == b'}')
@@ -245,7 +264,7 @@ impl GateMarketData {
 
                 if let Some(field_pos) = obj_data
                     .windows(field_pattern.len())
-                    .position(|w| w == field_pattern.as_bytes())
+                    .position(|w| w == field_pattern)
                 {
                     let mut num_start = obj_start + field_pos + field_pattern.len();
                     for &b in &data[num_start..] {
@@ -265,6 +284,14 @@ impl GateMarketData {
             }
         }
         None
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn extract_nested_i64(data: &[u8], parent: &str, field: &str) -> Option<i64> {
+        let parent_pattern = format!("\"{}\"", parent);
+        let field_pattern = format!("\"{}\"", field);
+        Self::extract_nested_i64_by_pattern(data, parent_pattern.as_bytes(), field_pattern.as_bytes())
     }
 
     /// Number of market-data messages dropped due to channel backpressure.
@@ -612,24 +639,26 @@ impl GateMarketData {
 
         let trade_id = extract_json_i64_field_by_pattern(data, FIELD_TRADE_ID_I)
             .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_TRADE_ID_ID))?;
-        let price = Self::extract_nested_price(data, "data", "p")
-            .or_else(|| extract_json_string_field_ref(data, "p").and_then(price_to_ticks))?;
-        let qty = Self::extract_nested_qty(data, "data", "s")
+        let price = Self::extract_nested_price_by_pattern(data, PARENT_DATA, FIELD_P)
+            .or_else(|| extract_json_string_field_ref_by_pattern(data, FIELD_P).and_then(price_to_ticks))?;
+        let qty = Self::extract_nested_qty_by_pattern(data, PARENT_DATA, FIELD_SIDE_SIZE_S)
             .map(i64::saturating_abs)
             .or_else(|| {
                 extract_json_i64_field_by_pattern(data, FIELD_TRADE_SIZE)
                     .map(|v| v.saturating_abs().saturating_mul(100_000_000))
             })
             .or_else(|| {
-                extract_json_string_field_ref(data, "size")
+                extract_json_string_field_ref_by_pattern(data, FIELD_TRADE_SIZE)
                     .and_then(qty_to_ticks)
                     .map(i64::saturating_abs)
             })
-            .or_else(|| extract_json_string_field_ref(data, "s").and_then(qty_to_ticks))?;
+            .or_else(|| {
+                extract_json_string_field_ref_by_pattern(data, FIELD_SIDE_SIZE_S).and_then(qty_to_ticks)
+            })?;
 
         let is_buyer_maker = extract_json_bool_field_by_pattern(data, FIELD_IS_BUYER_MAKER)
             .or_else(|| {
-                extract_json_string_field_ref(data, "side").and_then(|side| {
+                extract_json_string_field_ref_by_pattern(data, FIELD_SIDE).and_then(|side| {
                     if side.eq_ignore_ascii_case(b"sell") || side.eq_ignore_ascii_case(b"ask") {
                         Some(true)
                     } else if side.eq_ignore_ascii_case(b"buy") || side.eq_ignore_ascii_case(b"bid")
@@ -641,7 +670,7 @@ impl GateMarketData {
                 })
             })
             .or_else(|| {
-                Self::extract_nested_i64(data, "data", "s")
+                Self::extract_nested_i64_by_pattern(data, PARENT_DATA, FIELD_SIDE_SIZE_S)
                     .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_TRADE_SIZE))
                     .map(|v| v < 0)
             })
