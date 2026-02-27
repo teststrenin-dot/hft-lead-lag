@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::domain::{
     symbols::SymbolCache, BookTicker, ExchangeError, ExchangeId, ExchangeResult, MarketDataStream,
-    SubscriptionId, Trade,
+    SubscriptionId, SymbolId, Trade,
 };
 use crate::infrastructure::exchanges::common::{
     contains_bytes, extract_json_bool_field_by_pattern, extract_json_i64_field_by_pattern,
@@ -106,6 +106,7 @@ pub struct GateMarketData {
     msg_rx: Option<mpsc::Receiver<StampedBytes>>,
     /// Symbol cache for interning
     symbol_cache: SymbolCache,
+    strategy_symbol_ids: std::collections::HashMap<Bytes, SymbolId>,
     /// Next subscription ID
     next_subscription_id: SubscriptionId,
     /// API credentials
@@ -119,10 +120,34 @@ impl GateMarketData {
             ws_tx: None,
             msg_rx: None,
             symbol_cache: SymbolCache::new(),
+            strategy_symbol_ids: std::collections::HashMap::new(),
             next_subscription_id: 1,
             api_key: None,
             api_secret: None,
         }
+    }
+
+    pub fn set_strategy_symbol_ids(&mut self, strategy_symbols: &[String]) {
+        self.strategy_symbol_ids.clear();
+        for (idx, symbol) in strategy_symbols.iter().enumerate() {
+            if idx >= SymbolId::MAX as usize {
+                break;
+            }
+            self.strategy_symbol_ids
+                .insert(Bytes::copy_from_slice(symbol.as_bytes()), idx as SymbolId);
+        }
+    }
+
+    fn attach_strategy_symbol_id(&self, ticker: BookTicker) -> BookTicker {
+        Self::attach_strategy_symbol_id_with_map(ticker, &self.strategy_symbol_ids)
+    }
+
+    fn attach_strategy_symbol_id_with_map(
+        ticker: BookTicker,
+        strategy_symbol_ids: &std::collections::HashMap<Bytes, SymbolId>,
+    ) -> BookTicker {
+        let symbol_id = strategy_symbol_ids.get(&ticker.symbol).copied();
+        ticker.with_strategy_symbol_id(symbol_id)
     }
 
     /// Drain all pending book ticker messages, returning only the latest per symbol.
@@ -131,6 +156,7 @@ impl GateMarketData {
             Some(rx) => rx,
             None => return Vec::new(),
         };
+        let strategy_symbol_ids = &self.strategy_symbol_ids;
         let mut latest: std::collections::HashMap<Bytes, BookTicker> =
             std::collections::HashMap::new();
         while let Ok((data, recv_ts_ns)) = rx.try_recv() {
@@ -138,6 +164,8 @@ impl GateMarketData {
                 if let Some(ticker) =
                     Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns)
                 {
+                    let ticker =
+                        Self::attach_strategy_symbol_id_with_map(ticker, strategy_symbol_ids);
                     latest.insert(ticker.symbol.clone(), ticker);
                 }
             }
@@ -231,7 +259,11 @@ impl GateMarketData {
     fn extract_nested_price(data: &[u8], parent: &str, field: &str) -> Option<i64> {
         let parent_pattern = format!("\"{}\"", parent);
         let field_pattern = format!("\"{}\"", field);
-        Self::extract_nested_price_by_pattern(data, parent_pattern.as_bytes(), field_pattern.as_bytes())
+        Self::extract_nested_price_by_pattern(
+            data,
+            parent_pattern.as_bytes(),
+            field_pattern.as_bytes(),
+        )
     }
 
     /// Extract quantity from nested object
@@ -291,7 +323,11 @@ impl GateMarketData {
     fn extract_nested_i64(data: &[u8], parent: &str, field: &str) -> Option<i64> {
         let parent_pattern = format!("\"{}\"", parent);
         let field_pattern = format!("\"{}\"", field);
-        Self::extract_nested_i64_by_pattern(data, parent_pattern.as_bytes(), field_pattern.as_bytes())
+        Self::extract_nested_i64_by_pattern(
+            data,
+            parent_pattern.as_bytes(),
+            field_pattern.as_bytes(),
+        )
     }
 
     /// Number of market-data messages dropped due to channel backpressure.
@@ -545,7 +581,7 @@ impl MarketDataStream for GateMarketData {
                 if let Some(ticker) =
                     Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns)
                 {
-                    return Ok(ticker);
+                    return Ok(self.attach_strategy_symbol_id(ticker));
                 }
             }
         }
@@ -639,8 +675,10 @@ impl GateMarketData {
 
         let trade_id = extract_json_i64_field_by_pattern(data, FIELD_TRADE_ID_I)
             .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_TRADE_ID_ID))?;
-        let price = Self::extract_nested_price_by_pattern(data, PARENT_DATA, FIELD_P)
-            .or_else(|| extract_json_string_field_ref_by_pattern(data, FIELD_P).and_then(price_to_ticks))?;
+        let price =
+            Self::extract_nested_price_by_pattern(data, PARENT_DATA, FIELD_P).or_else(|| {
+                extract_json_string_field_ref_by_pattern(data, FIELD_P).and_then(price_to_ticks)
+            })?;
         let qty = Self::extract_nested_qty_by_pattern(data, PARENT_DATA, FIELD_SIDE_SIZE_S)
             .map(i64::saturating_abs)
             .or_else(|| {
@@ -653,7 +691,8 @@ impl GateMarketData {
                     .map(i64::saturating_abs)
             })
             .or_else(|| {
-                extract_json_string_field_ref_by_pattern(data, FIELD_SIDE_SIZE_S).and_then(qty_to_ticks)
+                extract_json_string_field_ref_by_pattern(data, FIELD_SIDE_SIZE_S)
+                    .and_then(qty_to_ticks)
             })?;
 
         let is_buyer_maker = extract_json_bool_field_by_pattern(data, FIELD_IS_BUYER_MAKER)
@@ -742,6 +781,16 @@ mod tests {
         assert_eq!(ticker.symbol.as_ref(), b"BTCUSDT");
         assert_eq!(ticker.bid_qty_ticks, 150_000_000);
         assert_eq!(ticker.ask_qty_ticks, 200_000_000);
+    }
+
+    #[test]
+    fn test_attach_strategy_symbol_id_sets_preconfigured_mapping() {
+        let mut market = GateMarketData::new();
+        market.set_strategy_symbol_ids(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+        let ticker = BookTicker::new(Bytes::from_static(b"BTCUSDT"), 1, 2, 3, 4, 5, 6);
+
+        let mapped = market.attach_strategy_symbol_id(ticker);
+        assert_eq!(mapped.strategy_symbol_id, Some(0));
     }
 
     #[test]

@@ -12,6 +12,7 @@ use bytes::Bytes;
 /// Using i64 avoids decimal overhead in hot path
 pub type PriceTicks = i64;
 pub type QuantityTicks = i64;
+pub type SymbolId = u16;
 
 /// Convert ticks to decimal for display/calculation
 #[inline]
@@ -43,6 +44,8 @@ pub struct BookTicker {
     pub exchange_ts_ns: i64,
     /// Local receive timestamp (nanoseconds since epoch)
     pub local_ts_ns: i64,
+    /// Runtime strategy symbol id (when symbol belongs to strategy universe)
+    pub strategy_symbol_id: Option<SymbolId>,
 }
 
 impl BookTicker {
@@ -65,7 +68,14 @@ impl BookTicker {
             ask_qty_ticks,
             exchange_ts_ns,
             local_ts_ns,
+            strategy_symbol_id: None,
         }
+    }
+
+    #[inline]
+    pub fn with_strategy_symbol_id(mut self, symbol_id: Option<SymbolId>) -> Self {
+        self.strategy_symbol_id = symbol_id;
+        self
     }
 
     /// Get bid price as f64

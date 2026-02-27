@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::application::services::{LeadLagSignal, LeadLagStrategy, LeadLagStrategyConfig};
 use crate::config::{ConfigManager, ExchangeId as ConfigExchangeId, StrategyKind};
-use crate::domain::{BookTicker, ExchangeId};
+use crate::domain::{BookTicker, ExchangeId, SymbolId};
 
 const MIN_TRIGGER_SPREAD_BPS: f64 = 25.0;
 const MAX_TRIGGER_SPREAD_BPS: f64 = 100.0;
@@ -29,7 +29,7 @@ pub trait RuntimeStrategy: Send + Sync {
     fn strategy_name(&self) -> &'static str;
     async fn on_primary_book(&self, ticker: BookTicker);
     async fn on_hedge_book(&self, ticker: BookTicker);
-    async fn check_signal(&self, symbol: &str) -> Option<StrategySignal>;
+    async fn check_signal(&self, symbol_id: SymbolId) -> Option<StrategySignal>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,12 +88,15 @@ fn map_exchange_id(exchange: ConfigExchangeId) -> ExchangeId {
 
 struct LeadLagRuntimeStrategy {
     inner: LeadLagStrategy,
+    symbols: Vec<String>,
 }
 
 impl LeadLagRuntimeStrategy {
     fn new(config: LeadLagStrategyConfig) -> Self {
+        let symbols = config.symbols.clone();
         Self {
             inner: LeadLagStrategy::new(config),
+            symbols,
         }
     }
 }
@@ -112,7 +115,8 @@ impl RuntimeStrategy for LeadLagRuntimeStrategy {
         self.inner.update_hedge_book(ticker).await;
     }
 
-    async fn check_signal(&self, symbol: &str) -> Option<StrategySignal> {
+    async fn check_signal(&self, symbol_id: SymbolId) -> Option<StrategySignal> {
+        let symbol = self.symbols.get(symbol_id as usize)?;
         self.inner.check_signal(symbol).await.map(Into::into)
     }
 }
@@ -175,10 +179,7 @@ mod tests {
         runtime.on_primary_book(ticker("BTCUSDT", 110, 111)).await;
         runtime.on_hedge_book(ticker("BTCUSDT", 100, 101)).await;
 
-        let signal = runtime
-            .check_signal("BTCUSDT")
-            .await
-            .expect("signal expected");
+        let signal = runtime.check_signal(0).await.expect("signal expected");
         assert_eq!(signal.strategy, "lead_lag_classic");
         assert_eq!(signal.symbol, "BTCUSDT");
         assert!(signal.spread_bps > 1.0);

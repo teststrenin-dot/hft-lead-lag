@@ -156,33 +156,39 @@ pub(super) struct EventLoopState {
     pub(super) metrics: EventLoopMetrics,
 }
 
-pub(super) type SymbolId = u16;
+pub(super) type SymbolId = hft_lead_lag::domain::SymbolId;
 
 pub(super) struct StrategySymbolIndex {
     symbol_to_id: HashMap<Bytes, SymbolId>,
+    #[cfg(test)]
     id_to_symbol: Vec<String>,
 }
 
 impl StrategySymbolIndex {
     pub(super) fn new(strategy_symbols: &[String]) -> Self {
         let mut symbol_to_id = HashMap::with_capacity(strategy_symbols.len());
+        #[cfg(test)]
         let mut id_to_symbol = Vec::with_capacity(strategy_symbols.len());
+        let mut next_symbol_id: SymbolId = 0;
 
         for symbol in strategy_symbols {
             let key = Bytes::copy_from_slice(symbol.as_bytes());
             if symbol_to_id.contains_key(&key) {
                 continue;
             }
-            if id_to_symbol.len() >= SymbolId::MAX as usize {
+            if next_symbol_id == SymbolId::MAX {
                 break;
             }
-            let symbol_id = id_to_symbol.len() as SymbolId;
+            let symbol_id = next_symbol_id;
             symbol_to_id.insert(key, symbol_id);
+            next_symbol_id = next_symbol_id.saturating_add(1);
+            #[cfg(test)]
             id_to_symbol.push(symbol.clone());
         }
 
         Self {
             symbol_to_id,
+            #[cfg(test)]
             id_to_symbol,
         }
     }
@@ -191,6 +197,7 @@ impl StrategySymbolIndex {
         self.symbol_to_id.get(symbol).copied()
     }
 
+    #[cfg(test)]
     pub(super) fn symbol(&self, symbol_id: SymbolId) -> Option<&str> {
         self.id_to_symbol
             .get(symbol_id as usize)
@@ -527,7 +534,6 @@ impl EventLoopState {
     pub(super) async fn handle_signal_tick(
         &mut self,
         strategy: &dyn RuntimeStrategy,
-        strategy_symbol_index: &StrategySymbolIndex,
         health: &HealthState,
     ) {
         if self.pending_signal_symbols.is_empty() {
@@ -538,10 +544,7 @@ impl EventLoopState {
             let Some(symbol_id) = self.pending_signal_symbols.pop_first() else {
                 break;
             };
-            let Some(symbol) = strategy_symbol_index.symbol(symbol_id) else {
-                continue;
-            };
-            let signal = strategy.check_signal(symbol).await;
+            let signal = strategy.check_signal(symbol_id).await;
             let signal_decided_ts_ns = Self::now_ns();
             health
                 .runtime_last_signal_decided_ts_ns

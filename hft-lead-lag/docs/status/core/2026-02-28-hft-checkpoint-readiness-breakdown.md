@@ -30,10 +30,12 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - Hot WS message classification now uses byte-slice matching (`contains_bytes`) instead of per-message UTF-8 conversion.
    - Common extractor path now supports `*_by_pattern` APIs for `string/i64/bool`, enabling parser calls without per-invocation pattern `format!`.
    - Gate nested decode hot path (`data.p`, `data.s`) now uses static byte patterns; dynamic pattern formatting removed from runtime calls.
+   - Connectors now attach `strategy_symbol_id` to `BookTicker` at source; runtime consumes id-indexed updates directly at ingest boundary.
+   - Runtime strategy checks now execute by `SymbolId` in event loop (`check_signal(symbol_id)`), removing per-tick `id -> string` resolution in hot loop.
 2. Done but must be reworked:
-   - Strategy lookup path still calls `check_signal(&str)` and resolves symbol string by id.
+   - None.
 3. Missing and required:
-   - Extend `SymbolId` directly to connector output (emit id-indexed ticker updates instead of symbol bytes in runtime ingest boundary).
+   - None.
    - Optional cleanup: migrate/trim non-hot legacy parser wrappers that still rely on dynamic field-name formatting for test-only compatibility.
 
 ## `HFT-CP2` Lock-Free Strategy State

@@ -69,7 +69,10 @@ pub(super) fn strategy_symbol_updates_from_batch(
     let mut seen: HashSet<SymbolId> = HashSet::with_capacity(drained.len() + 1);
 
     let mut push = |ticker: hft_lead_lag::domain::BookTicker| {
-        let Some(symbol_id) = strategy_symbol_index.symbol_id(ticker.symbol.as_ref()) else {
+        let Some(symbol_id) = ticker
+            .strategy_symbol_id
+            .or_else(|| strategy_symbol_index.symbol_id(ticker.symbol.as_ref()))
+        else {
             return;
         };
         if seen.insert(symbol_id) {

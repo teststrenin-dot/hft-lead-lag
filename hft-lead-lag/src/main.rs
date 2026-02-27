@@ -185,6 +185,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         health_state.as_ref(),
     )
     .await?;
+    binance.set_strategy_symbol_ids(&strategy_symbols);
+    gate.set_strategy_symbol_ids(&strategy_symbols);
 
     // Start external APIs early so checkpoint endpoints are always available.
     let mut screener = ScreenerStore::default();

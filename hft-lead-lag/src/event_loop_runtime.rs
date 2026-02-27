@@ -120,11 +120,7 @@ pub(super) async fn run_event_loop(
 
             _ = state.signal_interval.tick() => {
                 state
-                    .handle_signal_tick(
-                        strategy,
-                        &strategy_symbol_index,
-                        runtime_context.health_state,
-                    )
+                    .handle_signal_tick(strategy, runtime_context.health_state)
                     .await;
             }
 

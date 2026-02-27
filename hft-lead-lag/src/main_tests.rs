@@ -1540,7 +1540,7 @@ symbols = ["BTCUSDT"]
 struct RecordingRuntimeStrategy {
     primary_symbols: std::sync::Mutex<Vec<String>>,
     hedge_symbols: std::sync::Mutex<Vec<String>>,
-    checked_symbols: std::sync::Mutex<Vec<String>>,
+    checked_symbols: std::sync::Mutex<Vec<hft_lead_lag::domain::SymbolId>>,
 }
 
 #[async_trait::async_trait]
@@ -1563,11 +1563,14 @@ impl RuntimeStrategy for RecordingRuntimeStrategy {
             .push(String::from_utf8_lossy(&ticker.symbol).to_string());
     }
 
-    async fn check_signal(&self, _symbol: &str) -> Option<hft_lead_lag::StrategySignal> {
+    async fn check_signal(
+        &self,
+        symbol_id: hft_lead_lag::domain::SymbolId,
+    ) -> Option<hft_lead_lag::StrategySignal> {
         self.checked_symbols
             .lock()
             .expect("checked lock")
-            .push(_symbol.to_string());
+            .push(symbol_id);
         None
     }
 }
@@ -1655,16 +1658,14 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
     ];
     state.mark_pending_signal_symbols(&strategy_symbol_index.symbol_ids(&updated));
 
-    state
-        .handle_signal_tick(&strategy, &strategy_symbol_index, &health)
-        .await;
+    state.handle_signal_tick(&strategy, &health).await;
 
     let checked = strategy
         .checked_symbols
         .lock()
         .expect("checked symbols")
         .clone();
-    assert_eq!(checked, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    assert_eq!(checked, vec![0, 1]);
 }
 
 #[tokio::test]
@@ -1672,11 +1673,8 @@ async fn handle_signal_tick_skips_when_no_pending_symbols() {
     let mut state = EventLoopState::new();
     let strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
-    let strategy_symbol_index = StrategySymbolIndex::new(&Vec::<String>::new());
 
-    state
-        .handle_signal_tick(&strategy, &strategy_symbol_index, &health)
-        .await;
+    state.handle_signal_tick(&strategy, &health).await;
 
     let checked = strategy
         .checked_symbols
@@ -1704,9 +1702,7 @@ async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
         );
     }
 
-    state
-        .handle_signal_tick(&strategy, &strategy_symbol_index, &health)
-        .await;
+    state.handle_signal_tick(&strategy, &health).await;
     assert_eq!(state.pending_signal_symbols.len(), 2);
     let checked_after_first_tick = strategy
         .checked_symbols
@@ -1715,9 +1711,7 @@ async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
         .len();
     assert_eq!(checked_after_first_tick, SIGNAL_CHECK_BUDGET_PER_TICK);
 
-    state
-        .handle_signal_tick(&strategy, &strategy_symbol_index, &health)
-        .await;
+    state.handle_signal_tick(&strategy, &health).await;
     assert!(state.pending_signal_symbols.is_empty());
     let checked_after_second_tick = strategy
         .checked_symbols
