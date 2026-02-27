@@ -924,6 +924,35 @@ async fn event_loop_state_process_exchange_result_updates_binance_map() {
 }
 
 #[tokio::test]
+async fn event_loop_state_exposes_latest_books_by_symbol_id() {
+    let mut state = EventLoopState::new();
+    let screener = ScreenerStore::default();
+    let strategy_symbol_index =
+        StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+
+    state
+        .process_exchange_result(
+            ExchangeSide::Binance,
+            Ok(test_ticker("BTCUSDT", 100_000_000)),
+            vec![test_ticker("ETHUSDT", 110_000_000)],
+            &strategy_symbol_index,
+            &screener,
+            None,
+        )
+        .expect("exchange result should parse");
+
+    let btc = state
+        .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
+        .expect("btc present");
+    let eth = state
+        .latest_book_for_strategy_symbol(ExchangeSide::Binance, 1)
+        .expect("eth present");
+
+    assert_eq!(btc.symbol, sym("BTCUSDT"));
+    assert_eq!(eth.symbol, sym("ETHUSDT"));
+}
+
+#[tokio::test]
 async fn event_loop_state_process_exchange_result_propagates_error() {
     let mut state = EventLoopState::new();
     let screener = ScreenerStore::default();
@@ -1490,16 +1519,30 @@ impl RuntimeStrategy for RecordingRuntimeStrategy {
 #[tokio::test]
 async fn update_strategy_books_routes_by_configured_exchange_roles() {
     let mut state = EventLoopState::new();
-    state
-        .latest_bn
-        .insert(sym("BTCUSDT"), test_ticker("BTCUSDT", 100_000_000));
-    state
-        .latest_gt
-        .insert(sym("ETHUSDT"), test_ticker("ETHUSDT", 100_000_000));
-
     let strategy = RecordingRuntimeStrategy::default();
     let strategy_symbol_index =
         StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    let screener = ScreenerStore::default();
+    state
+        .process_exchange_result(
+            ExchangeSide::Binance,
+            Ok(test_ticker("BTCUSDT", 100_000_000)),
+            Vec::new(),
+            &strategy_symbol_index,
+            &screener,
+            None,
+        )
+        .expect("binance result");
+    state
+        .process_exchange_result(
+            ExchangeSide::Gate,
+            Ok(test_ticker("ETHUSDT", 100_000_000)),
+            Vec::new(),
+            &strategy_symbol_index,
+            &screener,
+            None,
+        )
+        .expect("gate result");
     let updated_binance = vec![sym("BTCUSDT")];
     let updated_gate = vec![sym("ETHUSDT")];
 
@@ -1508,7 +1551,6 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
             ExchangeSide::Binance,
             &strategy,
             &strategy_symbol_index.symbol_ids(&updated_binance),
-            &strategy_symbol_index,
             StrategyExchangeRouting {
                 primary: ExchangeSide::Gate,
                 hedge: ExchangeSide::Binance,
@@ -1520,7 +1562,6 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
             ExchangeSide::Gate,
             &strategy,
             &strategy_symbol_index.symbol_ids(&updated_gate),
-            &strategy_symbol_index,
             StrategyExchangeRouting {
                 primary: ExchangeSide::Gate,
                 hedge: ExchangeSide::Binance,

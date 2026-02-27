@@ -39,7 +39,6 @@ async fn handle_exchange_tick(
                     side,
                     context.strategy,
                     &processed.updated_strategy_symbol_ids,
-                    context.strategy_symbol_index,
                     context.strategy_exchange_routing,
                 )
                 .await;

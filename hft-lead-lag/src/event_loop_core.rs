@@ -149,6 +149,8 @@ pub(super) struct EventLoopState {
     pub(super) signal_interval: tokio::time::Interval,
     pub(super) latest_bn: std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
     pub(super) latest_gt: std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
+    latest_bn_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
+    latest_gt_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
     pub(super) pending_signal_symbols: std::collections::BTreeSet<SymbolId>,
     symbol_stage_timestamps: std::collections::HashMap<SymbolId, SymbolStageTimestamps>,
     pub(super) metrics: EventLoopMetrics,
@@ -344,6 +346,8 @@ impl EventLoopState {
             signal_interval,
             latest_bn: std::collections::HashMap::new(),
             latest_gt: std::collections::HashMap::new(),
+            latest_bn_by_symbol_id: Vec::new(),
+            latest_gt_by_symbol_id: Vec::new(),
             pending_signal_symbols: std::collections::BTreeSet::new(),
             symbol_stage_timestamps: std::collections::HashMap::new(),
             metrics: EventLoopMetrics::new(),
@@ -393,11 +397,15 @@ impl EventLoopState {
                 process_exchange_batch(&mut self.latest_gt, ticker, drained, &mut ctx)
             }
         }
+        self.upsert_latest_books_by_symbol_ids(
+            side,
+            &updated_strategy_symbol_ids,
+            strategy_symbol_index,
+        );
         let state_updated_ts_ns = Self::now_ns();
         self.record_stage_timestamps_for_batch(
             side,
             &updated_strategy_symbol_ids,
-            strategy_symbol_index,
             parsed_ts_ns,
             state_updated_ts_ns,
         );
@@ -410,20 +418,11 @@ impl EventLoopState {
         &mut self,
         side: ExchangeSide,
         updated_strategy_symbol_ids: &[SymbolId],
-        strategy_symbol_index: &StrategySymbolIndex,
         parsed_ts_ns: i64,
         state_updated_ts_ns: i64,
     ) {
-        let latest = match side {
-            ExchangeSide::Binance => &self.latest_bn,
-            ExchangeSide::Gate => &self.latest_gt,
-        };
-
         for symbol_id in updated_strategy_symbol_ids {
-            let Some(symbol) = strategy_symbol_index.symbol(*symbol_id) else {
-                continue;
-            };
-            let Some(ticker) = latest.get(symbol.as_bytes()) else {
+            let Some(ticker) = self.latest_book_for_strategy_symbol(side, *symbol_id) else {
                 continue;
             };
 
@@ -468,18 +467,10 @@ impl EventLoopState {
         side: ExchangeSide,
         strategy: &dyn RuntimeStrategy,
         updated_strategy_symbol_ids: &[SymbolId],
-        strategy_symbol_index: &StrategySymbolIndex,
         strategy_exchange_routing: StrategyExchangeRouting,
     ) {
         for symbol_id in updated_strategy_symbol_ids {
-            let Some(symbol) = strategy_symbol_index.symbol(*symbol_id) else {
-                continue;
-            };
-            let ticker = match side {
-                ExchangeSide::Binance => self.latest_bn.get(symbol.as_bytes()),
-                ExchangeSide::Gate => self.latest_gt.get(symbol.as_bytes()),
-            };
-            let Some(ticker) = ticker else {
+            let Some(ticker) = self.latest_book_for_strategy_symbol(side, *symbol_id) else {
                 continue;
             };
 
@@ -494,6 +485,64 @@ impl EventLoopState {
         for symbol_id in updated_strategy_symbol_ids {
             self.pending_signal_symbols.insert(*symbol_id);
         }
+    }
+
+    fn latest_books_by_symbol_id(
+        &self,
+        side: ExchangeSide,
+    ) -> &Vec<Option<hft_lead_lag::domain::BookTicker>> {
+        match side {
+            ExchangeSide::Binance => &self.latest_bn_by_symbol_id,
+            ExchangeSide::Gate => &self.latest_gt_by_symbol_id,
+        }
+    }
+
+    fn latest_books_by_symbol_id_mut(
+        &mut self,
+        side: ExchangeSide,
+    ) -> &mut Vec<Option<hft_lead_lag::domain::BookTicker>> {
+        match side {
+            ExchangeSide::Binance => &mut self.latest_bn_by_symbol_id,
+            ExchangeSide::Gate => &mut self.latest_gt_by_symbol_id,
+        }
+    }
+
+    fn upsert_latest_books_by_symbol_ids(
+        &mut self,
+        side: ExchangeSide,
+        updated_strategy_symbol_ids: &[SymbolId],
+        strategy_symbol_index: &StrategySymbolIndex,
+    ) {
+        let latest = match side {
+            ExchangeSide::Binance => &self.latest_bn,
+            ExchangeSide::Gate => &self.latest_gt,
+        };
+        let updates: Vec<(usize, hft_lead_lag::domain::BookTicker)> = updated_strategy_symbol_ids
+            .iter()
+            .filter_map(|symbol_id| {
+                let symbol = strategy_symbol_index.symbol(*symbol_id)?;
+                let ticker = latest.get(symbol.as_bytes())?.clone();
+                Some((*symbol_id as usize, ticker))
+            })
+            .collect();
+
+        let cache = self.latest_books_by_symbol_id_mut(side);
+        for (idx, ticker) in updates {
+            if cache.len() <= idx {
+                cache.resize(idx + 1, None);
+            }
+            cache[idx] = Some(ticker);
+        }
+    }
+
+    pub(super) fn latest_book_for_strategy_symbol(
+        &self,
+        side: ExchangeSide,
+        symbol_id: SymbolId,
+    ) -> Option<&hft_lead_lag::domain::BookTicker> {
+        self.latest_books_by_symbol_id(side)
+            .get(symbol_id as usize)
+            .and_then(Option::as_ref)
     }
 
     pub(super) fn signal_backlog_depth(&self) -> u64 {

@@ -22,11 +22,12 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - `StrategySymbolIndex` introduced with stable `SymbolId`.
    - Signal backlog and stage timestamps switched to `SymbolId` (no symbol cloning in pending queue path).
    - Exchange batch processing now emits deduped `updated_strategy_symbol_ids`; downstream hot-path steps consume ids directly.
+   - Per-exchange latest-book cache by `SymbolId` added and wired into stage timestamping + strategy book updates.
 2. Done but must be reworked:
    - Strategy lookup path still calls `check_signal(&str)` and resolves symbol string by id.
 3. Missing and required:
    - Extend `SymbolId` to connector/parse path (early mapping, no symbol bytes copy in hot parse).
-   - Replace latest book `HashMap<Bytes, ...>` with array-style state (`Vec`/indexed storage).
+   - Remove transitional `HashMap<Bytes, ...>` from runtime hot path once connector/ingest produce id-indexed updates directly.
 
 ## `HFT-CP2` Lock-Free Strategy State
 1. Done and not touched:
