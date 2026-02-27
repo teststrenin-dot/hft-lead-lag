@@ -25,11 +25,12 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - Per-exchange latest-book cache by `SymbolId` added and wired into stage timestamping + strategy book updates.
    - `updated_strategy_symbol_ids` are now derived directly from incoming ticker batch (removed intermediate `updated_symbols` allocation from runtime path).
    - Runtime `EventLoopState` no longer stores transitional `latest_* HashMap<Bytes, BookTicker>`; hot-path state uses per-exchange `SymbolId` caches.
+   - Connector parse path now extracts string fields by borrowed slices (`&[u8]`) and reuses symbol bytes via cache; repeated `Bytes::copy_from_slice` on parsed symbol fields removed.
 2. Done but must be reworked:
    - Strategy lookup path still calls `check_signal(&str)` and resolves symbol string by id.
 3. Missing and required:
-   - Extend `SymbolId` to connector/parse path (early mapping, no symbol bytes copy in hot parse).
-   - Remove remaining symbol-byte allocations in parser/connector ingest boundary by emitting id-indexed updates directly.
+   - Extend `SymbolId` directly to connector output (emit id-indexed ticker updates instead of symbol bytes in runtime ingest boundary).
+   - Remove remaining parser-side per-field pattern formatting overhead (`format!(\"\\\"{}\\\"\", field)`) from hot decode paths.
 
 ## `HFT-CP2` Lock-Free Strategy State
 1. Done and not touched:

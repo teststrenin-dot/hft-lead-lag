@@ -19,7 +19,7 @@ use crate::domain::{
     SubscriptionId, Trade,
 };
 use crate::infrastructure::exchanges::common::{
-    extract_json_bool_field, extract_json_i64_field, extract_json_string_field, now_ns,
+    extract_json_bool_field, extract_json_i64_field, extract_json_string_field_ref, now_ns,
     price_to_ticks, qty_to_ticks, timestamp_ms, timestamp_sec, HmacSha512, StampedBytes,
 };
 
@@ -538,23 +538,19 @@ impl GateMarketData {
         symbol_cache: &SymbolCache,
         local_ts_ns: i64,
     ) -> Option<BookTicker> {
-        let contract = extract_json_string_field(data, "s")
-            .or_else(|| extract_json_string_field(data, "contract"))
-            .or_else(|| extract_json_string_field(data, "c"))?;
+        let contract = extract_json_string_field_ref(data, "s")
+            .or_else(|| extract_json_string_field_ref(data, "contract"))
+            .or_else(|| extract_json_string_field_ref(data, "c"))?;
+        let symbol = symbol_cache.intern_gate_contract(contract);
 
-        let symbol_str = String::from_utf8_lossy(&contract)
-            .replace("_USDT", "USDT")
-            .replace("_USD", "USDT");
-        let symbol = Bytes::from(symbol_str);
-
-        let bid_price = extract_json_string_field(data, "b").and_then(|p| price_to_ticks(&p))?;
-        let ask_price = extract_json_string_field(data, "a").and_then(|p| price_to_ticks(&p))?;
-        let bid_qty = extract_json_string_field(data, "B")
-            .and_then(|q| qty_to_ticks(&q))
+        let bid_price = extract_json_string_field_ref(data, "b").and_then(price_to_ticks)?;
+        let ask_price = extract_json_string_field_ref(data, "a").and_then(price_to_ticks)?;
+        let bid_qty = extract_json_string_field_ref(data, "B")
+            .and_then(qty_to_ticks)
             .or_else(|| extract_json_i64_field(data, "B").map(|v| v.saturating_mul(100_000_000)))
             .unwrap_or(0);
-        let ask_qty = extract_json_string_field(data, "A")
-            .and_then(|q| qty_to_ticks(&q))
+        let ask_qty = extract_json_string_field_ref(data, "A")
+            .and_then(qty_to_ticks)
             .or_else(|| extract_json_i64_field(data, "A").map(|v| v.saturating_mul(100_000_000)))
             .unwrap_or(0);
 
@@ -579,26 +575,22 @@ impl GateMarketData {
         symbol_cache: &SymbolCache,
         local_ts_ns: i64,
     ) -> Option<Trade> {
-        let contract = extract_json_string_field(data, "c")
-            .or_else(|| extract_json_string_field(data, "contract"))
+        let contract = extract_json_string_field_ref(data, "c")
+            .or_else(|| extract_json_string_field_ref(data, "contract"))
             .or_else(|| {
-                let maybe_symbol = extract_json_string_field(data, "s")?;
+                let maybe_symbol = extract_json_string_field_ref(data, "s")?;
                 if maybe_symbol.contains(&b'_') {
                     Some(maybe_symbol)
                 } else {
                     None
                 }
             })?;
-
-        let symbol_str = String::from_utf8_lossy(&contract)
-            .replace("_USDT", "USDT")
-            .replace("_USD", "USDT");
-        let symbol = Bytes::from(symbol_str);
+        let symbol = symbol_cache.intern_gate_contract(contract);
 
         let trade_id =
             extract_json_i64_field(data, "i").or_else(|| extract_json_i64_field(data, "id"))?;
         let price = Self::extract_nested_price(data, "data", "p")
-            .or_else(|| extract_json_string_field(data, "p").and_then(|p| price_to_ticks(&p)))?;
+            .or_else(|| extract_json_string_field_ref(data, "p").and_then(price_to_ticks))?;
         let qty = Self::extract_nested_qty(data, "data", "s")
             .map(i64::saturating_abs)
             .or_else(|| {
@@ -606,15 +598,15 @@ impl GateMarketData {
                     .map(|v| v.saturating_abs().saturating_mul(100_000_000))
             })
             .or_else(|| {
-                extract_json_string_field(data, "size")
-                    .and_then(|q| qty_to_ticks(&q))
+                extract_json_string_field_ref(data, "size")
+                    .and_then(qty_to_ticks)
                     .map(i64::saturating_abs)
             })
-            .or_else(|| extract_json_string_field(data, "s").and_then(|q| qty_to_ticks(&q)))?;
+            .or_else(|| extract_json_string_field_ref(data, "s").and_then(qty_to_ticks))?;
 
         let is_buyer_maker = extract_json_bool_field(data, "m")
             .or_else(|| {
-                extract_json_string_field(data, "side").and_then(|side| {
+                extract_json_string_field_ref(data, "side").and_then(|side| {
                     if side.eq_ignore_ascii_case(b"sell") || side.eq_ignore_ascii_case(b"ask") {
                         Some(true)
                     } else if side.eq_ignore_ascii_case(b"buy") || side.eq_ignore_ascii_case(b"bid")
@@ -677,6 +669,27 @@ mod tests {
         let price_ticks = GateMarketData::extract_nested_price(payload, "data", "p")
             .expect("nested price parsed");
         assert_eq!(price_ticks, 12_345_000_000);
+    }
+
+    #[test]
+    fn test_parse_book_ticker_normalizes_contract_symbol() {
+        let cache = SymbolCache::new();
+        let payload = br#"{
+            "channel":"futures.book_ticker",
+            "event":"update",
+            "contract":"BTC_USDT",
+            "b":"50000.1",
+            "B":"1.5",
+            "a":"50000.2",
+            "A":"2.0",
+            "t":1700000000000
+        }"#;
+
+        let ticker = GateMarketData::parse_book_ticker_static(payload, &cache, 123)
+            .expect("book ticker parses");
+        assert_eq!(ticker.symbol.as_ref(), b"BTCUSDT");
+        assert_eq!(ticker.bid_qty_ticks, 150_000_000);
+        assert_eq!(ticker.ask_qty_ticks, 200_000_000);
     }
 
     #[test]

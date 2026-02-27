@@ -148,6 +148,19 @@ pub fn extract_json_string_field(json: &[u8], field: &str) -> Option<Bytes> {
     let field_pattern = format!("\"{}\"", field);
     let field_bytes = field_pattern.as_bytes();
 
+    extract_json_string_field_ref_by_pattern(json, field_bytes).map(Bytes::copy_from_slice)
+}
+
+pub fn extract_json_string_field_ref<'a>(json: &'a [u8], field: &str) -> Option<&'a [u8]> {
+    let field_pattern = format!("\"{}\"", field);
+    let field_bytes = field_pattern.as_bytes();
+    extract_json_string_field_ref_by_pattern(json, field_bytes)
+}
+
+pub fn extract_json_string_field_ref_by_pattern<'a>(
+    json: &'a [u8],
+    field_bytes: &[u8],
+) -> Option<&'a [u8]> {
     let mut pos = 0;
     while let Some(mut value_pos) = find_json_field_value_start(json, field_bytes, pos) {
         if json[value_pos] == b'"' {
@@ -160,7 +173,7 @@ pub fn extract_json_string_field(json: &[u8], field: &str) -> Option<Bytes> {
                     value_pos += 1;
                 }
             }
-            return Some(Bytes::copy_from_slice(&json[start..value_pos]));
+            return Some(&json[start..value_pos]);
         }
         pos = value_pos.saturating_add(1);
     }
@@ -230,6 +243,13 @@ mod tests {
         let json = br#"{"s":"BTCUSDT","p":"50000.00"}"#;
         let symbol = extract_json_string_field(json, "s").unwrap();
         assert_eq!(&symbol[..], b"BTCUSDT");
+    }
+
+    #[test]
+    fn test_extract_json_string_ref() {
+        let json = br#"{"s":"BTCUSDT","p":"50000.00"}"#;
+        let symbol = extract_json_string_field_ref(json, "s").unwrap();
+        assert_eq!(symbol, b"BTCUSDT");
     }
 
     #[test]

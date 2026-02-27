@@ -17,8 +17,8 @@ use crate::domain::{
     SubscriptionId, Trade,
 };
 use crate::infrastructure::exchanges::common::{
-    extract_json_bool_field, extract_json_i64_field, extract_json_string_field, now_ns,
-    price_to_ticks, qty_to_ticks, timestamp_ms, StampedBytes,
+    extract_json_bool_field, extract_json_i64_field, extract_json_string_field_ref_by_pattern,
+    now_ns, price_to_ticks, qty_to_ticks, timestamp_ms, StampedBytes,
 };
 
 const BINANCE_WS_ENDPOINT: &str = "wss://fstream.binance.com/ws";
@@ -27,6 +27,13 @@ const MSG_CHANNEL_CAPACITY: usize = 25_000;
 const MIN_MSG_CHANNEL_CAPACITY: usize = 1_024;
 const MSG_CHANNEL_CAPACITY_ENV: &str = "BINANCE_MSG_CHANNEL_CAPACITY";
 const SUBSCRIPTION_REGISTRY_MAX: usize = 4_096;
+const FIELD_S: &[u8] = b"\"s\"";
+const FIELD_BID_PRICE: &[u8] = b"\"b\"";
+const FIELD_BID_QTY: &[u8] = b"\"B\"";
+const FIELD_ASK_PRICE: &[u8] = b"\"a\"";
+const FIELD_ASK_QTY: &[u8] = b"\"A\"";
+const FIELD_TRADE_PRICE: &[u8] = b"\"p\"";
+const FIELD_TRADE_QTY: &[u8] = b"\"q\"";
 
 /// Cumulative count of market-data messages dropped due to channel backpressure.
 static DROPPED_MESSAGES: AtomicU64 = AtomicU64::new(0);
@@ -162,11 +169,15 @@ impl BinanceMarketData {
         symbol_cache: &SymbolCache,
         local_ts_ns: i64,
     ) -> Option<BookTicker> {
-        let symbol = extract_json_string_field(data, "s")?;
-        let bid_price = extract_json_string_field(data, "b").and_then(|p| price_to_ticks(&p))?;
-        let bid_qty = extract_json_string_field(data, "B").and_then(|q| qty_to_ticks(&q))?;
-        let ask_price = extract_json_string_field(data, "a").and_then(|p| price_to_ticks(&p))?;
-        let ask_qty = extract_json_string_field(data, "A").and_then(|q| qty_to_ticks(&q))?;
+        let symbol = extract_json_string_field_ref_by_pattern(data, FIELD_S)?;
+        let bid_price =
+            extract_json_string_field_ref_by_pattern(data, FIELD_BID_PRICE).and_then(price_to_ticks)?;
+        let bid_qty =
+            extract_json_string_field_ref_by_pattern(data, FIELD_BID_QTY).and_then(qty_to_ticks)?;
+        let ask_price =
+            extract_json_string_field_ref_by_pattern(data, FIELD_ASK_PRICE).and_then(price_to_ticks)?;
+        let ask_qty =
+            extract_json_string_field_ref_by_pattern(data, FIELD_ASK_QTY).and_then(qty_to_ticks)?;
         let exchange_ts_ms = extract_json_i64_field(data, "T")
             .or_else(|| extract_json_i64_field(data, "E"))
             .unwrap_or(0);
@@ -187,11 +198,13 @@ impl BinanceMarketData {
         symbol_cache: &SymbolCache,
         local_ts_ns: i64,
     ) -> Option<Trade> {
-        let symbol = extract_json_string_field(data, "s")?;
+        let symbol = extract_json_string_field_ref_by_pattern(data, FIELD_S)?;
         let trade_id =
             extract_json_i64_field(data, "t").or_else(|| extract_json_i64_field(data, "a"))?;
-        let price = extract_json_string_field(data, "p").and_then(|p| price_to_ticks(&p))?;
-        let qty = extract_json_string_field(data, "q").and_then(|q| qty_to_ticks(&q))?;
+        let price =
+            extract_json_string_field_ref_by_pattern(data, FIELD_TRADE_PRICE).and_then(price_to_ticks)?;
+        let qty =
+            extract_json_string_field_ref_by_pattern(data, FIELD_TRADE_QTY).and_then(qty_to_ticks)?;
         let is_buyer_maker = extract_json_bool_field(data, "m").unwrap_or(false);
         let exchange_ts = extract_json_i64_field(data, "T").unwrap_or(0);
 
@@ -544,6 +557,26 @@ mod tests {
         assert_eq!(trade.trade_id, 5_933_014);
         assert!(trade.is_buyer_maker);
         assert!(trade.qty_ticks > 0);
+    }
+
+    #[test]
+    fn parse_book_ticker_uses_interned_symbol_without_copying_field_buffer() {
+        let cache = SymbolCache::new();
+        let payload = br#"{
+            "e":"bookTicker",
+            "s":"BTCUSDT",
+            "b":"50000.1",
+            "B":"1.5",
+            "a":"50000.2",
+            "A":"2.0",
+            "T":1700000000000
+        }"#;
+
+        let ticker =
+            BinanceMarketData::parse_book_ticker_static(payload, &cache, 99).expect("ticker parses");
+        assert_eq!(ticker.symbol.as_ref(), b"BTCUSDT");
+        assert_eq!(ticker.bid_qty_ticks, 150_000_000);
+        assert_eq!(ticker.ask_qty_ticks, 200_000_000);
     }
 
     #[test]
