@@ -6,25 +6,26 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
-   - Drift sampling and log summary.
-   - Drop counters exposed via health support.
+   - Stage timestamps in runtime health: `recv_ws_frame_ts`, `parsed_ts`, `state_updated_ts`, `signal_decided_ts`, `order_intent_enqueued_ts` (proxy until CP6 queue).
+   - Internal latency histograms (`samples/p50/p95/p99/max`) for ingest, decision, end-to-end.
+   - Runtime backlog depth counters (`binance`, `gate`, `signal`) exposed via health.
+   - Drift sampling and log summary retained.
 2. Done but must be reworked:
-   - Existing metrics are not stage-based and cannot explain internal p99 path.
+   - None.
 3. Missing and required:
-   - Stage timestamps: `recv_ws_frame_ts`, `parsed_ts`, `state_updated_ts`, `signal_decided_ts`, `order_intent_enqueued_ts`.
-   - Internal latency histograms (`p50/p95/p99/max`) for ingest, decision, end-to-end.
-   - Backlog depth counters for runtime channels.
-   - Single endpoint/page for baseline and before/after comparisons.
+   - Optional: persist baseline snapshots for automated before/after diffing (not required for CP0 exit).
 
 ## `HFT-CP1` SymbolId and Allocation Removal
 1. Done and not touched:
    - Price representation in ticks.
+   - Runtime uses `Bytes` keys instead of `String` in latest maps.
+   - `StrategySymbolIndex` introduced with stable `SymbolId`.
+   - Signal backlog and stage timestamps switched to `SymbolId` (no symbol cloning in pending queue path).
 2. Done but must be reworked:
-   - `String` symbol conversion in hot loops.
-   - `HashMap<String, ...>` in hot runtime segments.
+   - Strategy lookup path still calls `check_signal(&str)` and resolves symbol string by id.
 3. Missing and required:
-   - `SymbolId` + universe mapping.
-   - Array-style state (`Vec`/indexed storage) for books and pending processing.
+   - Extend `SymbolId` to connector/parse path (early mapping, no symbol bytes copy in hot parse).
+   - Replace latest book `HashMap<Bytes, ...>` with array-style state (`Vec`/indexed storage).
 
 ## `HFT-CP2` Lock-Free Strategy State
 1. Done and not touched:

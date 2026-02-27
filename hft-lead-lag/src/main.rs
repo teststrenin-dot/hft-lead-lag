@@ -28,13 +28,13 @@ mod trial_batch_protocol;
 mod trial_queue_io;
 use event_loop_core::{
     resolve_strategy_exchange_routing, EventLoopMetrics, EventLoopState, ExchangeSide,
-    StrategyExchangeRouting,
+    StrategyExchangeRouting, StrategySymbolIndex,
 };
 #[cfg(test)]
 use event_loop_ingest::ingest_latest_batch;
-use event_loop_ingest::{
-    process_exchange_batch, strategy_ticks_in_order, updated_symbols_from_batch, BatchIngestContext,
-};
+#[cfg(test)]
+use event_loop_ingest::strategy_ticks_in_order;
+use event_loop_ingest::{process_exchange_batch, updated_symbols_from_batch, BatchIngestContext};
 use event_loop_runtime::{run_event_loop, EventLoopRuntimeContext};
 use file_fingerprint::{
     file_fingerprint_changed, hash_content_deterministic, read_file_fingerprint, FileFingerprint,
@@ -95,8 +95,10 @@ fn rebuild_latest_map(
     first: hft_lead_lag::domain::BookTicker,
     drained: Vec<hft_lead_lag::domain::BookTicker>,
 ) -> std::collections::HashMap<bytes::Bytes, hft_lead_lag::domain::BookTicker> {
-    let mut batch_latest: std::collections::HashMap<bytes::Bytes, hft_lead_lag::domain::BookTicker> =
-        std::collections::HashMap::new();
+    let mut batch_latest: std::collections::HashMap<
+        bytes::Bytes,
+        hft_lead_lag::domain::BookTicker,
+    > = std::collections::HashMap::new();
     let first_symbol = first.symbol.clone();
     batch_latest.insert(first_symbol, first);
     for ticker in drained {

@@ -1,8 +1,7 @@
 use super::{
     BinanceMarketData, EventLoopState, ExchangeSide, GateMarketData, HealthState, MarketDataEvent,
-    RuntimeStrategy, ScreenerStore, StrategyExchangeRouting,
+    RuntimeStrategy, ScreenerStore, StrategyExchangeRouting, StrategySymbolIndex,
 };
-use bytes::Bytes;
 use hft_lead_lag::MarketDataStream;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -16,11 +15,22 @@ async fn handle_exchange_tick(
     drained: Vec<hft_lead_lag::domain::BookTicker>,
     context: &ExchangeTickContext<'_>,
 ) {
-    match state.process_exchange_result(side, result, drained, context.screener, context.ws_tx) {
+    match state.process_exchange_result(
+        side,
+        result,
+        drained,
+        context.strategy_symbol_index,
+        context.screener,
+        context.ws_tx,
+    ) {
         Ok(updated_symbols) => {
             side.mark_alive(context.health_state, EventLoopState::now_ms());
-            state.mark_pending_signal_symbols(&updated_symbols, context.strategy_symbol_set);
-            state.sync_stage_timestamps_to_health(&updated_symbols, context.health_state);
+            state.mark_pending_signal_symbols(&updated_symbols, context.strategy_symbol_index);
+            state.sync_stage_timestamps_to_health(
+                &updated_symbols,
+                context.strategy_symbol_index,
+                context.health_state,
+            );
             context
                 .health_state
                 .runtime_signal_backlog_depth
@@ -30,7 +40,7 @@ async fn handle_exchange_tick(
                     side,
                     context.strategy,
                     &updated_symbols,
-                    context.strategy_symbol_set,
+                    context.strategy_symbol_index,
                     context.strategy_exchange_routing,
                 )
                 .await;
@@ -44,7 +54,7 @@ async fn handle_exchange_tick(
 
 struct ExchangeTickContext<'a> {
     strategy: &'a dyn RuntimeStrategy,
-    strategy_symbol_set: &'a std::collections::HashSet<Bytes>,
+    strategy_symbol_index: &'a StrategySymbolIndex,
     strategy_exchange_routing: StrategyExchangeRouting,
     screener: &'a ScreenerStore,
     health_state: &'a HealthState,
@@ -70,13 +80,10 @@ pub(super) async fn run_event_loop(
         PORTFOLIO_REBALANCE_SCHEDULER_INTERVAL_MS,
     ));
     portfolio_rebalance_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let strategy_symbol_set: std::collections::HashSet<Bytes> = strategy_symbols
-        .iter()
-        .map(|symbol| Bytes::copy_from_slice(symbol.as_bytes()))
-        .collect();
+    let strategy_symbol_index = StrategySymbolIndex::new(strategy_symbols);
     let tick_context = ExchangeTickContext {
         strategy,
-        strategy_symbol_set: &strategy_symbol_set,
+        strategy_symbol_index: &strategy_symbol_index,
         strategy_exchange_routing: runtime_context.strategy_exchange_routing,
         screener: runtime_context.screener,
         health_state: runtime_context.health_state,
@@ -114,7 +121,13 @@ pub(super) async fn run_event_loop(
             }
 
             _ = state.signal_interval.tick() => {
-                state.handle_signal_tick(strategy, runtime_context.health_state).await;
+                state
+                    .handle_signal_tick(
+                        strategy,
+                        &strategy_symbol_index,
+                        runtime_context.health_state,
+                    )
+                    .await;
             }
 
             _ = portfolio_rebalance_interval.tick() => {

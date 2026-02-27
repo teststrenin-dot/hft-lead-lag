@@ -2,6 +2,7 @@ use super::{rebuild_latest_map, EventLoopMetrics, MarketDataEvent, ScreenerStore
 use bytes::Bytes;
 use std::collections::HashSet;
 
+#[cfg(test)]
 pub(super) fn strategy_ticks_in_order<'a>(
     strategy_symbols: &'a [&'a Bytes],
     latest: &'a std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,

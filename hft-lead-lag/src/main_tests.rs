@@ -903,21 +903,21 @@ async fn event_loop_state_process_exchange_result_updates_binance_map() {
     let mut state = EventLoopState::new();
     let screener = ScreenerStore::default();
     let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(8);
+    let strategy_symbol_index =
+        StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
 
     let updated_symbols = state
         .process_exchange_result(
             ExchangeSide::Binance,
             Ok(test_ticker("BTCUSDT", 100_000_000)),
             vec![test_ticker("ETHUSDT", 110_000_000)],
+            &strategy_symbol_index,
             &screener,
             Some(&ws_tx),
         )
         .expect("exchange result should parse");
 
-    assert_eq!(
-        updated_symbols,
-        vec![sym("BTCUSDT"), sym("ETHUSDT")]
-    );
+    assert_eq!(updated_symbols, vec![sym("BTCUSDT"), sym("ETHUSDT")]);
     assert_eq!(state.latest_bn.len(), 2);
     assert!(state.latest_gt.is_empty());
     assert_eq!(state.ticker_count, 2);
@@ -928,6 +928,7 @@ async fn event_loop_state_process_exchange_result_propagates_error() {
     let mut state = EventLoopState::new();
     let screener = ScreenerStore::default();
     let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(8);
+    let strategy_symbol_index = StrategySymbolIndex::new(&Vec::<String>::new());
 
     let result = state.process_exchange_result(
         ExchangeSide::Gate,
@@ -935,6 +936,7 @@ async fn event_loop_state_process_exchange_result_propagates_error() {
             "test".to_string(),
         )),
         Vec::new(),
+        &strategy_symbol_index,
         &screener,
         Some(&ws_tx),
     );
@@ -1042,11 +1044,7 @@ fn updated_symbols_from_batch_deduplicates_and_preserves_first_seen_order() {
     );
     assert_eq!(
         symbols,
-        vec![
-            sym("BTCUSDT"),
-            sym("ETHUSDT"),
-            sym("ADAUSDT")
-        ]
+        vec![sym("BTCUSDT"), sym("ETHUSDT"), sym("ADAUSDT")]
     );
 }
 
@@ -1500,8 +1498,8 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
         .insert(sym("ETHUSDT"), test_ticker("ETHUSDT", 100_000_000));
 
     let strategy = RecordingRuntimeStrategy::default();
-    let strategy_symbol_set: std::collections::HashSet<bytes::Bytes> =
-        [sym("BTCUSDT"), sym("ETHUSDT")].into_iter().collect();
+    let strategy_symbol_index =
+        StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     let updated_binance = vec![sym("BTCUSDT")];
     let updated_gate = vec![sym("ETHUSDT")];
 
@@ -1510,7 +1508,7 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
             ExchangeSide::Binance,
             &strategy,
             &updated_binance,
-            &strategy_symbol_set,
+            &strategy_symbol_index,
             StrategyExchangeRouting {
                 primary: ExchangeSide::Gate,
                 hedge: ExchangeSide::Binance,
@@ -1522,7 +1520,7 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
             ExchangeSide::Gate,
             &strategy,
             &updated_gate,
-            &strategy_symbol_set,
+            &strategy_symbol_index,
             StrategyExchangeRouting {
                 primary: ExchangeSide::Gate,
                 hedge: ExchangeSide::Binance,
@@ -1550,17 +1548,19 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
     let strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
 
-    let strategy_symbol_set: std::collections::HashSet<bytes::Bytes> =
-        [sym("BTCUSDT"), sym("ETHUSDT")].into_iter().collect();
+    let strategy_symbol_index =
+        StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     let updated = vec![
         sym("BTCUSDT"),
         sym("SOLUSDT"),
         sym("ETHUSDT"),
         sym("BTCUSDT"),
     ];
-    state.mark_pending_signal_symbols(&updated, &strategy_symbol_set);
+    state.mark_pending_signal_symbols(&updated, &strategy_symbol_index);
 
-    state.handle_signal_tick(&strategy, &health).await;
+    state
+        .handle_signal_tick(&strategy, &strategy_symbol_index, &health)
+        .await;
 
     let checked = strategy
         .checked_symbols
@@ -1575,8 +1575,11 @@ async fn handle_signal_tick_skips_when_no_pending_symbols() {
     let mut state = EventLoopState::new();
     let strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
+    let strategy_symbol_index = StrategySymbolIndex::new(&Vec::<String>::new());
 
-    state.handle_signal_tick(&strategy, &health).await;
+    state
+        .handle_signal_tick(&strategy, &strategy_symbol_index, &health)
+        .await;
 
     let checked = strategy
         .checked_symbols
@@ -1592,14 +1595,21 @@ async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
     let strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
     let total = SIGNAL_CHECK_BUDGET_PER_TICK + 2;
+    let symbols: Vec<String> = (0..total).map(|idx| format!("SYM{idx:04}")).collect();
+    let strategy_symbol_index = StrategySymbolIndex::new(&symbols);
 
     for idx in 0..total {
-        state
-            .pending_signal_symbols
-            .insert(sym(&format!("SYM{idx:04}")));
+        let symbol = format!("SYM{idx:04}");
+        state.pending_signal_symbols.insert(
+            strategy_symbol_index
+                .symbol_id(symbol.as_bytes())
+                .expect("symbol id exists"),
+        );
     }
 
-    state.handle_signal_tick(&strategy, &health).await;
+    state
+        .handle_signal_tick(&strategy, &strategy_symbol_index, &health)
+        .await;
     assert_eq!(state.pending_signal_symbols.len(), 2);
     let checked_after_first_tick = strategy
         .checked_symbols
@@ -1608,7 +1618,9 @@ async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
         .len();
     assert_eq!(checked_after_first_tick, SIGNAL_CHECK_BUDGET_PER_TICK);
 
-    state.handle_signal_tick(&strategy, &health).await;
+    state
+        .handle_signal_tick(&strategy, &strategy_symbol_index, &health)
+        .await;
     assert!(state.pending_signal_symbols.is_empty());
     let checked_after_second_tick = strategy
         .checked_symbols
