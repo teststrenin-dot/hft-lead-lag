@@ -130,7 +130,10 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
             max_us: state.health.runtime_ingest_max_us.load(Ordering::Relaxed),
         },
         decision: RuntimeLatencyStats {
-            samples: state.health.runtime_decision_samples.load(Ordering::Relaxed),
+            samples: state
+                .health
+                .runtime_decision_samples
+                .load(Ordering::Relaxed),
             p50_us: state.health.runtime_decision_p50_us.load(Ordering::Relaxed),
             p95_us: state.health.runtime_decision_p95_us.load(Ordering::Relaxed),
             p99_us: state.health.runtime_decision_p99_us.load(Ordering::Relaxed),
