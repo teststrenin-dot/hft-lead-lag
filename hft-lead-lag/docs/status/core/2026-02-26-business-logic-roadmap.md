@@ -20,7 +20,7 @@ Last sync: 2026-02-28 (`HFT-CP` re-baseline)
 | `HFT-CP0` Latency and Allocation Observatory | `In Progress` | `/health` exposes staged timestamps + latency snapshots + backlog gauges; final operator polish pending. |
 | `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Runtime/connector path is `SymbolId`-first with canonical id map builder, per-batch latest dedupe, and capacity fail-fast (no silent truncation). |
 | `HFT-CP2` Lock-Free Strategy State | `Completed` | Lead-lag strategy moved to single-owner state and sync `&mut self` runtime path; explicit event-loop queue boundary added for strategy updates; p99 evidence captured (`2026-02-28-cp2-lock-free-p99-evidence.md`). |
-| `HFT-CP3` Event-Driven Updated-Only Processing | `In Progress` | Updated flow is `Bytes`-based and no longer sorts string batches; `SymbolId` bitset path remains. |
+| `HFT-CP3` Event-Driven Updated-Only Processing | `In Progress` | Updated flow is `Bytes`-based, no string-sort path; pending signal store migrated to `SymbolId` bitset (`PendingSymbolSet`); clone-free strategy feed remains. |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Planned` | Fast parsing exists but symbol copy path remains in critical segments. |
 | `HFT-CP5` Deterministic Replay Harness | `Planned` | Full record/replay contract is not implemented. |
 | `HFT-CP6` Execution Fast Path | `Planned` | Order intent queue + non-blocking send SLA are not formalized. |

@@ -56,11 +56,11 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 ## `HFT-CP3` Event-Driven Updated-Only Processing
 1. Done and not touched:
    - Pending-symbol scheduling mechanism exists.
+   - Pending-symbol store is now `SymbolId` bitset-backed (`PendingSymbolSet`), replacing tree-based pending queue.
 2. Done but must be reworked:
-   - `BTreeSet<String>` pending store.
-   - Per-batch string sort/dedup and tick cloning.
+   - Per-batch tick cloning in strategy feed path.
 3. Missing and required:
-   - Bitset/ID-based updated-symbol flow (`SymbolId`-first path).
+   - Complete clone-elimination strategy update path across ingest -> strategy apply.
    - Processing proportional to update rate, not universe size.
 
 ## `HFT-CP4` Minimal-Copy WS Parse Path

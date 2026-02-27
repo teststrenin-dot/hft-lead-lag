@@ -29,6 +29,92 @@ struct SymbolStageTimestamps {
     state_updated_ts_ns: i64,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct PendingSymbolSet {
+    words: Vec<u64>,
+    len: usize,
+    next_hint_word: usize,
+}
+
+impl PendingSymbolSet {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn insert(&mut self, symbol_id: SymbolId) {
+        let symbol_id = symbol_id as usize;
+        let word_idx = symbol_id / 64;
+        let bit_offset = symbol_id % 64;
+        if self.words.len() <= word_idx {
+            self.words.resize(word_idx + 1, 0);
+        }
+        let mask = 1u64 << bit_offset;
+        let word = &mut self.words[word_idx];
+        if (*word & mask) != 0 {
+            return;
+        }
+        *word |= mask;
+        self.len = self.len.saturating_add(1);
+        if word_idx < self.next_hint_word {
+            self.next_hint_word = word_idx;
+        }
+    }
+
+    pub(super) fn pop_first(&mut self) -> Option<SymbolId> {
+        if self.len == 0 {
+            self.next_hint_word = 0;
+            return None;
+        }
+
+        let start_word = self.next_hint_word.min(self.words.len());
+        for word_idx in start_word..self.words.len() {
+            let word = self.words[word_idx];
+            if word == 0 {
+                continue;
+            }
+
+            let bit_offset = word.trailing_zeros() as usize;
+            self.words[word_idx] &= !(1u64 << bit_offset);
+            self.len = self.len.saturating_sub(1);
+            self.next_hint_word = if self.words[word_idx] == 0 {
+                word_idx.saturating_add(1)
+            } else {
+                word_idx
+            };
+            return Some(((word_idx * 64) + bit_offset) as SymbolId);
+        }
+
+        for word_idx in 0..start_word {
+            let word = self.words[word_idx];
+            if word == 0 {
+                continue;
+            }
+
+            let bit_offset = word.trailing_zeros() as usize;
+            self.words[word_idx] &= !(1u64 << bit_offset);
+            self.len = self.len.saturating_sub(1);
+            self.next_hint_word = if self.words[word_idx] == 0 {
+                word_idx.saturating_add(1)
+            } else {
+                word_idx
+            };
+            return Some(((word_idx * 64) + bit_offset) as SymbolId);
+        }
+
+        self.next_hint_word = 0;
+        self.len = 0;
+        None
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.len
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct EventLoopMetrics {
     drift_samples: Vec<i64>,
@@ -155,7 +241,7 @@ pub(super) struct EventLoopState {
     latest_bn_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
     latest_gt_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
     pending_strategy_updates: VecDeque<(ExchangeSide, SymbolId)>,
-    pub(super) pending_signal_symbols: std::collections::BTreeSet<SymbolId>,
+    pub(super) pending_signal_symbols: PendingSymbolSet,
     symbol_stage_timestamps: std::collections::HashMap<SymbolId, SymbolStageTimestamps>,
     pub(super) metrics: EventLoopMetrics,
 }
@@ -362,7 +448,7 @@ impl EventLoopState {
             latest_bn_by_symbol_id: Vec::new(),
             latest_gt_by_symbol_id: Vec::new(),
             pending_strategy_updates: VecDeque::new(),
-            pending_signal_symbols: std::collections::BTreeSet::new(),
+            pending_signal_symbols: PendingSymbolSet::new(),
             symbol_stage_timestamps: std::collections::HashMap::new(),
             metrics: EventLoopMetrics::new(),
         }
@@ -731,5 +817,34 @@ mod tests {
         let ids = index.symbol_ids(&updated);
 
         assert_eq!(ids, vec![1, 0]);
+    }
+
+    #[test]
+    fn pending_symbol_set_dedupes_and_tracks_len() {
+        let mut pending = PendingSymbolSet::new();
+        assert_eq!(pending.len(), 0);
+        assert!(pending.is_empty());
+
+        pending.insert(3);
+        pending.insert(1);
+        pending.insert(3);
+
+        assert_eq!(pending.len(), 2);
+        assert!(!pending.is_empty());
+    }
+
+    #[test]
+    fn pending_symbol_set_pops_in_symbol_id_order_and_clears_bits() {
+        let mut pending = PendingSymbolSet::new();
+        pending.insert(9);
+        pending.insert(2);
+        pending.insert(5);
+
+        assert_eq!(pending.pop_first(), Some(2));
+        assert_eq!(pending.pop_first(), Some(5));
+        assert_eq!(pending.pop_first(), Some(9));
+        assert_eq!(pending.pop_first(), None);
+        assert!(pending.is_empty());
+        assert_eq!(pending.len(), 0);
     }
 }
