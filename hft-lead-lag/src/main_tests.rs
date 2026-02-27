@@ -1666,6 +1666,49 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
 }
 
 #[tokio::test]
+async fn strategy_update_queue_enqueues_and_flushes_updates() {
+    let mut state = EventLoopState::new();
+    let mut strategy = RecordingRuntimeStrategy::default();
+    let strategy_symbol_index =
+        StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    let screener = ScreenerStore::default();
+
+    let binance = state
+        .process_exchange_result(
+            ExchangeSide::Binance,
+            Ok(test_ticker("BTCUSDT", 100_000_000)),
+            Vec::new(),
+            &strategy_symbol_index,
+            &screener,
+            None,
+        )
+        .expect("binance result");
+    let gate = state
+        .process_exchange_result(
+            ExchangeSide::Gate,
+            Ok(test_ticker("ETHUSDT", 100_000_000)),
+            Vec::new(),
+            &strategy_symbol_index,
+            &screener,
+            None,
+        )
+        .expect("gate result");
+
+    state.enqueue_strategy_updates(ExchangeSide::Binance, &binance.updated_strategy_symbol_ids);
+    state.enqueue_strategy_updates(ExchangeSide::Gate, &gate.updated_strategy_symbol_ids);
+    state.flush_strategy_updates(
+        &mut strategy,
+        StrategyExchangeRouting {
+            primary: ExchangeSide::Gate,
+            hedge: ExchangeSide::Binance,
+        },
+    );
+
+    assert_eq!(strategy.primary_symbols, vec!["ETHUSDT".to_string()]);
+    assert_eq!(strategy.hedge_symbols, vec!["BTCUSDT".to_string()]);
+}
+
+#[tokio::test]
 async fn handle_signal_tick_checks_only_pending_symbols() {
     let mut state = EventLoopState::new();
     let mut strategy = RecordingRuntimeStrategy::default();

@@ -27,6 +27,7 @@ async fn handle_exchange_tick(
         Ok(processed) => {
             side.mark_alive(context.health_state, EventLoopState::now_ms());
             state.mark_pending_signal_symbols(&processed.updated_strategy_symbol_ids);
+            state.enqueue_strategy_updates(side, &processed.updated_strategy_symbol_ids);
             state.sync_stage_timestamps_to_health(
                 &processed.updated_strategy_symbol_ids,
                 context.health_state,
@@ -35,12 +36,7 @@ async fn handle_exchange_tick(
                 .health_state
                 .runtime_signal_backlog_depth
                 .store(state.signal_backlog_depth(), Ordering::Relaxed);
-            state.update_strategy_books(
-                side,
-                strategy,
-                &processed.updated_strategy_symbol_ids,
-                context.strategy_exchange_routing,
-            );
+            state.flush_strategy_updates(strategy, context.strategy_exchange_routing);
         }
         Err(e) => {
             side.maybe_mark_disconnected(context.health_state, &e);

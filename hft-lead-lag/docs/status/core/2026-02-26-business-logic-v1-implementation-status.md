@@ -25,7 +25,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 |---|---|---|---|
 | `HFT-CP0` Latency and Allocation Observatory | `In Progress` | `/health` now includes staged timestamps, ingest/decision/e2e latency stats, runtime backlog depths | `order_intent_enqueued_ts` is currently proxy-level until CP6 execution queue is live |
 | `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Hot-path ingest now dedupes latest-per-symbol, runtime consumes connector-attached `strategy_symbol_id`, and connectors/runtime use canonical `symbol->id` builder with fail-fast capacity guard | None |
-| `HFT-CP2` Lock-Free Strategy State | `In Progress` | `LeadLagStrategy` migrated to single-owner state (no `RwLock/Mutex` in hot path); runtime strategy interface is `&mut self` sync | Need queue-fed boundary contract + p99 stabilization evidence |
+| `HFT-CP2` Lock-Free Strategy State | `In Progress` | `LeadLagStrategy` migrated to single-owner state (no `RwLock/Mutex` in hot path); runtime strategy interface is `&mut self` sync; strategy updates now pass through explicit event-loop queue boundary | Need p99 stabilization evidence |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `In Progress` | Updated-symbol batch now de-duplicates without sort and flows as `Bytes` | Still needs `SymbolId` bitset/array path and clone elimination in strategy feed |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Partial` | ticks and fast parse are in place | Symbol bytes are still copied/converted in hot segments |
 | `HFT-CP5` Deterministic Replay Harness | `Planned` | N/A | No raw feed recorder + deterministic replay equivalence checks |

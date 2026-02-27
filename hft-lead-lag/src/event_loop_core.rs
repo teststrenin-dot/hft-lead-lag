@@ -8,6 +8,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{error, info, warn};
@@ -153,6 +154,7 @@ pub(super) struct EventLoopState {
     pub(super) signal_interval: tokio::time::Interval,
     latest_bn_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
     latest_gt_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
+    pending_strategy_updates: VecDeque<(ExchangeSide, SymbolId)>,
     pub(super) pending_signal_symbols: std::collections::BTreeSet<SymbolId>,
     symbol_stage_timestamps: std::collections::HashMap<SymbolId, SymbolStageTimestamps>,
     pub(super) metrics: EventLoopMetrics,
@@ -359,6 +361,7 @@ impl EventLoopState {
             signal_interval,
             latest_bn_by_symbol_id: Vec::new(),
             latest_gt_by_symbol_id: Vec::new(),
+            pending_strategy_updates: VecDeque::new(),
             pending_signal_symbols: std::collections::BTreeSet::new(),
             symbol_stage_timestamps: std::collections::HashMap::new(),
             metrics: EventLoopMetrics::new(),
@@ -534,6 +537,31 @@ impl EventLoopState {
 
     pub(super) fn signal_backlog_depth(&self) -> u64 {
         self.pending_signal_symbols.len() as u64
+    }
+
+    pub(super) fn enqueue_strategy_updates(
+        &mut self,
+        side: ExchangeSide,
+        updated_strategy_symbol_ids: &[SymbolId],
+    ) {
+        for symbol_id in updated_strategy_symbol_ids {
+            self.pending_strategy_updates.push_back((side, *symbol_id));
+        }
+    }
+
+    pub(super) fn flush_strategy_updates(
+        &mut self,
+        strategy: &mut dyn RuntimeStrategy,
+        strategy_exchange_routing: StrategyExchangeRouting,
+    ) {
+        while let Some((side, symbol_id)) = self.pending_strategy_updates.pop_front() {
+            self.update_strategy_books(
+                side,
+                strategy,
+                std::slice::from_ref(&symbol_id),
+                strategy_exchange_routing,
+            );
+        }
     }
 
     pub(super) fn handle_signal_tick(
