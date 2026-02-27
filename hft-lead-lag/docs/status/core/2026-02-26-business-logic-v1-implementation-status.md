@@ -23,7 +23,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 ## 3) HFT checkpoint progress
 | Checkpoint | Status | Evidence | Main gap |
 |---|---|---|---|
-| `HFT-CP0` Latency and Allocation Observatory | `Partial` | drift stats + drop counters in health/status path | Missing staged timestamps, decision/e2e histograms, backlog depth endpoint |
+| `HFT-CP0` Latency and Allocation Observatory | `In Progress` | `/health` now includes staged timestamps, ingest/decision/e2e latency stats, runtime backlog depths | `order_intent_enqueued_ts` is currently proxy-level until CP6 execution queue is live |
 | `HFT-CP1` SymbolId and Allocation Removal | `Planned` | `lead_lag.rs`, `event_loop_ingest.rs`, `event_loop_core.rs` still string-heavy | Need `SymbolId` universe and array-state conversion |
 | `HFT-CP2` Lock-Free Strategy State | `Planned` | `LeadLagStrategy` has `Arc<RwLock<...>>` and `Arc<Mutex<...>>` | Need single-owner strategy state with queue-fed updates |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Partial` | Pending symbols queue exists | Still clones/sorts strings and clones tick structs in hot loop |
@@ -43,7 +43,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 3. Any new feature that introduces Python into runtime data-plane.
 
 ## 6) Top open gaps (priority)
-1. `P0`: close `HFT-CP0` with explicit internal latency and backlog metrics.
+1. `P0`: validate `HFT-CP0` metrics under live load and finalize dashboard/read-model for operator use.
 2. `P0`: implement `HFT-CP1` and remove per-tick symbol allocations.
 3. `P0`: implement `HFT-CP2` and remove lock-driven hot-path jitter.
 4. `P1`: close `HFT-CP3` and run updated-symbol-only path at scale.

@@ -3,6 +3,7 @@ use super::{
     RuntimeStrategy, ScreenerStore, StrategyExchangeRouting,
 };
 use hft_lead_lag::MarketDataStream;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 const PORTFOLIO_REBALANCE_SCHEDULER_INTERVAL_MS: u64 = 2 * 60 * 1000;
@@ -18,6 +19,11 @@ async fn handle_exchange_tick(
         Ok(updated_symbols) => {
             side.mark_alive(context.health_state, EventLoopState::now_ms());
             state.mark_pending_signal_symbols(&updated_symbols, context.strategy_symbol_set);
+            state.sync_stage_timestamps_to_health(&updated_symbols, context.health_state);
+            context
+                .health_state
+                .runtime_signal_backlog_depth
+                .store(state.signal_backlog_depth(), Ordering::Relaxed);
             state
                 .update_strategy_books(
                     side,
@@ -84,6 +90,10 @@ pub(super) async fn run_event_loop(
                     binance.drain_book_tickers(),
                     &tick_context,
                 ).await;
+                runtime_context
+                    .health_state
+                    .runtime_binance_msg_queue_depth
+                    .store(binance.msg_queue_depth() as u64, Ordering::Relaxed);
             }
 
             result = gate.recv_book_ticker() => {
@@ -94,10 +104,14 @@ pub(super) async fn run_event_loop(
                     gate.drain_book_tickers(),
                     &tick_context,
                 ).await;
+                runtime_context
+                    .health_state
+                    .runtime_gate_msg_queue_depth
+                    .store(gate.msg_queue_depth() as u64, Ordering::Relaxed);
             }
 
             _ = state.signal_interval.tick() => {
-                state.handle_signal_tick(strategy).await;
+                state.handle_signal_tick(strategy, runtime_context.health_state).await;
             }
 
             _ = portfolio_rebalance_interval.tick() => {

@@ -5,7 +5,10 @@ use crate::infrastructure::db::DbWriter;
 use crate::infrastructure::enrichment;
 use crate::infrastructure::exchanges::{BinanceMarketData, GateMarketData};
 
-use super::{DbSaturationHealth, HealthResponse, HttpState};
+use super::{
+    DbSaturationHealth, HealthResponse, HttpState, RuntimeBacklogDepth, RuntimeLatencySnapshot,
+    RuntimeLatencyStats, RuntimeStageTimestamps,
+};
 
 pub(super) const FALLBACK_ROWS_TTL_MS: i64 = 5_000;
 
@@ -96,6 +99,80 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
     let db_dropped_batches = DbWriter::dropped_batches();
     let db_overflowed_batches = DbWriter::overflowed_batches();
     let db_saturation = evaluate_db_saturation_health(db_dropped_batches, db_overflowed_batches);
+    let runtime_stage_timestamps = RuntimeStageTimestamps {
+        recv_ws_frame_ts_ns: state
+            .health
+            .runtime_last_recv_ws_frame_ts_ns
+            .load(Ordering::Relaxed),
+        parsed_ts_ns: state
+            .health
+            .runtime_last_parsed_ts_ns
+            .load(Ordering::Relaxed),
+        state_updated_ts_ns: state
+            .health
+            .runtime_last_state_updated_ts_ns
+            .load(Ordering::Relaxed),
+        signal_decided_ts_ns: state
+            .health
+            .runtime_last_signal_decided_ts_ns
+            .load(Ordering::Relaxed),
+        order_intent_enqueued_ts_ns: state
+            .health
+            .runtime_last_order_intent_enqueued_ts_ns
+            .load(Ordering::Relaxed),
+    };
+    let runtime_latency_us = RuntimeLatencySnapshot {
+        ingest: RuntimeLatencyStats {
+            samples: state.health.runtime_ingest_samples.load(Ordering::Relaxed),
+            p50_us: state.health.runtime_ingest_p50_us.load(Ordering::Relaxed),
+            p95_us: state.health.runtime_ingest_p95_us.load(Ordering::Relaxed),
+            p99_us: state.health.runtime_ingest_p99_us.load(Ordering::Relaxed),
+            max_us: state.health.runtime_ingest_max_us.load(Ordering::Relaxed),
+        },
+        decision: RuntimeLatencyStats {
+            samples: state.health.runtime_decision_samples.load(Ordering::Relaxed),
+            p50_us: state.health.runtime_decision_p50_us.load(Ordering::Relaxed),
+            p95_us: state.health.runtime_decision_p95_us.load(Ordering::Relaxed),
+            p99_us: state.health.runtime_decision_p99_us.load(Ordering::Relaxed),
+            max_us: state.health.runtime_decision_max_us.load(Ordering::Relaxed),
+        },
+        end_to_end: RuntimeLatencyStats {
+            samples: state
+                .health
+                .runtime_end_to_end_samples
+                .load(Ordering::Relaxed),
+            p50_us: state
+                .health
+                .runtime_end_to_end_p50_us
+                .load(Ordering::Relaxed),
+            p95_us: state
+                .health
+                .runtime_end_to_end_p95_us
+                .load(Ordering::Relaxed),
+            p99_us: state
+                .health
+                .runtime_end_to_end_p99_us
+                .load(Ordering::Relaxed),
+            max_us: state
+                .health
+                .runtime_end_to_end_max_us
+                .load(Ordering::Relaxed),
+        },
+    };
+    let runtime_backlog_depth = RuntimeBacklogDepth {
+        binance_msg_queue_depth: state
+            .health
+            .runtime_binance_msg_queue_depth
+            .load(Ordering::Relaxed),
+        gate_msg_queue_depth: state
+            .health
+            .runtime_gate_msg_queue_depth
+            .load(Ordering::Relaxed),
+        signal_backlog_depth: state
+            .health
+            .runtime_signal_backlog_depth
+            .load(Ordering::Relaxed),
+    };
 
     let mut issues = Vec::new();
     let mut warnings = Vec::new();
@@ -166,6 +243,9 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
             db_overflowed_batches,
             db_dropped_batch_budget: DbWriter::dropped_batch_budget(),
             db_overflow_warn_threshold: DbWriter::overflow_warn_threshold(),
+            runtime_stage_timestamps,
+            runtime_latency_us,
+            runtime_backlog_depth,
             issues,
             warnings,
         },

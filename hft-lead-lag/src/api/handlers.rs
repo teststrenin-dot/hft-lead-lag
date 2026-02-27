@@ -77,8 +77,43 @@ pub(crate) struct HealthResponse {
     db_overflowed_batches: u64,
     db_dropped_batch_budget: u64,
     db_overflow_warn_threshold: u64,
+    runtime_stage_timestamps: RuntimeStageTimestamps,
+    runtime_latency_us: RuntimeLatencySnapshot,
+    runtime_backlog_depth: RuntimeBacklogDepth,
     issues: Vec<&'static str>,
     warnings: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RuntimeStageTimestamps {
+    recv_ws_frame_ts_ns: i64,
+    parsed_ts_ns: i64,
+    state_updated_ts_ns: i64,
+    signal_decided_ts_ns: i64,
+    order_intent_enqueued_ts_ns: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RuntimeLatencyStats {
+    samples: u64,
+    p50_us: u64,
+    p95_us: u64,
+    p99_us: u64,
+    max_us: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RuntimeLatencySnapshot {
+    ingest: RuntimeLatencyStats,
+    decision: RuntimeLatencyStats,
+    end_to_end: RuntimeLatencyStats,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RuntimeBacklogDepth {
+    binance_msg_queue_depth: u64,
+    gate_msg_queue_depth: u64,
+    signal_backlog_depth: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

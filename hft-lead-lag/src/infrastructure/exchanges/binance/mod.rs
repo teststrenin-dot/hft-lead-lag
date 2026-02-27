@@ -116,6 +116,11 @@ impl BinanceMarketData {
         latest.into_values().collect()
     }
 
+    /// Current bounded WS message backlog depth.
+    pub fn msg_queue_depth(&self) -> usize {
+        self.msg_rx.as_ref().map(|rx| rx.len()).unwrap_or(0)
+    }
+
     pub fn set_credentials(&mut self, _api_key: String, _api_secret: String) {}
 
     fn build_book_ticker_subscription(symbols: &[&str]) -> String {

@@ -17,7 +17,7 @@ Last sync: 2026-02-28 (`HFT-CP` re-baseline)
 ## Checkpoint Status (current baseline)
 | Checkpoint | Status | Notes |
 |---|---|---|
-| `HFT-CP0` Latency and Allocation Observatory | `In Progress` | Partial drift/drop telemetry exists; full staged timestamps and one-shot p99 endpoint missing. |
+| `HFT-CP0` Latency and Allocation Observatory | `In Progress` | `/health` exposes staged timestamps + latency snapshots + backlog gauges; final operator polish pending. |
 | `HFT-CP1` SymbolId and Allocation Removal | `Planned` | Hot path still uses `String` and string-key maps in multiple loops. |
 | `HFT-CP2` Lock-Free Strategy State | `Planned` | Lead-lag strategy still lock-based (`RwLock`/`Mutex`). |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Planned` | Updated-set exists, but still string-heavy with cloning and sort/dedup overhead. |

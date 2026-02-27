@@ -7,9 +7,28 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{error, info, warn};
 
+#[derive(Debug, Clone, Copy, Default)]
+struct LatencyStatsSnapshot {
+    samples: u64,
+    p50_us: u64,
+    p95_us: u64,
+    p99_us: u64,
+    max_us: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SymbolStageTimestamps {
+    recv_ws_frame_ts_ns: i64,
+    parsed_ts_ns: i64,
+    state_updated_ts_ns: i64,
+}
+
 #[derive(Debug)]
 pub(super) struct EventLoopMetrics {
     drift_samples: Vec<i64>,
+    ingest_latency_us: Vec<u64>,
+    decision_latency_us: Vec<u64>,
+    end_to_end_latency_us: Vec<u64>,
     last_status_ticker_count: usize,
 }
 
@@ -17,6 +36,9 @@ impl EventLoopMetrics {
     pub(super) fn new() -> Self {
         Self {
             drift_samples: Vec::with_capacity(8192),
+            ingest_latency_us: Vec::with_capacity(8192),
+            decision_latency_us: Vec::with_capacity(8192),
+            end_to_end_latency_us: Vec::with_capacity(8192),
             last_status_ticker_count: 0,
         }
     }
@@ -47,6 +69,72 @@ impl EventLoopMetrics {
         )
     }
 
+    pub(super) fn record_ingest_latency_ns(&mut self, recv_ws_frame_ts_ns: i64, parsed_ts_ns: i64) {
+        if recv_ws_frame_ts_ns <= 0 || parsed_ts_ns <= recv_ws_frame_ts_ns {
+            return;
+        }
+        self.ingest_latency_us.push(
+            (parsed_ts_ns.saturating_sub(recv_ws_frame_ts_ns) as u64) / 1_000,
+        );
+    }
+
+    pub(super) fn record_decision_latency_ns(
+        &mut self,
+        state_updated_ts_ns: i64,
+        signal_decided_ts_ns: i64,
+    ) {
+        if state_updated_ts_ns <= 0 || signal_decided_ts_ns <= state_updated_ts_ns {
+            return;
+        }
+        self.decision_latency_us
+            .push((signal_decided_ts_ns.saturating_sub(state_updated_ts_ns) as u64) / 1_000);
+    }
+
+    pub(super) fn record_end_to_end_latency_ns(
+        &mut self,
+        recv_ws_frame_ts_ns: i64,
+        signal_decided_ts_ns: i64,
+    ) {
+        if recv_ws_frame_ts_ns <= 0 || signal_decided_ts_ns <= recv_ws_frame_ts_ns {
+            return;
+        }
+        self.end_to_end_latency_us
+            .push((signal_decided_ts_ns.saturating_sub(recv_ws_frame_ts_ns) as u64) / 1_000);
+    }
+
+    fn latency_snapshot_and_reset(samples: &mut Vec<u64>) -> LatencyStatsSnapshot {
+        if samples.is_empty() {
+            return LatencyStatsSnapshot::default();
+        }
+        samples.sort_unstable();
+        let n = samples.len();
+        let p50 = samples[n / 2];
+        let p95 = samples[n * 95 / 100];
+        let p99 = samples[n * 99 / 100];
+        let max = samples[n - 1];
+        samples.clear();
+        LatencyStatsSnapshot {
+            samples: n as u64,
+            p50_us: p50,
+            p95_us: p95,
+            p99_us: p99,
+            max_us: max,
+        }
+    }
+
+    fn latency_snapshots_and_reset(
+        &mut self,
+    ) -> (
+        LatencyStatsSnapshot,
+        LatencyStatsSnapshot,
+        LatencyStatsSnapshot,
+    ) {
+        let ingest = Self::latency_snapshot_and_reset(&mut self.ingest_latency_us);
+        let decision = Self::latency_snapshot_and_reset(&mut self.decision_latency_us);
+        let end_to_end = Self::latency_snapshot_and_reset(&mut self.end_to_end_latency_us);
+        (ingest, decision, end_to_end)
+    }
+
     pub(super) fn snapshot_and_roll_status(&mut self, ticker_count: usize) -> usize {
         let interval_tickers = ticker_count.saturating_sub(self.last_status_ticker_count);
         self.last_status_ticker_count = ticker_count;
@@ -62,6 +150,7 @@ pub(super) struct EventLoopState {
     pub(super) latest_bn: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
     pub(super) latest_gt: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
     pub(super) pending_signal_symbols: std::collections::BTreeSet<String>,
+    symbol_stage_timestamps: std::collections::HashMap<String, SymbolStageTimestamps>,
     pub(super) metrics: EventLoopMetrics,
 }
 
@@ -196,6 +285,7 @@ impl EventLoopState {
             latest_bn: std::collections::HashMap::new(),
             latest_gt: std::collections::HashMap::new(),
             pending_signal_symbols: std::collections::BTreeSet::new(),
+            symbol_stage_timestamps: std::collections::HashMap::new(),
             metrics: EventLoopMetrics::new(),
         }
     }
@@ -207,6 +297,13 @@ impl EventLoopState {
             .as_millis() as i64
     }
 
+    pub(super) fn now_ns() -> i64 {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i64
+    }
+
     pub(super) fn process_exchange_result(
         &mut self,
         side: ExchangeSide,
@@ -215,6 +312,7 @@ impl EventLoopState {
         screener: &ScreenerStore,
         ws_tx: Option<&tokio::sync::broadcast::Sender<MarketDataEvent>>,
     ) -> Result<Vec<String>, hft_lead_lag::domain::ExchangeError> {
+        let parsed_ts_ns = Self::now_ns();
         let ticker = result?;
         let updated_symbols = updated_symbols_from_batch(&ticker, &drained);
         let mut ctx = BatchIngestContext {
@@ -233,7 +331,62 @@ impl EventLoopState {
                 process_exchange_batch(&mut self.latest_gt, ticker, drained, &mut ctx)
             }
         }
+        let state_updated_ts_ns = Self::now_ns();
+        self.record_stage_timestamps_for_batch(side, &updated_symbols, parsed_ts_ns, state_updated_ts_ns);
         Ok(updated_symbols)
+    }
+
+    fn record_stage_timestamps_for_batch(
+        &mut self,
+        side: ExchangeSide,
+        updated_symbols: &[String],
+        parsed_ts_ns: i64,
+        state_updated_ts_ns: i64,
+    ) {
+        let latest = match side {
+            ExchangeSide::Binance => &self.latest_bn,
+            ExchangeSide::Gate => &self.latest_gt,
+        };
+
+        for symbol in updated_symbols {
+            let Some(ticker) = latest.get(symbol) else {
+                continue;
+            };
+
+            let recv_ws_frame_ts_ns = ticker.local_ts_ns;
+            self.metrics
+                .record_ingest_latency_ns(recv_ws_frame_ts_ns, parsed_ts_ns);
+
+            self.symbol_stage_timestamps.insert(
+                symbol.clone(),
+                SymbolStageTimestamps {
+                    recv_ws_frame_ts_ns,
+                    parsed_ts_ns,
+                    state_updated_ts_ns,
+                },
+            );
+        }
+    }
+
+    pub(super) fn sync_stage_timestamps_to_health(
+        &self,
+        updated_symbols: &[String],
+        health: &HealthState,
+    ) {
+        for symbol in updated_symbols {
+            let Some(stages) = self.symbol_stage_timestamps.get(symbol) else {
+                continue;
+            };
+            health
+                .runtime_last_recv_ws_frame_ts_ns
+                .store(stages.recv_ws_frame_ts_ns, Ordering::Relaxed);
+            health
+                .runtime_last_parsed_ts_ns
+                .store(stages.parsed_ts_ns, Ordering::Relaxed);
+            health
+                .runtime_last_state_updated_ts_ns
+                .store(stages.state_updated_ts_ns, Ordering::Relaxed);
+        }
     }
 
     pub(super) async fn update_strategy_books(
@@ -286,17 +439,42 @@ impl EventLoopState {
         }
     }
 
-    pub(super) async fn handle_signal_tick(&mut self, strategy: &dyn RuntimeStrategy) {
+    pub(super) fn signal_backlog_depth(&self) -> u64 {
+        self.pending_signal_symbols.len() as u64
+    }
+
+    pub(super) async fn handle_signal_tick(
+        &mut self,
+        strategy: &dyn RuntimeStrategy,
+        health: &HealthState,
+    ) {
         if self.pending_signal_symbols.is_empty() {
-            self.maybe_log_status();
+            self.maybe_log_status(health);
             return;
         }
         for _ in 0..SIGNAL_CHECK_BUDGET_PER_TICK {
             let Some(symbol) = self.pending_signal_symbols.pop_first() else {
                 break;
             };
-            if let Some(signal) = strategy.check_signal(&symbol).await {
+            let signal = strategy.check_signal(&symbol).await;
+            let signal_decided_ts_ns = Self::now_ns();
+            health
+                .runtime_last_signal_decided_ts_ns
+                .store(signal_decided_ts_ns, Ordering::Relaxed);
+
+            if let Some(stages) = self.symbol_stage_timestamps.remove(&symbol) {
+                self.metrics
+                    .record_decision_latency_ns(stages.state_updated_ts_ns, signal_decided_ts_ns);
+                self.metrics
+                    .record_end_to_end_latency_ns(stages.recv_ws_frame_ts_ns, signal_decided_ts_ns);
+            }
+
+            if let Some(signal) = signal {
                 self.signal_count += 1;
+                // Proxy for CP0 until execution queue is introduced in CP6.
+                health
+                    .runtime_last_order_intent_enqueued_ts_ns
+                    .store(signal_decided_ts_ns, Ordering::Relaxed);
                 info!(
                     "{} signal #{}: {} | spread={:.2}bps | dir={} | bid_ask={:.2}bps ask_bid={:.2}bps | {}",
                     signal.strategy,
@@ -310,16 +488,78 @@ impl EventLoopState {
                 );
             }
         }
-        self.maybe_log_status();
+        health
+            .runtime_signal_backlog_depth
+            .store(self.signal_backlog_depth(), Ordering::Relaxed);
+        self.maybe_log_status(health);
     }
 
-    fn maybe_log_status(&mut self) {
+    fn maybe_log_status(&mut self, health: &HealthState) {
         if self.last_status_at.elapsed() >= Duration::from_secs(5) {
             let interval_tickers = self.metrics.snapshot_and_roll_status(self.ticker_count);
             let drift_stats = self.metrics.drift_stats_string_and_reset();
+            let (ingest, decision, end_to_end) = self.metrics.latency_snapshots_and_reset();
+
+            health
+                .runtime_ingest_samples
+                .store(ingest.samples, Ordering::Relaxed);
+            health
+                .runtime_ingest_p50_us
+                .store(ingest.p50_us, Ordering::Relaxed);
+            health
+                .runtime_ingest_p95_us
+                .store(ingest.p95_us, Ordering::Relaxed);
+            health
+                .runtime_ingest_p99_us
+                .store(ingest.p99_us, Ordering::Relaxed);
+            health
+                .runtime_ingest_max_us
+                .store(ingest.max_us, Ordering::Relaxed);
+
+            health
+                .runtime_decision_samples
+                .store(decision.samples, Ordering::Relaxed);
+            health
+                .runtime_decision_p50_us
+                .store(decision.p50_us, Ordering::Relaxed);
+            health
+                .runtime_decision_p95_us
+                .store(decision.p95_us, Ordering::Relaxed);
+            health
+                .runtime_decision_p99_us
+                .store(decision.p99_us, Ordering::Relaxed);
+            health
+                .runtime_decision_max_us
+                .store(decision.max_us, Ordering::Relaxed);
+
+            health
+                .runtime_end_to_end_samples
+                .store(end_to_end.samples, Ordering::Relaxed);
+            health
+                .runtime_end_to_end_p50_us
+                .store(end_to_end.p50_us, Ordering::Relaxed);
+            health
+                .runtime_end_to_end_p95_us
+                .store(end_to_end.p95_us, Ordering::Relaxed);
+            health
+                .runtime_end_to_end_p99_us
+                .store(end_to_end.p99_us, Ordering::Relaxed);
+            health
+                .runtime_end_to_end_max_us
+                .store(end_to_end.max_us, Ordering::Relaxed);
+
             info!(
-                "Status: tickers={} (+{}/5s) signals={} drift=[{}]",
-                self.ticker_count, interval_tickers, self.signal_count, drift_stats
+                "Status: tickers={} (+{}/5s) signals={} drift=[{}] lat_us[ingest:samples={} p99={} decision:samples={} p99={} e2e:samples={} p99={}]",
+                self.ticker_count,
+                interval_tickers,
+                self.signal_count,
+                drift_stats,
+                ingest.samples,
+                ingest.p99_us,
+                decision.samples,
+                decision.p99_us,
+                end_to_end.samples,
+                end_to_end.p99_us
             );
             self.last_status_at = Instant::now();
         }

@@ -1540,6 +1540,7 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
 async fn handle_signal_tick_checks_only_pending_symbols() {
     let mut state = EventLoopState::new();
     let strategy = RecordingRuntimeStrategy::default();
+    let health = HealthState::new();
 
     let strategy_symbol_set: std::collections::HashSet<&str> =
         ["BTCUSDT", "ETHUSDT"].into_iter().collect();
@@ -1551,7 +1552,7 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
     ];
     state.mark_pending_signal_symbols(&updated, &strategy_symbol_set);
 
-    state.handle_signal_tick(&strategy).await;
+    state.handle_signal_tick(&strategy, &health).await;
 
     let checked = strategy
         .checked_symbols
@@ -1565,8 +1566,9 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
 async fn handle_signal_tick_skips_when_no_pending_symbols() {
     let mut state = EventLoopState::new();
     let strategy = RecordingRuntimeStrategy::default();
+    let health = HealthState::new();
 
-    state.handle_signal_tick(&strategy).await;
+    state.handle_signal_tick(&strategy, &health).await;
 
     let checked = strategy
         .checked_symbols
@@ -1580,13 +1582,14 @@ async fn handle_signal_tick_skips_when_no_pending_symbols() {
 async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
     let mut state = EventLoopState::new();
     let strategy = RecordingRuntimeStrategy::default();
+    let health = HealthState::new();
     let total = SIGNAL_CHECK_BUDGET_PER_TICK + 2;
 
     for idx in 0..total {
         state.pending_signal_symbols.insert(format!("SYM{idx:04}"));
     }
 
-    state.handle_signal_tick(&strategy).await;
+    state.handle_signal_tick(&strategy, &health).await;
     assert_eq!(state.pending_signal_symbols.len(), 2);
     let checked_after_first_tick = strategy
         .checked_symbols
@@ -1595,7 +1598,7 @@ async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
         .len();
     assert_eq!(checked_after_first_tick, SIGNAL_CHECK_BUDGET_PER_TICK);
 
-    state.handle_signal_tick(&strategy).await;
+    state.handle_signal_tick(&strategy, &health).await;
     assert!(state.pending_signal_symbols.is_empty());
     let checked_after_second_tick = strategy
         .checked_symbols
