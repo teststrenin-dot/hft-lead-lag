@@ -2,6 +2,16 @@
 
 Date: 2026-02-26  
 Scope: обязательный рабочий процесс для всех следующих изменений (CP4+ и дальше).
+Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+
+## 0) Strategic Pre-Check (mandatory)
+Перед стартом любой вехи команда обязана зафиксировать:
+1. Какой узел Economic Control Map изменяется (`Signal/Validation/Competition/Risk/Capital/Feedback`).
+2. Какую бизнес-метрику это должно улучшить.
+3. Какой риск снижается.
+4. Что сломается, если этот шаг не сделать.
+
+Без этого шага реализация не начинается.
 
 ## 1) Core Principle
 Сначала фиксируем **результат и критерии готовности**, потом делаем **контракты и тестируемые вехи**, и только потом реализацию.
@@ -12,12 +22,13 @@ Scope: обязательный рабочий процесс для всех с
 - смешивать архитектурный рефактор и новую бизнес-логику в одном шаге.
 
 ## 2) Delivery Order (mandatory)
-1. Outcome + Definition of Done.
-2. Ограничения и quality gates (метрики, риск, стабильность).
-3. Контракты модулей и payload-форматы.
-4. Веха (минимально изолируемая) + Given/When/Then тесты.
-5. Минимальная реализация до green.
-6. Рефактор только после green.
+1. Strategic pre-check (economic node + metric + risk + failure mode).
+2. Outcome + Definition of Done.
+3. Ограничения и quality gates (метрики, риск, стабильность).
+4. Контракты модулей и payload-форматы.
+5. Веха (минимально изолируемая) + Given/When/Then тесты.
+6. Минимальная реализация до green.
+7. Рефактор только после green.
 
 ## 3) Required Artifacts per Milestone
 - `spec`: цель, scope, DoD, acceptance.
@@ -63,4 +74,4 @@ Contract-first artifacts:
 
 ## 6) Working Agreement
 С этого момента все следующие шаги выполняются только в этом порядке:
-`Outcome -> Contracts -> Tests -> Minimal Implementation -> Verification`.
+`Strategic Pre-Check -> Outcome -> Contracts -> Tests -> Minimal Implementation -> Verification`.

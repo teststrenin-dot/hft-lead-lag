@@ -38,6 +38,14 @@ fn update_trial_queue_depth_health(health_state: &HealthState, config_dir: &Path
         .store(quarantined, Ordering::Relaxed);
 }
 
+fn archive_startup_stale_trial_queue(config_dir: &Path) -> usize {
+    let stale = list_trial_batch_queue_files(config_dir);
+    for queued_batch_path in &stale {
+        archive_trial_batch_queue_file(config_dir, queued_batch_path, false);
+    }
+    stale.len()
+}
+
 async fn maybe_handle_trial_control(
     screener: &ScreenerStore,
     db_path: &Path,
@@ -258,12 +266,24 @@ pub(super) fn runtime_grid_sleep_ms(pending: Option<&RuntimeGridGeneration>) -> 
         .max(HOT_RELOAD_MIN_SLEEP_MS)
 }
 
+fn seed_existing_command_file(path: &Path, watcher: &str) -> Option<FileFingerprint> {
+    let seeded = read_file_fingerprint(path);
+    if seeded.is_some() {
+        info!(
+            "{watcher}: startup seed consumed existing command file {}; waiting for explicit update",
+            path.display()
+        );
+    }
+    seeded
+}
+
 async fn run_trial_control_watch_loop(
     screener: ScreenerStore,
     db_path: PathBuf,
     trial_control_path: PathBuf,
 ) {
-    let mut last_trial_control_modified: Option<FileFingerprint> = None;
+    let mut last_trial_control_modified: Option<FileFingerprint> =
+        seed_existing_command_file(&trial_control_path, "trial-control");
     loop {
         maybe_handle_trial_control(
             &screener,
@@ -287,11 +307,22 @@ async fn run_trial_batch_watch_loop(
     trial_batch_path: PathBuf,
     grid_reset_tx: tokio::sync::mpsc::Sender<()>,
 ) {
-    let mut state = TrialBatchWatchState::default();
+    let mut state = TrialBatchWatchState {
+        last_trial_modified: seed_existing_command_file(&trial_batch_path, "trial-batch"),
+    };
     let config_dir = trial_batch_path
         .parent()
         .unwrap_or(Path::new("."))
         .to_path_buf();
+    let stale_archived = archive_startup_stale_trial_queue(&config_dir);
+    if stale_archived > 0 {
+        info!(
+            "trial-batch queue: startup archived stale payloads={} from {}",
+            stale_archived,
+            config_dir.display()
+        );
+    }
+    update_trial_queue_depth_health(health_state.as_ref(), &config_dir);
     loop {
         update_trial_queue_depth_health(health_state.as_ref(), &config_dir);
 
@@ -429,4 +460,58 @@ pub(super) fn spawn_runtime_grid_hot_reload(
         )
         .await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock moved backwards")
+            .as_nanos();
+        std::env::temp_dir().join(format!("hft-lead-lag-{prefix}-{nonce}.json"))
+    }
+
+    #[test]
+    fn seed_existing_command_file_returns_none_for_missing_path() {
+        let path = unique_temp_path("missing-cmd");
+        let seeded = seed_existing_command_file(&path, "trial-batch");
+        assert!(seeded.is_none());
+    }
+
+    #[test]
+    fn seed_existing_command_file_returns_fingerprint_for_existing_path() {
+        let path = unique_temp_path("existing-cmd");
+        std::fs::write(&path, b"{\"clear_run_id\":false}").expect("write seed file");
+
+        let seeded = seed_existing_command_file(&path, "trial-control");
+        assert!(seeded.is_some());
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn archive_startup_stale_trial_queue_moves_existing_queue_files() {
+        let dir = unique_temp_path("stale-queue");
+        std::fs::create_dir_all(&dir).expect("create config dir");
+        let queue_dir = trial_batch_queue_dir(&dir);
+        std::fs::create_dir_all(&queue_dir).expect("create queue dir");
+        let payload = queue_dir.join("123-run.json");
+        std::fs::write(&payload, b"{\"run_id\":\"stale\",\"configs\":[]}").expect("write payload");
+
+        let archived = archive_startup_stale_trial_queue(&dir);
+        assert_eq!(archived, 1);
+        assert!(list_trial_batch_queue_files(&dir).is_empty());
+
+        let archive_dir = trial_batch_archive_dir(&dir, false);
+        let archive_count = std::fs::read_dir(&archive_dir)
+            .expect("read archive dir")
+            .count();
+        assert!(archive_count >= 1);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

@@ -10,5 +10,5 @@ Date: 2026-02-27
 - Status: `open`.
 
 2. CP0 freeze artifact is now explicit and versioned.
-- Evidence: `docs/status/2026-02-27-cp0-contract-freeze-v1.md:1`, `docs/README.md:8`, `docs/status/2026-02-26-business-logic-roadmap.md:82`.
+- Evidence: `docs/status/dynamics/2026-02-27-cp0-contract-freeze-v2.md:1`, `docs/README.md:8`, `docs/status/core/2026-02-26-business-logic-roadmap.md:82`.
 - Status: `closed`.

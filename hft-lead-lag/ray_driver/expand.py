@@ -14,10 +14,21 @@ def expand_around_references(
     references: list[RunMetrics],
     db_path: Path,
     n_steps: int = 1,
+    max_refs: int | None = None,
+    max_configs: int | None = None,
 ) -> list[dict]:
     """Generate neighbor configs around each reference, clipped to hard bounds."""
+    if max_refs is not None and max_refs <= 0:
+        return []
+    if max_configs is not None and max_configs <= 0:
+        return []
+
+    if max_refs is not None:
+        references = references[:max_refs]
+
     seen: set[tuple] = set()
     expanded: list[dict] = []
+    ref_products: list[tuple[list[str], itertools.product]] = []
 
     for ref in references:
         center = fetch_config_params(db_path, ref.config_id)
@@ -31,13 +42,42 @@ def expand_around_references(
             )
 
         keys = list(per_axis_values.keys())
-        for combo in itertools.product(*(per_axis_values[k] for k in keys)):
-            cfg = dict(zip(keys, combo))
-            cfg.update(FIXED_DEFAULTS)
-            key = tuple(combo)
-            if key not in seen:
+        ref_products.append(
+            (keys, itertools.product(*(per_axis_values[k] for k in keys)))
+        )
+
+    if max_configs is None:
+        for keys, combos in ref_products:
+            for combo in combos:
+                cfg = dict(zip(keys, combo))
+                cfg.update(FIXED_DEFAULTS)
+                key = tuple(combo)
+                if key not in seen:
+                    seen.add(key)
+                    expanded.append(cfg)
+        return expanded
+
+    active = ref_products
+    while active and len(expanded) < max_configs:
+        next_active: list[tuple[list[str], itertools.product]] = []
+        for keys, combos in active:
+            while True:
+                try:
+                    combo = next(combos)
+                except StopIteration:
+                    break
+                key = tuple(combo)
+                if key in seen:
+                    continue
                 seen.add(key)
+                cfg = dict(zip(keys, combo))
+                cfg.update(FIXED_DEFAULTS)
                 expanded.append(cfg)
+                next_active.append((keys, combos))
+                break
+            if len(expanded) >= max_configs:
+                return expanded
+        active = next_active
 
     return expanded
 

@@ -59,6 +59,10 @@ class FleetIPC:
         run_id: str,
         configs: list[dict],
         timeout_s: float = 30.0,
+        mode: str | None = None,
+        changed_config_ids: list[int] | None = None,
+        symbols: list[str] | None = None,
+        allow_run_id_takeover: bool = False,
     ) -> TrialAck:
         """Write trial-batch.json and wait for .trial-ack from Rust."""
         self.batch_queue_dir.mkdir(parents=True, exist_ok=True)
@@ -70,6 +74,14 @@ class FleetIPC:
             "config_id_contract_version": CONFIG_ID_CONTRACT_VERSION,
             "submission_id": submission_id,
         }
+        if mode:
+            batch["mode"] = mode
+        if changed_config_ids:
+            batch["changed_config_ids"] = changed_config_ids
+        if symbols:
+            batch["symbols"] = symbols
+        if allow_run_id_takeover:
+            batch["allow_run_id_takeover"] = True
         batch_path = self.batch_queue_dir / f"{submission_id}.json"
         ack_path = self.ack_queue_dir / f"{submission_id}.json"
         tmp = batch_path.with_suffix(".tmp")

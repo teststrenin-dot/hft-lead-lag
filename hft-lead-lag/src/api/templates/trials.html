@@ -82,6 +82,7 @@
     <h1>Trials — 7D Reference Matrix</h1>
     <nav>
       <a href="/screener">Screener</a>
+      <a href="/portfolio">Portfolio Race</a>
     </nav>
     <div class="meta" id="meta">Loading…</div>
     <div class="tab-strip">
@@ -120,6 +121,16 @@
         <div class="runner-field phase-forward">
           <label>Report Interval (s)</label>
           <input id="runner-report-interval" type="number" min="5" step="5"/>
+        </div>
+
+        <div class="runner-field phase-forward">
+          <label>Max Refs</label>
+          <input id="runner-max-refs" type="number" min="1" max="256" step="1"/>
+        </div>
+
+        <div class="runner-field phase-forward">
+          <label>Max Configs</label>
+          <input id="runner-max-configs" type="number" min="1" max="5000" step="1"/>
         </div>
 
         <div class="runner-field phase-promote">
@@ -463,6 +474,8 @@ async function loadRunnerConfig() {
   setIfMissing('runner-max-budget', phaseCfg('forward').max_budget, true);
   setIfMissing('runner-grace-period', phaseCfg('forward').grace_period, true);
   setIfMissing('runner-report-interval', phaseCfg('forward').report_interval, true);
+  setIfMissing('runner-max-refs', phaseCfg('forward').max_refs, true);
+  setIfMissing('runner-max-configs', phaseCfg('forward').max_configs, true);
   setIfMissing('runner-top-k', phaseCfg('promote').top_k, true);
   setIfMissing('runner-min-trades', phaseCfg('promote').min_trades, true);
   setIfMissing('runner-min-pnl', phaseCfg('promote').min_pnl, true);
@@ -483,6 +496,8 @@ function updatePhaseFields() {
     setIfMissing('runner-max-budget', cfg.max_budget);
     setIfMissing('runner-grace-period', cfg.grace_period);
     setIfMissing('runner-report-interval', cfg.report_interval);
+    setIfMissing('runner-max-refs', cfg.max_refs);
+    setIfMissing('runner-max-configs', cfg.max_configs);
   } else if (phase === 'promote') {
     setIfMissing('runner-top-k', cfg.top_k);
     setIfMissing('runner-min-trades', cfg.min_trades);
@@ -503,9 +518,13 @@ function collectRunnerPayload() {
     const maxBudget = maybeNum('runner-max-budget');
     const gracePeriod = maybeNum('runner-grace-period');
     const reportInterval = maybeNum('runner-report-interval');
+    const maxRefs = maybeNum('runner-max-refs');
+    const maxConfigs = maybeNum('runner-max-configs');
     if (maxBudget !== null) payload.max_budget = Math.max(30, maxBudget);
     if (gracePeriod !== null) payload.grace_period = Math.max(10, gracePeriod);
     if (reportInterval !== null) payload.report_interval = Math.max(5, reportInterval);
+    if (maxRefs !== null) payload.max_refs = Math.min(256, Math.max(1, Math.floor(maxRefs)));
+    if (maxConfigs !== null) payload.max_configs = Math.min(5000, Math.max(1, Math.floor(maxConfigs)));
   } else if (phase === 'promote') {
     payload.run_id = document.getElementById('runner-run-id').value.trim() || selectedForwardRunId;
     const topK = maybeNum('runner-top-k');

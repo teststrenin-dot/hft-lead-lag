@@ -5,7 +5,7 @@
 **Snapshot:** 2026-02-27  
 **Branch/commit:** `main @ 3c501387d99e`  
 **Mode:** paper trading + shadow fleet optimizer + Ray/ASHA orchestration
-**CP0 contract freeze:** `docs/status/2026-02-27-cp0-contract-freeze-v1.md`
+**CP0 contract freeze:** `docs/status/dynamics/2026-02-27-cp0-contract-freeze-v2.md`
 
 ---
 
@@ -178,7 +178,7 @@ python3 -m pip install -r ray_driver/requirements.txt
 # 3) ray pipeline
 python3 -m ray_driver scout --duration 600
 python3 -m ray_driver expand --duration 600 --cycles 1
-python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interval 30
+python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interval 30 --max-refs 64 --max-configs 1200
 
 # 4) inspect runs
 curl -s http://localhost:5000/api/v1/trials
@@ -271,7 +271,7 @@ PY
 ```bash
 cd /root/turbo/hft-lead-lag
 python3 -m ray_driver expand --duration 900 --cycles 1
-python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interval 30
+python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interval 30 --max-refs 64 --max-configs 1200
 ```
 
 ---

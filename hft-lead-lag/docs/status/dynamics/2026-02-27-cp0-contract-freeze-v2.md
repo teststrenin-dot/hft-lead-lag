@@ -1,8 +1,21 @@
-# CP0 Contract Freeze v1
+# CP0 Contract Freeze v2
 
 Date: 2026-02-27
-Contract version: `cp0-v1`
+Contract version: `cp0-v2`
 Pinned baseline commit: `3c501387d99e27a67c329c07b23bdcd3ad77347a`
+Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+
+## 0) Strategic Boundary Mapping (Frozen for cp0-v2)
+Business objective boundary:
+- Runtime/API contracts must preserve chain `Signal -> Validation -> Competition -> Risk -> Capital -> Feedback`.
+
+Node-to-endpoint mapping:
+1. `Signal`: `/api/v1/screener`, `/api/v1/shadow/:symbol`, `/api/v1/chart/:symbol`
+2. `Validation`: `/api/v1/portfolio/candidates`
+3. `Competition`: `/api/v1/portfolio/active`, `/api/v1/portfolio/performance`
+4. `Risk`: `/api/v1/portfolio/guards`, `ExitReason` contract
+5. `Feedback`: `/health`, `/portfolio`, `/fleet`, `/trials`
+6. `Capital` (future): kept as reserved semantic space under portfolio runtime contracts (`CP7`)
 
 ## 1) API Surface (Frozen)
 
@@ -11,6 +24,7 @@ Pinned baseline commit: `3c501387d99e27a67c329c07b23bdcd3ad77347a`
 - `GET /api/v1/symbols`
 - `GET /api/v1/screener`
 - `GET /screener`
+- `GET /portfolio`
 
 ### Portfolio Runtime
 - `GET /api/v1/portfolio/active`
@@ -69,5 +83,5 @@ Any contract change in sections 1-4 requires:
 2. Regression tests for affected contract.
 3. Docs sync in:
    - `docs/README.md`
-   - `docs/status/2026-02-26-business-logic-v1-implementation-status.md`
-   - `docs/status/2026-02-26-project-math-model.md`
+   - `docs/status/core/2026-02-26-business-logic-v1-implementation-status.md`
+   - `docs/status/dynamics/2026-02-26-project-math-model.md`

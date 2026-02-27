@@ -3,6 +3,23 @@
 Date: 2026-02-26
 Last sync: commits up to `ad041ca`
 Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
+Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+
+## Strategic Objective Snapshot
+Locked objective for all CP4+ work:
+1. Maximize risk-adjusted return under constrained capital.
+2. Keep deterministic control flow `Signal -> Validation -> Competition -> Risk -> Capital -> Feedback`.
+3. Reach checkpoint-ready paper operation before capital rebalance/live.
+
+## Economic Node Coverage Snapshot
+| Economic node | CP owner | Coverage now | Notes |
+|---|---|---|---|
+| `Signal` | `CP1-CP2` | `Implemented` | Lead-lag ingestion/signal lifecycle in runtime. |
+| `Validation` | `CP3` | `Implemented` | Eligibility + ranking gates are active. |
+| `Competition` | `CP4` (+`CP4.1`) | `Partial` | Runtime race exists; operator UI (`/portfolio`) реализован, остаётся winner-promotion path. |
+| `Risk` | `CP4-CP5` | `Partial` | Guard/reset/cooldown active; full restart hardening still ongoing. |
+| `Feedback` | `CP5-CP6` | `Partial` | API/health present; operational UX and incident paths are in progress. |
+| `Capital` | `CP7` | `Planned` | Rebalance/live gates not enabled yet. |
 
 ## Status Legend
 - `Implemented` — реализовано и используется в runtime.
@@ -22,6 +39,12 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 | Монеты становятся кандидатами после gate | `Implemented` | `src/domain/screener/portfolio_runtime.rs:54`, `src/domain/screener/portfolio_runtime.rs:250` | `eligible()` + shortlist build. |
 | Портфели строятся из eligible-кандидатов | `Implemented` | `src/domain/screener/portfolio_runtime.rs:94` | Assignment + no-overlap. |
 | Гонка портфелей пока для аналитики | `Implemented` | `src/api/http_server.rs:145`, `src/api/handlers.rs:234` | API read-model есть, денежного ребаланса нет (по плану v2). |
+| Operator UI для гонки портфелей (`/portfolio`) | `Implemented` | `src/api/http_server.rs:126`, `src/api/templates.rs:24`, `src/api/templates/portfolio.html:1` | Показывает active/candidates/performance/guards с автообновлением. |
+| Startup command-gating для trial hot-reload (`CP4.2`) | `Implemented` | `src/runtime_hot_reload.rs:41`, `src/runtime_hot_reload.rs:272`, `src/runtime_hot_reload.rs:303` | Stale `trial-batch`/`trial-control` и startup queue-пейлоады больше не исполняются автоматически на старте; нужна явная новая команда (изменение файла/новый queue submit). |
+| Bounded forward-run limits (`CP4.3`) | `Implemented` | `ray_driver/cli.py:176`, `ray_driver/cli.py:245`, `ray_driver/expand.py:17`, `src/api/runner/command.rs:154`, `src/api/templates/trials.html:129` | Forward теперь всегда ограничен по `max_refs/max_configs`; это устраняет unbounded batch/OOM-паттерн на малом сервере. |
+| Forward fairness + hard caps (`CP4.4`) | `Implemented` | `ray_driver/expand.py:13`, `ray_driver/cli.py:12`, `ray_driver/tests/test_forward_limits.py:52`, `src/api/runner/command.rs:3`, `src/api/templates/trials.html:126` | При capped-forward конфиги заполняются round-robin по refs (без first-ref bias); лимиты дополнительно ограничены safe cap (`max_refs<=256`, `max_configs<=5000`) в CLI/Runner/UI. |
+| ASHA trial granularity (`CP4.5`) | `Implemented` | `ray_driver/cli.py:213`, `ray_driver/trainable.py:11`, `ray_driver/config_store.py:78`, `ray_driver/tests/test_trainable.py:21` | Forward запускает единый runtime batch и затем оценивает каждый `config_id` отдельным Ray trial (`grid_search`), что убирает batch-агрегацию метрик внутри ASHA. |
+| Runtime auto-prune during forward (`CP4.6`) | `Implemented` | `ray_driver/cli.py:19`, `ray_driver/cli.py:291`, `ray_driver/ipc.py:42`, `ray_driver/tests/test_forward_limits.py:247` | Ранние `ASHA STOP` автоматически собираются в batched incremental patch и удаляются из runtime active set, снижая нагрузку прямо в процессе forward-run. |
 
 ## 3) Portfolio Topology
 | Item | Status | Evidence | Notes |
@@ -85,6 +108,13 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 2. `P2`: портфельная гонка пока аналитическая (нет money-rebalance/auto-promote winner path).
 3. `P3`: dynamic hyperparameters policy для нормализации к режиму рынка отложена (v2).
 
+## Recently Closed Hotfixes
+1. `P0` (`CP4.2`): устранён автозапуск stale команд при старте runtime (`trial-batch`/`trial-control`).
+2. `P0` (`CP4.3`): forward ограничен по масштабу (`max_refs/max_configs`) в CLI и Runner defaults для защиты от OOM.
+3. `P1` (`CP4.4`): убран first-ref bias в capped-forward (round-robin across refs) и добавлены hard-cap guardrails на `max_refs/max_configs`.
+4. `P1` (`CP4.5`): forward переведён на модель `1 config = 1 trial` в ASHA (пер-config метрики вместо batch-агрегата).
+5. `P1` (`CP4.6`): ранние ASHA-stop теперь автоматически prun-ятся в runtime через incremental patch.
+
 ## Что Нужно Сделать Для 100% Бизнес-Логики
 1. Реализовать явный runtime слой `portfolio -> bot` (изолированный execution loop, health, restart policy по каждому портфелю).
 2. Доделать переход «гонка -> действие»: winner selection и автоматический маршрут в execution mode (сейчас это только read-model/аналитика).
@@ -98,4 +128,4 @@ Source spec: `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md`
 
 ## Business Logic Roadmap
 - Чекпоинты реализации вынесены в отдельный документ:
-  - `docs/status/2026-02-26-business-logic-roadmap.md`
+  - `docs/status/core/2026-02-26-business-logic-roadmap.md`

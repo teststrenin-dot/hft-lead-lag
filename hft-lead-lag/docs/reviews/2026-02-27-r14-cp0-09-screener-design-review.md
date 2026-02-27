@@ -6,7 +6,7 @@ Date: 2026-02-27
 
 ### P1
 1. Candidate contract and topology contract are now synchronized between code and docs.
-- Evidence: `src/api/handlers.rs:259`, `src/api/handlers/tests.rs:641`, `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md:19`, `docs/status/2026-02-27-cp0-contract-freeze-v1.md:46`.
+- Evidence: `src/api/handlers.rs:259`, `src/api/handlers/tests.rs:641`, `docs/plans/2026-02-26-shadow-fleet-portfolio-target-state-v1.md:19`, `docs/status/dynamics/2026-02-27-cp0-contract-freeze-v2.md:46`.
 - Status: `closed`.
 
 ### P2

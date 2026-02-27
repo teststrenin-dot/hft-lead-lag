@@ -18,6 +18,10 @@ pub const DEFAULT_EXPAND_CYCLES: u64 = 1;
 pub const DEFAULT_FORWARD_MAX_BUDGET_S: u64 = 240;
 pub const DEFAULT_FORWARD_GRACE_PERIOD_S: u64 = 60;
 pub const DEFAULT_FORWARD_REPORT_INTERVAL_S: u64 = 30;
+pub const DEFAULT_FORWARD_MAX_REFS: u64 = 64;
+pub const DEFAULT_FORWARD_MAX_CONFIGS: u64 = 1200;
+pub const FORWARD_MAX_REFS_HARD_CAP: u64 = 256;
+pub const FORWARD_MAX_CONFIGS_HARD_CAP: u64 = 5000;
 pub const DEFAULT_PROMOTE_TOP_K: u64 = 50;
 pub const DEFAULT_PROMOTE_MIN_TRADES: u64 = 5;
 pub const DEFAULT_PROMOTE_MIN_PNL: f64 = 0.0;
@@ -30,6 +34,8 @@ pub struct RunnerStartRequest {
     pub max_budget: Option<u64>,
     pub grace_period: Option<u64>,
     pub report_interval: Option<u64>,
+    pub max_refs: Option<u64>,
+    pub max_configs: Option<u64>,
     pub run_id: Option<String>,
     pub top_k: Option<u64>,
     pub min_trades: Option<u64>,
@@ -57,6 +63,8 @@ pub struct RunnerPhaseDefaults {
     pub max_budget: Option<u64>,
     pub grace_period: Option<u64>,
     pub report_interval: Option<u64>,
+    pub max_refs: Option<u64>,
+    pub max_configs: Option<u64>,
     pub top_k: Option<u64>,
     pub min_trades: Option<u64>,
     pub min_pnl: Option<f64>,
@@ -525,6 +533,8 @@ mod tests {
             max_budget: None,
             grace_period: None,
             report_interval: None,
+            max_refs: None,
+            max_configs: None,
             run_id: None,
             top_k: None,
             min_trades: None,
@@ -556,6 +566,8 @@ mod tests {
             max_budget: None,
             grace_period: None,
             report_interval: None,
+            max_refs: None,
+            max_configs: None,
             run_id: None,
             top_k: None,
             min_trades: None,
@@ -586,6 +598,8 @@ mod tests {
             max_budget: Some(720),
             grace_period: Some(120),
             report_interval: Some(15),
+            max_refs: Some(42),
+            max_configs: Some(777),
             run_id: None,
             top_k: None,
             min_trades: None,
@@ -605,6 +619,48 @@ mod tests {
                 "120".to_string(),
                 "--report-interval".to_string(),
                 "15".to_string(),
+                "--max-refs".to_string(),
+                "42".to_string(),
+                "--max-configs".to_string(),
+                "777".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_forward_command_clamps_limits_to_safe_bounds() {
+        let req = RunnerStartRequest {
+            phase: "forward".to_string(),
+            duration: None,
+            cycles: None,
+            max_budget: Some(720),
+            grace_period: Some(120),
+            report_interval: Some(15),
+            max_refs: Some(10_000),
+            max_configs: Some(100_000),
+            run_id: None,
+            top_k: None,
+            min_trades: None,
+            min_pnl: None,
+        };
+
+        let cmd = build_trial_runner_command(&req).expect("command");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-m".to_string(),
+                "ray_driver".to_string(),
+                "forward".to_string(),
+                "--max-budget".to_string(),
+                "720".to_string(),
+                "--grace-period".to_string(),
+                "120".to_string(),
+                "--report-interval".to_string(),
+                "15".to_string(),
+                "--max-refs".to_string(),
+                "256".to_string(),
+                "--max-configs".to_string(),
+                "5000".to_string(),
             ]
         );
     }
@@ -618,6 +674,8 @@ mod tests {
             max_budget: None,
             grace_period: None,
             report_interval: None,
+            max_refs: None,
+            max_configs: None,
             run_id: None,
             top_k: None,
             min_trades: None,
@@ -648,6 +706,8 @@ mod tests {
             max_budget: None,
             grace_period: None,
             report_interval: None,
+            max_refs: None,
+            max_configs: None,
             run_id: None,
             top_k: None,
             min_trades: None,
@@ -667,6 +727,8 @@ mod tests {
             max_budget: None,
             grace_period: None,
             report_interval: None,
+            max_refs: None,
+            max_configs: None,
             run_id: None,
             top_k: None,
             min_trades: None,
@@ -712,6 +774,8 @@ mod tests {
             forward.report_interval,
             Some(DEFAULT_FORWARD_REPORT_INTERVAL_S)
         );
+        assert_eq!(forward.max_refs, Some(DEFAULT_FORWARD_MAX_REFS));
+        assert_eq!(forward.max_configs, Some(DEFAULT_FORWARD_MAX_CONFIGS));
         assert_eq!(promote.top_k, Some(DEFAULT_PROMOTE_TOP_K));
         assert_eq!(promote.min_trades, Some(DEFAULT_PROMOTE_MIN_TRADES));
         assert_eq!(promote.min_pnl, Some(DEFAULT_PROMOTE_MIN_PNL));

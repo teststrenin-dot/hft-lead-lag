@@ -6,6 +6,21 @@ Last sync: commits up to `a03aec4`
 Scope: верхнеуровневая дорожная карта из 8 чекпоинтов.  
 Принцип: ревью выполняется **по одному большому чекпоинту**, но с детальным разбором подпунктов.
 
+## Strategic Anchor (Mandatory)
+Canonical source:
+- `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+
+Locked objective:
+- maximize risk-adjusted return under constrained capital through controlled path `Signal -> Validation -> Competition -> Risk -> Capital -> Feedback`.
+
+Checkpoint ownership over economic nodes:
+1. `CP1-CP2`: `Signal`
+2. `CP3`: `Validation`
+3. `CP4` (+`CP4.1`): `Competition`
+4. `CP4-CP5`: `Risk`
+5. `CP5-CP6`: `Feedback`
+6. `CP7`: `Capital`
+
 ## Checkpoint Status
 | Checkpoint | Status | Notes |
 |---|---|---|
@@ -13,9 +28,9 @@ Scope: верхнеуровневая дорожная карта из 8 чек�
 | `CP1` Рыночные данные и время | `Done` | Ingest, clock offsets, drift и базовые time-domain гарантии в коде и тестах. |
 | `CP2` Lead-Lag и shadow execution | `Done` | Сигналы, shadow lifecycle, stop/exit-ветки и базовая устойчивость закрыты. |
 | `CP3` Математика кандидатов | `Done` | Eligibility/ranking/pm_raw/useful_winrate в рабочем контуре. |
-| `CP4` Портфельная гонка (paper runtime) | `In Progress` | Assignment/paper-state работает, но winner-promotion runtime path ещё не завершён. |
+| `CP4` Портфельная гонка (paper runtime) | `In Progress` | Assignment/paper-state работает; `CP4.1` (operator UI `/portfolio`), `CP4.2` (startup command-gating hotfix), `CP4.3` (bounded forward hotfix), `CP4.4` (forward fairness + hard guardrails), `CP4.5` (`1 config = 1 ASHA trial`) и `CP4.6` (runtime auto-prune ранних ASHA-stop) реализованы, остаются winner-promotion и runtime-isolation задачи. |
 | `CP5` Надёжность состояния | `In Progress` | Persistence/restore усилены, нужны доп. e2e-гарантии restart/recovery на уровне checkpoint. |
-| `CP6` Контрольный слой и UI | `In Progress` | API/health/read-model есть, требуется финализация контрольных сценариев и UX-связности. |
+| `CP6` Контрольный слой и UI | `In Progress` | Базовые API/health/read-model есть; фокус на operational UX, алертах и incident-сценариях. |
 | `CP7` Предзапуск к rebalance/live | `Planned` | Rebalance/live safety layer ещё не включены в runtime. |
 
 ## Checkpoint Breakdown (Subpoints)
@@ -43,16 +58,22 @@ Scope: верхнеуровневая дорожная карта из 8 чек�
 1. Shortlist/active assignment без overlap.
 2. Атрибуция сделок и paper-money перфоманс по портфелям.
 3. Winner logic и переход из аналитики в operational path.
+4. `CP4.1` Операторский UI для гонки портфелей (active/candidates/performance/guards) как обязательный шаг тестируемости. `Done` (`/portfolio`).
+5. `CP4.2` Hotfix управления запуском: runtime не исполняет stale `trial-batch`/`trial-control` и startup queue-пейлоады на старте без явного нового события. `Done`.
+6. `CP4.3` Hotfix bounded-forward: ограничены `max_refs/max_configs`, чтобы forward не падал по OOM на рабочем сервере. `Done`.
+7. `CP4.4` Hotfix forward fairness: `expand_around_references` при capped-forward распределяет конфиги round-robin по refs, а `max_refs/max_configs` дополнительно зажаты hard-cap guardrails в CLI/Runner/UI. `Done`.
+8. `CP4.5` ASHA granularity refactor: forward запускает единый batch `run_id`, после чего Ray ведёт отдельный trial на каждый `config_id` (`1 config = 1 trial`) вместо агрегатного batch-trial. `Done`.
+9. `CP4.6` Runtime auto-prune: при раннем `ASHA STOP` (до terminal rung) runtime получает batched incremental patch и удаляет stop-нутые config-ы из активного fleet, уменьшая нагрузку в ходе forward-run. `Done`.
 
 ### `CP5` Надёжность состояния
 1. Persistence/restore runtime и paper-state.
 2. Restart consistency и idempotency.
 3. Поведение при частичных/устаревших snapshot.
 
-### `CP6` Контрольный слой и UI
+### `CP6` Контрольный слой и UI (operational hardening)
 1. API контракты (active/candidates/guards/performance).
 2. Health/telemetry.
-3. UI-согласованность по чекпоинтным сущностям.
+3. Operational UX и инцидентные сценарии на уже готовых read-model страницах.
 
 ### `CP7` Предзапуск к rebalance/live
 1. Rebalance capital policy.
@@ -79,7 +100,7 @@ Scope: верхнеуровневая дорожная карта из 8 чек�
 Ниже полный расклад до прода: от текущего состояния до live.
 
 ### `CP0` Контракт и границы системы (`Done`, regression guard)
-1. Freeze текущих контрактов API/runtime зафиксирован: `docs/status/2026-02-27-cp0-contract-freeze-v1.md`.
+1. Freeze текущих контрактов API/runtime зафиксирован: `docs/status/dynamics/2026-02-27-cp0-contract-freeze-v2.md`.
 2. Проверить, что новые изменения не расширяют scope без отдельного RFC.
 3. Держать smoke-набор контрактных тестов как обязательный pre-merge gate.
 Exit gate:
@@ -115,10 +136,17 @@ Exit gate:
 2. Реализовать явную модель `1 portfolio = 1 bot runtime context` (paper).
 3. Добавить контроль независимости портфелей (не мешают друг другу по lifecycle).
 4. Закрыть e2e сценарии: накопление статистики -> отбор -> активная гонка.
+5. `CP4.1` `Done`: добавлена UI-страница `/portfolio` на основе `/api/v1/portfolio/*`; оператор может тестировать гонку без ручных API-запросов.
+6. `CP4.2` `Done` (`P0 hotfix`): startup watchers (`trial-batch`/`trial-control`) seed-ят текущий fingerprint, а stale queue-пейлоады архивируются; команды выполняются только после явного обновления/submit.
+7. `CP4.3` `Done` (`P0 hotfix`): forward-run ограничен по `max_refs` и `max_configs` (CLI + runner defaults), чтобы исключить монолитный unbounded batch и OOM.
+8. `CP4.4` `Done` (`P1 remediation`): capped-forward больше не вырождается в первый reference; добавлены round-robin распределение конфигов и hard-cap guardrails (`max_refs<=256`, `max_configs<=5000`) на всех входах.
+9. `CP4.5` `Done` (`P1 architecture shift`): forward переведён на `1 config = 1 ASHA trial` через `grid_search(config_id)` на общем `run_id`.
+10. `CP4.6` `Done` (`P1 performance shift`): ранние ASHA-stop автоматически prun-ятся из runtime (incremental patch), что снижает фактическое число активных конфигов во время прогона.
 Exit gate:
 1. В рантайме есть стабильный winner selection и promotion flow.
 2. Портфели изолированы по execution-state.
-3. Review-раунд по `CP4` закрыт без open P0/P1.
+3. Оператор видит гонку в UI (active/candidates/performance/guards) и может прогнать ручной smoke-test.
+4. Review-раунд по `CP4` закрыт без open P0/P1.
 
 ### `CP5` Надёжность состояния (`In Progress`, active delivery)
 1. Завершить restart/recovery сценарии для portfolio runtime + paper state.
@@ -132,11 +160,10 @@ Exit gate:
 
 ### `CP6` Контрольный слой и UI (`In Progress`, active delivery)
 1. Довести API read-model до полной связности по всем checkpoint-сущностям.
-2. Согласовать UI с текущей бизнес-моделью (портфели, гонка, guards, performance).
-3. Доработать health/telemetry до operational сигнала (а не только debug).
-4. Закрыть сценарные проверки UX: что оператор видит и что делает при инциденте.
+2. Доработать health/telemetry до operational сигнала (а не только debug).
+3. Закрыть сценарные проверки UX: что оператор видит и что делает при инциденте.
 Exit gate:
-1. UI полностью отражает runtime-истину без ручных интерпретаций.
+1. UI-операторка и алерты дают полный operational контур (без слепых зон).
 2. API и UI контракты стабильны и покрыты тестами.
 3. Review-раунд по `CP6` закрыт без open P0/P1.
 
@@ -165,5 +192,6 @@ Exit gate (production ready):
 ## Notes
 Этот документ отражает только checkpoint-структуру и приоритеты.  
 Детализация покрытия и математики:
-- `docs/status/2026-02-26-business-logic-v1-implementation-status.md`
-- `docs/status/2026-02-26-project-math-model.md`
+- `docs/status/core/2026-02-26-business-logic-v1-implementation-status.md`
+- `docs/status/dynamics/2026-02-26-project-math-model.md`
+- `docs/status/core/2026-02-27-business-objective-economic-control-map.md`

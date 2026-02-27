@@ -123,6 +123,7 @@ impl HttpServer {
             .route(endpoints::SYMBOLS, get(handlers::get_symbols))
             .route(endpoints::SCREENER_DATA, get(handlers::get_screener))
             .route(endpoints::SCREENER_PAGE, get(templates::screener_page))
+            .route(endpoints::PORTFOLIO_PAGE, get(templates::portfolio_page))
             .route(
                 endpoints::PORTFOLIO_ACTIVE,
                 get(handlers::get_portfolio_active),
@@ -191,6 +192,7 @@ pub mod endpoints {
     pub const SYMBOLS: &str = "/api/v1/symbols";
     pub const SCREENER_DATA: &str = "/api/v1/screener";
     pub const SCREENER_PAGE: &str = "/screener";
+    pub const PORTFOLIO_PAGE: &str = "/portfolio";
     pub const PORTFOLIO_ACTIVE: &str = "/api/v1/portfolio/active";
     pub const PORTFOLIO_CANDIDATES: &str = "/api/v1/portfolio/candidates";
     pub const PORTFOLIO_PERFORMANCE: &str = "/api/v1/portfolio/performance";

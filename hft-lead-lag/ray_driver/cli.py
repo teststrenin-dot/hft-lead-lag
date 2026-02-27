@@ -3,12 +3,163 @@
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
+from .config_store import resolve_config_pairs_for_configs
 from .ipc import FleetIPC, RunMetrics
 from .scout import run_scout
 from .expand import run_expand
 from .run_id import generate_run_id
+
+FORWARD_MAX_REFS_HARD_CAP = 256
+FORWARD_MAX_CONFIGS_HARD_CAP = 5000
+FORWARD_MAX_CONCURRENT_TRIALS = 16
+
+
+def _asha_terminal_budget_s(max_budget_s: int, grace_period_s: int, reduction_factor: int) -> int:
+    """Last full ASHA rung at or below max budget (trials here are not early-pruned)."""
+    max_budget_s = max(1, int(max_budget_s))
+    grace_period_s = max(1, int(grace_period_s))
+    reduction_factor = max(2, int(reduction_factor))
+    budget = grace_period_s
+    while budget * reduction_factor <= max_budget_s:
+        budget *= reduction_factor
+    return min(max_budget_s, budget)
+
+
+class ForwardRuntimePruneCallback:
+    """Batch runtime incremental patches for ASHA early-stopped config_ids."""
+
+    def __init__(
+        self,
+        ipc: FleetIPC,
+        run_id: str,
+        configs_by_id: dict[int, dict],
+        max_budget_s: int,
+        grace_period_s: int,
+        reduction_factor: int = 2,
+        min_patch_interval_s: float = 15.0,
+    ):
+        self.ipc = ipc
+        self.run_id = run_id
+        self.configs_by_id = {int(k): dict(v) for k, v in configs_by_id.items()}
+        self.active_ids = set(self.configs_by_id.keys())
+        self.pending_remove: set[int] = set()
+        self.min_patch_interval_s = max(1.0, float(min_patch_interval_s))
+        self.last_patch_ts = 0.0
+        self.terminal_budget_s = _asha_terminal_budget_s(
+            max_budget_s=max_budget_s,
+            grace_period_s=grace_period_s,
+            reduction_factor=reduction_factor,
+        )
+
+    # Tune callback compatibility hooks (no-ops unless explicitly used below).
+    def setup(self, **info):
+        return None
+
+    def on_step_begin(self, **info):
+        return None
+
+    def on_step_end(self, **info):
+        return None
+
+    def on_trial_start(self, **info):
+        return None
+
+    def on_trial_restore(self, **info):
+        return None
+
+    def on_trial_save(self, **info):
+        return None
+
+    def on_trial_complete(self, **info):
+        return None
+
+    def on_trial_recover(self, **info):
+        return None
+
+    def on_trial_error(self, **info):
+        return None
+
+    def on_checkpoint(self, **info):
+        return None
+
+    def get_state(self):
+        return None
+
+    def set_state(self, state):
+        return None
+
+    @staticmethod
+    def _trial_config_id(trial) -> int | None:
+        cfg = getattr(trial, "config", {}) or {}
+        raw = cfg.get("config_id")
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _flush_prune(self, force: bool = False) -> None:
+        if not self.pending_remove:
+            return
+        now = time.monotonic()
+        if not force and now - self.last_patch_ts < self.min_patch_interval_s:
+            return
+
+        removable = sorted(cid for cid in self.pending_remove if cid in self.active_ids)
+        if not removable:
+            self.pending_remove.clear()
+            return
+
+        remaining_ids = sorted(self.active_ids - set(removable))
+        if not remaining_ids:
+            # Keep at least one config active; drop only extras from pending.
+            removable = removable[:-1]
+            if not removable:
+                return
+            remaining_ids = sorted(self.active_ids - set(removable))
+
+        remaining_configs = [self.configs_by_id[cid] for cid in remaining_ids]
+        try:
+            ack = self.ipc.submit_batch(
+                self.run_id,
+                remaining_configs,
+                timeout_s=15.0,
+                mode="incremental",
+                changed_config_ids=removable,
+            )
+        except Exception as exc:
+            print(
+                "[forward-prune] warning: incremental runtime patch failed "
+                f"run_id={self.run_id} remove={len(removable)} err={exc}"
+            )
+            return
+
+        self.active_ids = set(remaining_ids)
+        for cid in removable:
+            self.pending_remove.discard(cid)
+        self.last_patch_ts = now
+        print(
+            f"[forward-prune] run_id={self.run_id} removed={len(removable)} "
+            f"active={len(self.active_ids)} ack_configs={ack.config_count}"
+        )
+
+    def on_trial_result(self, iteration, trials, trial, result, **info):  # noqa: D401
+        cfg_id = self._trial_config_id(trial)
+        if cfg_id is None or cfg_id not in self.active_ids:
+            return
+        if not result.get("done"):
+            return
+        budget_s = float(result.get("time_budget_s", 0.0))
+        # Only prune ASHA early-stops; full-budget terminal trials should stay.
+        if budget_s >= float(self.terminal_budget_s):
+            return
+        self.pending_remove.add(cfg_id)
+        self._flush_prune(force=False)
+
+    def on_experiment_end(self, trials, **info):  # noqa: D401
+        self._flush_prune(force=True)
 
 
 def load_scout_references(path: Path) -> list[dict]:
@@ -170,8 +321,46 @@ def cmd_forward(args):
 
     ipc = FleetIPC(Path(args.config_dir), Path(args.db_path))
     refs = rows_to_metrics(json.loads(refs_path.read_text()))
+    requested_max_refs = int(args.max_refs)
+    requested_max_configs = int(args.max_configs)
+    max_refs = min(FORWARD_MAX_REFS_HARD_CAP, max(1, requested_max_refs))
+    max_configs = min(FORWARD_MAX_CONFIGS_HARD_CAP, max(1, requested_max_configs))
+    if max_refs != requested_max_refs or max_configs != requested_max_configs:
+        print(
+            f"[forward] limits clamped to safe bounds: "
+            f"max_refs={max_refs} (requested={requested_max_refs}), "
+            f"max_configs={max_configs} (requested={requested_max_configs})"
+        )
     from .expand import expand_around_references
-    configs = expand_around_references(refs, ipc.db_path, n_steps=1)
+    expanded_configs = expand_around_references(
+        refs,
+        ipc.db_path,
+        n_steps=1,
+        max_refs=max_refs,
+        max_configs=max_configs,
+    )
+    if not expanded_configs:
+        print("[error] forward config set is empty after limits/filtering")
+        sys.exit(1)
+    resolved_pairs = resolve_config_pairs_for_configs(ipc.db_path, expanded_configs)
+    if not resolved_pairs:
+        print("[error] no config ids resolved after expansion; abort forward")
+        sys.exit(1)
+    configs_by_id = {config_id: cfg for config_id, cfg in resolved_pairs}
+    config_ids = sorted(configs_by_id.keys())
+    configs = [configs_by_id[cfg_id] for cfg_id in config_ids]
+
+    run_id = generate_run_id("forward")
+    ipc.clear_ack()
+    ack = ipc.submit_batch(run_id, configs)
+    print(
+        f"[forward] refs_total={len(refs)} refs_selected={min(len(refs), max_refs)} "
+        f"configs_prepared={len(expanded_configs)} (max_configs={max_configs})"
+    )
+    print(
+        f"[forward] run_id={run_id} applied_configs={ack.config_count} "
+        f"resolved_trials={len(config_ids)}"
+    )
 
     scheduler = ASHAScheduler(
         time_attr="time_budget_s",
@@ -183,16 +372,27 @@ def cmd_forward(args):
     )
 
     from .trainable import FleetTrial
+    prune_callback = ForwardRuntimePruneCallback(
+        ipc=ipc,
+        run_id=run_id,
+        configs_by_id=configs_by_id,
+        max_budget_s=args.max_budget,
+        grace_period_s=args.grace_period,
+        reduction_factor=2,
+        min_patch_interval_s=max(10.0, float(args.report_interval) * 2.0),
+    )
 
     tune.run(
         FleetTrial,
         config={
-            "configs": configs,
-            "run_id": generate_run_id("forward"),
+            "run_id": run_id,
+            "config_id": tune.grid_search(config_ids),
             "report_interval_s": args.report_interval,
         },
         scheduler=scheduler,
         num_samples=1,
+        max_concurrent_trials=FORWARD_MAX_CONCURRENT_TRIALS,
+        callbacks=[prune_callback],
         verbose=1,
     )
 
@@ -229,6 +429,18 @@ def main():
     f.add_argument("--max-budget", type=int, default=240, help="Max time budget (s)")
     f.add_argument("--grace-period", type=int, default=60, help="ASHA grace period (s)")
     f.add_argument("--report-interval", type=int, default=30, help="Metric report interval (s)")
+    f.add_argument(
+        "--max-refs",
+        type=int,
+        default=64,
+        help="Max scout references to expand for forward (hard cap: 256)",
+    )
+    f.add_argument(
+        "--max-configs",
+        type=int,
+        default=1200,
+        help="Hard cap on prepared forward configs (safe cap: 5000)",
+    )
     f.set_defaults(func=cmd_forward)
 
     pr = sub.add_parser("promote", help="Export top configs from a run")

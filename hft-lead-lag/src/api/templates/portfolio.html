@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <link rel="icon" href="data:,"/>
+  <title>Portfolio Race</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background:#0b1020; color:#e5e7eb; }
+    .top { padding: 12px 16px; }
+    h1 { margin: 0 0 4px; font-size: 18px; }
+    h2 { font-size: 14px; color: #93c5fd; margin: 16px 0 6px; }
+    .meta { margin-bottom: 8px; color: #9ca3af; font-size: 12px; }
+    nav { margin-bottom: 12px; }
+    nav a { color:#93c5fd; text-decoration:none; margin-right:16px; font-size:13px; }
+    nav a:hover { text-decoration:underline; }
+    .summary { display:flex; gap:16px; margin:12px 0; flex-wrap:wrap; }
+    .card { background:#111827; border:1px solid #1f2937; border-radius:6px; padding:10px 12px; min-width:130px; }
+    .card .label { font-size:11px; color:#9ca3af; }
+    .card .value { font-size:20px; font-weight:600; margin-top:2px; }
+    table { width: 100%; border-collapse: collapse; background:#111827; font-size: 12px; margin-bottom: 18px; }
+    th, td { padding: 4px 6px; border-bottom: 1px solid #1f2937; text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; background:#111827; color:#93c5fd; font-size: 11px; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .pos { color: #34d399; }
+    .neg { color: #f87171; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .muted { color: #9ca3af; }
+    tr:hover { background:#162032; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1>Portfolio Race (Paper)</h1>
+    <nav>
+      <a href="/screener">Screener</a>
+      <a href="/trials">Trials</a>
+      <a href="/trials?tab=forward">Forward</a>
+    </nav>
+    <div class="summary" id="summary"></div>
+    <div class="meta" id="meta">Loading…</div>
+
+    <h2>Active Allocation</h2>
+    <table id="tbl-active">
+      <thead>
+        <tr>
+          <th>Portfolio</th>
+          <th>Active Symbols</th>
+          <th>Shortlist</th>
+          <th class="num">Active Count</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h2>Paper Performance</h2>
+    <table id="tbl-performance">
+      <thead>
+        <tr>
+          <th>Portfolio</th>
+          <th class="num">Equity USD</th>
+          <th class="num">Realized PnL USD</th>
+          <th class="num">Trades</th>
+          <th class="num">Useful WR%</th>
+          <th class="num">Wins</th>
+          <th class="num">Loses</th>
+          <th>Last Trade</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h2>Candidate Ranking</h2>
+    <table id="tbl-candidates">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th class="num">Age (min)</th>
+          <th class="num">Trades</th>
+          <th class="num">Useful WR%</th>
+          <th class="num">pm_raw</th>
+          <th class="num">Avg PnL%</th>
+          <th class="num">Wins</th>
+          <th class="num">Loses</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h2>Guards and Cooldown</h2>
+    <table id="tbl-guards">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th class="num">Streak</th>
+          <th>First Streak</th>
+          <th>Cooldown Until</th>
+          <th>In Cooldown</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <script>
+  const asNum = (v, d=0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : d;
+  };
+  const signed = (v, d=2) => {
+    const n = asNum(v, 0);
+    const cls = n >= 0 ? 'pos' : 'neg';
+    return `<span class="${cls}">${n >= 0 ? '+' : ''}${n.toFixed(d)}</span>`;
+  };
+  const money = (v) => asNum(v, 0).toFixed(2);
+  const tsFmt = (v) => {
+    const n = asNum(v, 0);
+    return n > 0 ? new Date(n).toLocaleString() : '<span class="muted">-</span>';
+  };
+  const listFmt = (arr) => {
+    const a = Array.isArray(arr) ? arr : [];
+    return a.length ? `<span class="mono">${a.join(', ')}</span>` : '<span class="muted">-</span>';
+  };
+
+  function renderActive(rows) {
+    const body = document.querySelector('#tbl-active tbody');
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="4" class="muted">No portfolio rows</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(r => `
+      <tr>
+        <td><b>${r.portfolio_id}</b></td>
+        <td>${listFmt(r.active_symbols)}</td>
+        <td>${listFmt(r.shortlist)}</td>
+        <td class="num">${(r.active_symbols || []).length}</td>
+      </tr>
+    `).join('');
+  }
+
+  function renderPerformance(rows) {
+    const body = document.querySelector('#tbl-performance tbody');
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="8" class="muted">No performance rows</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(r => `
+      <tr>
+        <td><b>${r.portfolio_id}</b></td>
+        <td class="num">${money(r.equity_usd)}</td>
+        <td class="num">${signed(r.realized_pnl_usd, 2)}</td>
+        <td class="num">${asNum(r.closed_trades, 0)}</td>
+        <td class="num">${asNum(r.useful_winrate_pct, 0).toFixed(1)}</td>
+        <td class="num">${asNum(r.profitable_trades, 0)}</td>
+        <td class="num">${asNum(r.losing_trades, 0)}</td>
+        <td>${tsFmt(r.last_trade_ts_ms)}</td>
+      </tr>
+    `).join('');
+  }
+
+  function renderCandidates(rows) {
+    const body = document.querySelector('#tbl-candidates tbody');
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="8" class="muted">No candidates yet</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map(r => `
+      <tr>
+        <td><b>${r.symbol}</b></td>
+        <td class="num">${asNum(r.age_minutes_from_first_tick, 0)}</td>
+        <td class="num">${asNum(r.closed_trades, 0)}</td>
+        <td class="num">${asNum(r.useful_winrate_pct, 0).toFixed(1)}</td>
+        <td class="num">${asNum(r.pm_raw, 0)}</td>
+        <td class="num">${signed(r.avg_pnl_pct, 4)}</td>
+        <td class="num">${asNum(r.profitable_trades, 0)}</td>
+        <td class="num">${asNum(r.losing_trades, 0)}</td>
+      </tr>
+    `).join('');
+  }
+
+  function renderGuards(rows) {
+    const body = document.querySelector('#tbl-guards tbody');
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="5" class="muted">No guard rows</td></tr>';
+      return;
+    }
+    const sorted = rows.slice().sort((a, b) => Number(b.in_cooldown) - Number(a.in_cooldown));
+    body.innerHTML = sorted.map(r => `
+      <tr>
+        <td><b>${r.symbol}</b></td>
+        <td class="num">${asNum(r.streak_count, 0)}</td>
+        <td>${tsFmt(r.first_streak_ts_ms)}</td>
+        <td>${tsFmt(r.cooldown_until_ms)}</td>
+        <td class="${r.in_cooldown ? 'neg' : 'muted'}">${r.in_cooldown ? 'yes' : 'no'}</td>
+      </tr>
+    `).join('');
+  }
+
+  async function refresh() {
+    try {
+      const [activeRes, candRes, perfRes, guardsRes] = await Promise.all([
+        fetch('/api/v1/portfolio/active', { cache: 'no-store' }),
+        fetch('/api/v1/portfolio/candidates', { cache: 'no-store' }),
+        fetch('/api/v1/portfolio/performance', { cache: 'no-store' }),
+        fetch('/api/v1/portfolio/guards', { cache: 'no-store' }),
+      ]);
+      const [active, candidates, performance, guards] = await Promise.all([
+        activeRes.json(), candRes.json(), perfRes.json(), guardsRes.json()
+      ]);
+
+      const activeRows = Array.isArray(active.portfolios) ? active.portfolios : [];
+      const perfRows = Array.isArray(performance.portfolios) ? performance.portfolios : [];
+      const candRows = Array.isArray(candidates.rows) ? candidates.rows : [];
+      const guardRows = Array.isArray(guards.rows) ? guards.rows : [];
+      const activeCount = activeRows.reduce((sum, row) => sum + (Array.isArray(row.active_symbols) ? row.active_symbols.length : 0), 0);
+      const cooldownCount = guardRows.filter(r => r.in_cooldown).length;
+
+      document.getElementById('summary').innerHTML = `
+        <div class="card"><div class="label">Portfolios</div><div class="value">${activeRows.length}</div></div>
+        <div class="card"><div class="label">Active Symbols</div><div class="value">${activeCount}</div></div>
+        <div class="card"><div class="label">Candidates</div><div class="value">${asNum(candidates.total_candidates, 0)}</div></div>
+        <div class="card"><div class="label">In Cooldown</div><div class="value">${cooldownCount}</div></div>
+        <div class="card"><div class="label">Total Equity</div><div class="value">${money(performance.total_equity_usd || 0)}</div></div>
+        <div class="card"><div class="label">Realized PnL</div><div class="value">${signed(performance.total_realized_pnl_usd || 0, 2)}</div></div>
+      `;
+      document.getElementById('meta').textContent =
+        `updated ${new Date().toLocaleTimeString()} | active_ts=${new Date(active.generated_at_ms || Date.now()).toLocaleTimeString()} | cadence=15s`;
+
+      renderActive(activeRows);
+      renderPerformance(perfRows);
+      renderCandidates(candRows);
+      renderGuards(guardRows);
+    } catch (err) {
+      document.getElementById('meta').textContent = `error: ${err}`;
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 15000);
+  </script>
+</body>
+</html>

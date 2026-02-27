@@ -1,5 +1,9 @@
 use super::*;
 
+fn clamp_forward_limit(value: Option<u64>, default: u64, max: u64) -> u64 {
+    value.unwrap_or(default).clamp(1, max)
+}
+
 pub(super) fn runner_ui_config() -> RunnerUiConfig {
     RunnerUiConfig {
         phases: vec![
@@ -10,6 +14,8 @@ pub(super) fn runner_ui_config() -> RunnerUiConfig {
                 max_budget: None,
                 grace_period: None,
                 report_interval: None,
+                max_refs: None,
+                max_configs: None,
                 top_k: None,
                 min_trades: None,
                 min_pnl: None,
@@ -21,6 +27,8 @@ pub(super) fn runner_ui_config() -> RunnerUiConfig {
                 max_budget: None,
                 grace_period: None,
                 report_interval: None,
+                max_refs: None,
+                max_configs: None,
                 top_k: None,
                 min_trades: None,
                 min_pnl: None,
@@ -32,6 +40,8 @@ pub(super) fn runner_ui_config() -> RunnerUiConfig {
                 max_budget: Some(DEFAULT_FORWARD_MAX_BUDGET_S),
                 grace_period: Some(DEFAULT_FORWARD_GRACE_PERIOD_S),
                 report_interval: Some(DEFAULT_FORWARD_REPORT_INTERVAL_S),
+                max_refs: Some(DEFAULT_FORWARD_MAX_REFS),
+                max_configs: Some(DEFAULT_FORWARD_MAX_CONFIGS),
                 top_k: None,
                 min_trades: None,
                 min_pnl: None,
@@ -43,6 +53,8 @@ pub(super) fn runner_ui_config() -> RunnerUiConfig {
                 max_budget: None,
                 grace_period: None,
                 report_interval: None,
+                max_refs: None,
+                max_configs: None,
                 top_k: Some(DEFAULT_PROMOTE_TOP_K),
                 min_trades: Some(DEFAULT_PROMOTE_MIN_TRADES),
                 min_pnl: Some(DEFAULT_PROMOTE_MIN_PNL),
@@ -123,6 +135,16 @@ pub(super) fn build_trial_runner_command(
             args.push(cycles.to_string());
         }
         "forward" => {
+            let max_refs = clamp_forward_limit(
+                req.max_refs,
+                DEFAULT_FORWARD_MAX_REFS,
+                FORWARD_MAX_REFS_HARD_CAP,
+            );
+            let max_configs = clamp_forward_limit(
+                req.max_configs,
+                DEFAULT_FORWARD_MAX_CONFIGS,
+                FORWARD_MAX_CONFIGS_HARD_CAP,
+            );
             args.push("forward".to_string());
             args.push("--max-budget".to_string());
             args.push(
@@ -142,6 +164,10 @@ pub(super) fn build_trial_runner_command(
                     .unwrap_or(DEFAULT_FORWARD_REPORT_INTERVAL_S)
                     .to_string(),
             );
+            args.push("--max-refs".to_string());
+            args.push(max_refs.to_string());
+            args.push("--max-configs".to_string());
+            args.push(max_configs.to_string());
         }
         "promote" => {
             let run_id = req

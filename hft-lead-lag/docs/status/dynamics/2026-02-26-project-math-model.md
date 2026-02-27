@@ -3,6 +3,34 @@
 Date: 2026-02-26
 Last sync: commits up to `ad041ca`
 Scope: математика и формулы, реально используемые в runtime.
+Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+
+## Strategic Math Targets (Control Plane)
+These targets align math with business objective (risk-adjusted return under constrained capital).
+
+1. Expectancy proxy (per symbol/portfolio):
+```text
+expectancy_pct = (profitable_trades / closed_trades) * avg_win_pct
+              - (losing_trades / closed_trades) * avg_loss_pct
+```
+2. Drawdown envelope (portfolio-level):
+```text
+drawdown_pct(t) = (peak_equity_t - equity_t) / peak_equity_t * 100
+max_drawdown_pct = max_t(drawdown_pct(t))
+```
+3. Admission quality envelope:
+```text
+useful_winrate = profitable_trades / closed_trades
+pm_raw = profitable_trades - losing_trades
+admission requires useful_winrate >= 0.30 and avg_pnl_pct >= 0
+```
+4. Control-map linkage:
+   - `Signal`: spread/leader/freshness math.
+   - `Validation`: admission and ranking math.
+   - `Competition`: shortlist/assignment ranking effects.
+   - `Risk`: reset/cooldown trigger math.
+   - `Capital`: allocation metrics (planned in CP7).
+   - `Feedback`: health/read-model observability metrics.
 
 ## 0) Units and Conventions
 - `bps` (basis points): `1 bps = 0.01%`.

@@ -10,7 +10,7 @@ Date: 2026-02-27
 - Status: `closed`.
 
 2. CP0 freeze artifact now explicitly pins shadow/fleet API surface and reason vocabulary.
-- Evidence: `docs/status/2026-02-27-cp0-contract-freeze-v1.md:1`, `docs/status/2026-02-27-cp0-contract-freeze-v1.md:56`.
+- Evidence: `docs/status/dynamics/2026-02-27-cp0-contract-freeze-v2.md:1`, `docs/status/dynamics/2026-02-27-cp0-contract-freeze-v2.md:56`.
 - Status: `closed`.
 
 ### P2
