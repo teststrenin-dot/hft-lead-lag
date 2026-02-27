@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS portfolio_paper_state_v1 (
 CREATE INDEX IF NOT EXISTS idx_trades_config ON trades(config_id);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_exit_ts ON trades(exit_ts_ms);
+CREATE INDEX IF NOT EXISTS idx_trades_symbol_exit_ts ON trades(symbol, exit_ts_ms);
 CREATE INDEX IF NOT EXISTS idx_trial_runs_meta_applied_at ON trial_runs_meta(applied_at_ms);
 CREATE INDEX IF NOT EXISTS idx_portfolio_symbol_guard_v1_cooldown
     ON portfolio_symbol_guard_v1(cooldown_until_ms);
@@ -1824,6 +1825,21 @@ mod tests {
                 "portfolio_paper_state_v1.{column} column must exist"
             );
         }
+
+        drop(conn);
+        cleanup_temp_db(&path);
+    }
+
+    #[test]
+    fn open_db_creates_candidate_restore_event_index() {
+        let path = temp_db_path("candidate-restore-event-index");
+        let conn = open_db(&path).expect("open db");
+
+        let has_index: bool = conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1")
+            .and_then(|mut stmt| stmt.exists(["idx_trades_symbol_exit_ts"]))
+            .expect("index exists query");
+        assert!(has_index, "idx_trades_symbol_exit_ts index must exist");
 
         drop(conn);
         cleanup_temp_db(&path);

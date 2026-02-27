@@ -8,9 +8,9 @@ use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 
 use super::price_samples::PriceSamples;
-use super::shadow_trader::{ClosedTrade, ShadowTrader};
 #[cfg(test)]
 use super::shadow_trader::ExitReason;
+use super::shadow_trader::{ClosedTrade, ShadowTrader};
 use super::state::Quote;
 use super::trader_config::TraderConfig;
 

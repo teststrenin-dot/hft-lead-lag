@@ -10,6 +10,7 @@
 mod catalog_cache;
 mod clock_offset;
 pub mod cycle_tracker;
+mod drained_trades;
 pub mod fleet_patch;
 mod fleet_reload;
 mod policy_views;
@@ -23,6 +24,9 @@ pub mod state;
 pub mod trader_config;
 pub mod utils;
 
+#[cfg(test)]
+mod portfolio_runtime_tests;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 #[cfg(test)]
@@ -34,6 +38,9 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use serde::Serialize;
 
+use self::drained_trades::{
+    collapse_candidate_events, filter_active_run_trades, sort_drained_trades_in_place,
+};
 use self::fleet_patch::{FleetPatchMode, FleetPatchPlan};
 use self::shadow_fleet::{generate_grid, FleetTrade};
 use self::shadow_trader::{ChartData, ShadowDebug};
@@ -644,46 +651,18 @@ impl ScreenerStore {
             return 0;
         }
 
-        // Normalize event ordering by market chronology so guard/cooldown behavior
-        // is independent from fleet config traversal order.
         let mut drained_trades = drained_trades;
-        drained_trades.sort_by(|left, right| {
-            left.symbol
-                .cmp(&right.symbol)
-                .then_with(|| left.trade.ts_ms.cmp(&right.trade.ts_ms))
-                .then_with(|| left.trade.entry_ts_ms.cmp(&right.trade.entry_ts_ms))
-                .then_with(|| left.config_id.cmp(&right.config_id))
-        });
+        sort_drained_trades_in_place(&mut drained_trades);
 
         let active_run_id = self.current_run_id();
-        let active_trades: Vec<FleetTrade> = drained_trades
-            .iter()
-            .filter(|ft| match active_run_id.as_deref() {
-                Some(active) => ft.run_id.as_deref() == Some(active),
-                None => true,
-            })
-            .cloned()
-            .collect();
+        let active_trades = filter_active_run_trades(&drained_trades, active_run_id.as_deref());
 
-        let mut candidate_events: BTreeMap<(String, i64), (f64, usize, i64)> = BTreeMap::new();
-        for ft in &active_trades {
-            let key = (ft.symbol.clone(), ft.trade.ts_ms);
-            let entry = candidate_events
-                .entry(key)
-                .or_insert((0.0, 0usize, ft.trade.entry_ts_ms));
-            entry.0 += ft.trade.pnl_pct;
-            entry.1 = entry.1.saturating_add(1);
-            entry.2 = entry.2.min(ft.trade.entry_ts_ms);
-        }
-        for ((symbol, _ts_ms), (pnl_sum, count, first_observed_ts_ms)) in candidate_events {
-            if count == 0 {
-                continue;
-            }
+        for event in collapse_candidate_events(&active_trades) {
             self.trade_accumulators
-                .entry(symbol)
+                .entry(event.symbol)
                 .or_default()
                 .value_mut()
-                .observe_with_first_observed_ts(pnl_sum / count as f64, first_observed_ts_ms);
+                .observe_with_first_observed_ts(event.pnl_pct, event.first_observed_ts_ms);
         }
 
         let drained_count = drained_trades.len();

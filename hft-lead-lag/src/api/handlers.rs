@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
-use crate::application::services::{compute_pm_raw, compute_useful_winrate, rank_candidates};
+use crate::domain::screener::portfolio_runtime::{
+    compute_pm_raw, compute_useful_winrate, rank_candidates,
+};
 use crate::domain::screener::shadow_trader::{ChartData, ShadowDebug};
 use crate::domain::screener::PolicyConfigSnapshot;
 use crate::domain::screener::{ScreenerRow, ScreenerStore};
