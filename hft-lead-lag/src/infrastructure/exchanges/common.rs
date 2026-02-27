@@ -111,6 +111,16 @@ pub fn parse_i64(bytes: &[u8]) -> Option<i64> {
     Some(f as i64)
 }
 
+#[inline]
+pub fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 /// Convert price string to ticks (1e-8 precision)
 #[inline]
 pub fn price_to_ticks(price_str: &[u8]) -> Option<i64> {
@@ -185,7 +195,10 @@ pub fn extract_json_string_field_ref_by_pattern<'a>(
 pub fn extract_json_bool_field(json: &[u8], field: &str) -> Option<bool> {
     let field_pattern = format!("\"{}\"", field);
     let field_bytes = field_pattern.as_bytes();
+    extract_json_bool_field_by_pattern(json, field_bytes)
+}
 
+pub fn extract_json_bool_field_by_pattern(json: &[u8], field_bytes: &[u8]) -> Option<bool> {
     let mut pos = 0;
     while let Some(value_pos) = find_json_field_value_start(json, field_bytes, pos) {
         let tail = &json[value_pos..];
@@ -196,7 +209,7 @@ pub fn extract_json_bool_field(json: &[u8], field: &str) -> Option<bool> {
             return Some(false);
         }
         if json[value_pos] == b'-' || json[value_pos].is_ascii_digit() {
-            return extract_json_i64_field(json, field).map(|v| v != 0);
+            return extract_json_i64_field_by_pattern(json, field_bytes).map(|v| v != 0);
         }
         pos = value_pos.saturating_add(1);
     }
@@ -207,7 +220,10 @@ pub fn extract_json_bool_field(json: &[u8], field: &str) -> Option<bool> {
 pub fn extract_json_i64_field(json: &[u8], field: &str) -> Option<i64> {
     let field_pattern = format!("\"{}\"", field);
     let field_bytes = field_pattern.as_bytes();
+    extract_json_i64_field_by_pattern(json, field_bytes)
+}
 
+pub fn extract_json_i64_field_by_pattern(json: &[u8], field_bytes: &[u8]) -> Option<i64> {
     let mut pos = 0;
     while let Some(value_pos) = find_json_field_value_start(json, field_bytes, pos) {
         if json[value_pos] == b'-' || json[value_pos].is_ascii_digit() {
@@ -286,5 +302,12 @@ mod tests {
         let first = find_json_field_value_start(json, br#""s""#, 0).unwrap();
         let second = find_json_field_value_start(json, br#""s""#, first + 1).unwrap();
         assert!(second > first);
+    }
+
+    #[test]
+    fn test_contains_bytes_detects_subslice_without_utf8_conversion() {
+        let data = br#"{"e":"bookTicker","s":"BTCUSDT"}"#;
+        assert!(contains_bytes(data, b"bookTicker"));
+        assert!(!contains_bytes(data, b"aggTrade"));
     }
 }

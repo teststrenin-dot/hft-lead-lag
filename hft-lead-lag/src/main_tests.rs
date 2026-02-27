@@ -888,16 +888,12 @@ async fn event_loop_state_starts_clean() {
     let mut state = EventLoopState::new();
     assert_eq!(state.ticker_count, 0);
     assert_eq!(state.signal_count, 0);
-    assert!(
-        state
-            .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
-            .is_none()
-    );
-    assert!(
-        state
-            .latest_book_for_strategy_symbol(ExchangeSide::Gate, 0)
-            .is_none()
-    );
+    assert!(state
+        .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
+        .is_none());
+    assert!(state
+        .latest_book_for_strategy_symbol(ExchangeSide::Gate, 0)
+        .is_none());
     assert_eq!(state.metrics.drift_stats_string_and_reset(), "no_data");
 }
 
@@ -926,21 +922,15 @@ async fn event_loop_state_process_exchange_result_updates_binance_map() {
         .expect("exchange result should parse");
 
     assert_eq!(processed.updated_strategy_symbol_ids, vec![0, 1]);
-    assert!(
-        state
-            .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
-            .is_some()
-    );
-    assert!(
-        state
-            .latest_book_for_strategy_symbol(ExchangeSide::Binance, 1)
-            .is_some()
-    );
-    assert!(
-        state
-            .latest_book_for_strategy_symbol(ExchangeSide::Gate, 0)
-            .is_none()
-    );
+    assert!(state
+        .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
+        .is_some());
+    assert!(state
+        .latest_book_for_strategy_symbol(ExchangeSide::Binance, 1)
+        .is_some());
+    assert!(state
+        .latest_book_for_strategy_symbol(ExchangeSide::Gate, 0)
+        .is_none());
     assert_eq!(state.ticker_count, 2);
 }
 
@@ -996,16 +986,12 @@ async fn event_loop_state_process_exchange_result_propagates_error() {
         Err(hft_lead_lag::domain::ExchangeError::Timeout(msg)) if msg == "test"
     ));
     assert_eq!(state.ticker_count, 0);
-    assert!(
-        state
-            .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
-            .is_none()
-    );
-    assert!(
-        state
-            .latest_book_for_strategy_symbol(ExchangeSide::Gate, 0)
-            .is_none()
-    );
+    assert!(state
+        .latest_book_for_strategy_symbol(ExchangeSide::Binance, 0)
+        .is_none());
+    assert!(state
+        .latest_book_for_strategy_symbol(ExchangeSide::Gate, 0)
+        .is_none());
 }
 
 fn test_ticker(symbol: &str, exchange_ts_ns: i64) -> hft_lead_lag::domain::BookTicker {
@@ -1124,6 +1110,27 @@ fn updated_strategy_symbol_ids_from_batch_deduplicates_and_filters_unknown_symbo
         &index,
     );
     assert_eq!(ids, vec![0, 1, 2]);
+}
+
+#[test]
+fn strategy_symbol_updates_from_batch_preserves_latest_duplicate_update() {
+    let index = StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    let (ids, updates) = strategy_symbol_updates_from_batch(
+        test_ticker("BTCUSDT", 10),
+        vec![
+            test_ticker("ETHUSDT", 20),
+            test_ticker("BTCUSDT", 30),
+            test_ticker("DOGEUSDT", 40),
+        ],
+        &index,
+    );
+
+    assert_eq!(ids, vec![0, 1]);
+    assert_eq!(updates.len(), 3);
+    assert_eq!(updates[0].0, 0);
+    assert_eq!(updates[1].0, 1);
+    assert_eq!(updates[2].0, 0);
+    assert_eq!(updates[2].1.exchange_ts_ns, 30);
 }
 
 #[test]

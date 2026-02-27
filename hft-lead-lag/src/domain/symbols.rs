@@ -47,7 +47,8 @@ impl SymbolCache {
         }
 
         let bytes = Bytes::copy_from_slice(symbol_str.as_bytes());
-        self.bytes_cache.insert(symbol_str.to_string(), bytes.clone());
+        self.bytes_cache
+            .insert(symbol_str.to_string(), bytes.clone());
         bytes
     }
 

@@ -19,7 +19,8 @@ use crate::domain::{
     SubscriptionId, Trade,
 };
 use crate::infrastructure::exchanges::common::{
-    extract_json_bool_field, extract_json_i64_field, extract_json_string_field_ref, now_ns,
+    contains_bytes, extract_json_bool_field_by_pattern, extract_json_i64_field_by_pattern,
+    extract_json_string_field_ref, extract_json_string_field_ref_by_pattern, now_ns,
     price_to_ticks, qty_to_ticks, timestamp_ms, timestamp_sec, HmacSha512, StampedBytes,
 };
 
@@ -30,6 +31,23 @@ const MSG_CHANNEL_CAPACITY: usize = 25_000;
 const MIN_MSG_CHANNEL_CAPACITY: usize = 1_024;
 const MSG_CHANNEL_CAPACITY_ENV: &str = "GATE_MSG_CHANNEL_CAPACITY";
 const SUBSCRIPTION_REGISTRY_MAX: usize = 4_096;
+const FIELD_S: &[u8] = b"\"s\"";
+const FIELD_CONTRACT: &[u8] = b"\"contract\"";
+const FIELD_C: &[u8] = b"\"c\"";
+const FIELD_BID_PRICE: &[u8] = b"\"b\"";
+const FIELD_BID_QTY: &[u8] = b"\"B\"";
+const FIELD_ASK_PRICE: &[u8] = b"\"a\"";
+const FIELD_ASK_QTY: &[u8] = b"\"A\"";
+const FIELD_TS_T: &[u8] = b"\"t\"";
+const FIELD_TS_TIME_MS: &[u8] = b"\"time_ms\"";
+const FIELD_TRADE_ID_I: &[u8] = b"\"i\"";
+const FIELD_TRADE_ID_ID: &[u8] = b"\"id\"";
+const FIELD_TRADE_SIZE: &[u8] = b"\"size\"";
+const FIELD_IS_BUYER_MAKER: &[u8] = b"\"m\"";
+const FIELD_CREATE_TIME_MS: &[u8] = b"\"create_time_ms\"";
+const EVENT_BOOK_TICKER: &[u8] = b"book_ticker";
+const EVENT_BOOK_TICKER_CHANNEL: &[u8] = b"futures.book_ticker";
+const EVENT_TRADES_CHANNEL: &[u8] = b"futures.trades";
 
 /// Cumulative count of market-data messages dropped due to channel backpressure.
 static DROPPED_MESSAGES: AtomicU64 = AtomicU64::new(0);
@@ -112,8 +130,7 @@ impl GateMarketData {
         let mut latest: std::collections::HashMap<Bytes, BookTicker> =
             std::collections::HashMap::new();
         while let Ok((data, recv_ts_ns)) = rx.try_recv() {
-            let data_str = String::from_utf8_lossy(&data);
-            if data_str.contains("book_ticker") {
+            if contains_bytes(&data, EVENT_BOOK_TICKER) {
                 if let Some(ticker) =
                     Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns)
                 {
@@ -494,9 +511,8 @@ impl MarketDataStream for GateMarketData {
                 return Err(ExchangeError::ConnectionClosed("Not connected".into()));
             };
 
-            let data_str = String::from_utf8_lossy(&data);
-            let is_book_ticker =
-                data_str.contains("futures.book_ticker") || data_str.contains("book_ticker");
+            let is_book_ticker = contains_bytes(&data, EVENT_BOOK_TICKER_CHANNEL)
+                || contains_bytes(&data, EVENT_BOOK_TICKER);
 
             if is_book_ticker {
                 if let Some(ticker) =
@@ -518,8 +534,7 @@ impl MarketDataStream for GateMarketData {
                 return Err(ExchangeError::ConnectionClosed("Not connected".into()));
             };
 
-            let data_str = String::from_utf8_lossy(&data);
-            let is_trade = data_str.contains("futures.trades");
+            let is_trade = contains_bytes(&data, EVENT_TRADES_CHANNEL);
 
             if is_trade {
                 if let Some(trade) = Self::parse_trade_static(&data, &self.symbol_cache, recv_ts_ns)
@@ -538,24 +553,32 @@ impl GateMarketData {
         symbol_cache: &SymbolCache,
         local_ts_ns: i64,
     ) -> Option<BookTicker> {
-        let contract = extract_json_string_field_ref(data, "s")
-            .or_else(|| extract_json_string_field_ref(data, "contract"))
-            .or_else(|| extract_json_string_field_ref(data, "c"))?;
+        let contract = extract_json_string_field_ref_by_pattern(data, FIELD_S)
+            .or_else(|| extract_json_string_field_ref_by_pattern(data, FIELD_CONTRACT))
+            .or_else(|| extract_json_string_field_ref_by_pattern(data, FIELD_C))?;
         let symbol = symbol_cache.intern_gate_contract(contract);
 
-        let bid_price = extract_json_string_field_ref(data, "b").and_then(price_to_ticks)?;
-        let ask_price = extract_json_string_field_ref(data, "a").and_then(price_to_ticks)?;
-        let bid_qty = extract_json_string_field_ref(data, "B")
+        let bid_price = extract_json_string_field_ref_by_pattern(data, FIELD_BID_PRICE)
+            .and_then(price_to_ticks)?;
+        let ask_price = extract_json_string_field_ref_by_pattern(data, FIELD_ASK_PRICE)
+            .and_then(price_to_ticks)?;
+        let bid_qty = extract_json_string_field_ref_by_pattern(data, FIELD_BID_QTY)
             .and_then(qty_to_ticks)
-            .or_else(|| extract_json_i64_field(data, "B").map(|v| v.saturating_mul(100_000_000)))
+            .or_else(|| {
+                extract_json_i64_field_by_pattern(data, FIELD_BID_QTY)
+                    .map(|v| v.saturating_mul(100_000_000))
+            })
             .unwrap_or(0);
-        let ask_qty = extract_json_string_field_ref(data, "A")
+        let ask_qty = extract_json_string_field_ref_by_pattern(data, FIELD_ASK_QTY)
             .and_then(qty_to_ticks)
-            .or_else(|| extract_json_i64_field(data, "A").map(|v| v.saturating_mul(100_000_000)))
+            .or_else(|| {
+                extract_json_i64_field_by_pattern(data, FIELD_ASK_QTY)
+                    .map(|v| v.saturating_mul(100_000_000))
+            })
             .unwrap_or(0);
 
-        let exchange_ts = extract_json_i64_field(data, "t")
-            .or_else(|| extract_json_i64_field(data, "time_ms"))
+        let exchange_ts = extract_json_i64_field_by_pattern(data, FIELD_TS_T)
+            .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_TS_TIME_MS))
             .unwrap_or(0);
 
         Some(BookTicker::new(
@@ -575,10 +598,10 @@ impl GateMarketData {
         symbol_cache: &SymbolCache,
         local_ts_ns: i64,
     ) -> Option<Trade> {
-        let contract = extract_json_string_field_ref(data, "c")
-            .or_else(|| extract_json_string_field_ref(data, "contract"))
+        let contract = extract_json_string_field_ref_by_pattern(data, FIELD_C)
+            .or_else(|| extract_json_string_field_ref_by_pattern(data, FIELD_CONTRACT))
             .or_else(|| {
-                let maybe_symbol = extract_json_string_field_ref(data, "s")?;
+                let maybe_symbol = extract_json_string_field_ref_by_pattern(data, FIELD_S)?;
                 if maybe_symbol.contains(&b'_') {
                     Some(maybe_symbol)
                 } else {
@@ -587,14 +610,14 @@ impl GateMarketData {
             })?;
         let symbol = symbol_cache.intern_gate_contract(contract);
 
-        let trade_id =
-            extract_json_i64_field(data, "i").or_else(|| extract_json_i64_field(data, "id"))?;
+        let trade_id = extract_json_i64_field_by_pattern(data, FIELD_TRADE_ID_I)
+            .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_TRADE_ID_ID))?;
         let price = Self::extract_nested_price(data, "data", "p")
             .or_else(|| extract_json_string_field_ref(data, "p").and_then(price_to_ticks))?;
         let qty = Self::extract_nested_qty(data, "data", "s")
             .map(i64::saturating_abs)
             .or_else(|| {
-                extract_json_i64_field(data, "size")
+                extract_json_i64_field_by_pattern(data, FIELD_TRADE_SIZE)
                     .map(|v| v.saturating_abs().saturating_mul(100_000_000))
             })
             .or_else(|| {
@@ -604,7 +627,7 @@ impl GateMarketData {
             })
             .or_else(|| extract_json_string_field_ref(data, "s").and_then(qty_to_ticks))?;
 
-        let is_buyer_maker = extract_json_bool_field(data, "m")
+        let is_buyer_maker = extract_json_bool_field_by_pattern(data, FIELD_IS_BUYER_MAKER)
             .or_else(|| {
                 extract_json_string_field_ref(data, "side").and_then(|side| {
                     if side.eq_ignore_ascii_case(b"sell") || side.eq_ignore_ascii_case(b"ask") {
@@ -619,13 +642,13 @@ impl GateMarketData {
             })
             .or_else(|| {
                 Self::extract_nested_i64(data, "data", "s")
-                    .or_else(|| extract_json_i64_field(data, "size"))
+                    .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_TRADE_SIZE))
                     .map(|v| v < 0)
             })
             .unwrap_or(false);
-        let exchange_ts = extract_json_i64_field(data, "t")
-            .or_else(|| extract_json_i64_field(data, "create_time_ms"))
-            .or_else(|| extract_json_i64_field(data, "time_ms"))
+        let exchange_ts = extract_json_i64_field_by_pattern(data, FIELD_TS_T)
+            .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_CREATE_TIME_MS))
+            .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_TS_TIME_MS))
             .unwrap_or(0);
 
         Some(Trade::new(

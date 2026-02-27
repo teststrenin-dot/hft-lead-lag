@@ -17,8 +17,9 @@ use crate::domain::{
     SubscriptionId, Trade,
 };
 use crate::infrastructure::exchanges::common::{
-    extract_json_bool_field, extract_json_i64_field, extract_json_string_field_ref_by_pattern,
-    now_ns, price_to_ticks, qty_to_ticks, timestamp_ms, StampedBytes,
+    contains_bytes, extract_json_bool_field_by_pattern, extract_json_i64_field_by_pattern,
+    extract_json_string_field_ref_by_pattern, now_ns, price_to_ticks, qty_to_ticks, timestamp_ms,
+    StampedBytes,
 };
 
 const BINANCE_WS_ENDPOINT: &str = "wss://fstream.binance.com/ws";
@@ -34,6 +35,13 @@ const FIELD_ASK_PRICE: &[u8] = b"\"a\"";
 const FIELD_ASK_QTY: &[u8] = b"\"A\"";
 const FIELD_TRADE_PRICE: &[u8] = b"\"p\"";
 const FIELD_TRADE_QTY: &[u8] = b"\"q\"";
+const FIELD_TRADE_TS: &[u8] = b"\"T\"";
+const FIELD_EVENT_TS: &[u8] = b"\"E\"";
+const FIELD_TRADE_ID: &[u8] = b"\"t\"";
+const FIELD_AGG_TRADE_ID: &[u8] = b"\"a\"";
+const FIELD_IS_BUYER_MAKER: &[u8] = b"\"m\"";
+const EVENT_BOOK_TICKER: &[u8] = b"bookTicker";
+const EVENT_AGG_TRADE: &[u8] = b"\"e\":\"aggTrade\"";
 
 /// Cumulative count of market-data messages dropped due to channel backpressure.
 static DROPPED_MESSAGES: AtomicU64 = AtomicU64::new(0);
@@ -111,8 +119,7 @@ impl BinanceMarketData {
         let mut latest: std::collections::HashMap<bytes::Bytes, BookTicker> =
             std::collections::HashMap::new();
         while let Ok((data, recv_ts_ns)) = rx.try_recv() {
-            let data_str = String::from_utf8_lossy(&data);
-            if data_str.contains("bookTicker") {
+            if contains_bytes(&data, EVENT_BOOK_TICKER) {
                 if let Some(ticker) =
                     Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns)
                 {
@@ -170,16 +177,16 @@ impl BinanceMarketData {
         local_ts_ns: i64,
     ) -> Option<BookTicker> {
         let symbol = extract_json_string_field_ref_by_pattern(data, FIELD_S)?;
-        let bid_price =
-            extract_json_string_field_ref_by_pattern(data, FIELD_BID_PRICE).and_then(price_to_ticks)?;
+        let bid_price = extract_json_string_field_ref_by_pattern(data, FIELD_BID_PRICE)
+            .and_then(price_to_ticks)?;
         let bid_qty =
             extract_json_string_field_ref_by_pattern(data, FIELD_BID_QTY).and_then(qty_to_ticks)?;
-        let ask_price =
-            extract_json_string_field_ref_by_pattern(data, FIELD_ASK_PRICE).and_then(price_to_ticks)?;
+        let ask_price = extract_json_string_field_ref_by_pattern(data, FIELD_ASK_PRICE)
+            .and_then(price_to_ticks)?;
         let ask_qty =
             extract_json_string_field_ref_by_pattern(data, FIELD_ASK_QTY).and_then(qty_to_ticks)?;
-        let exchange_ts_ms = extract_json_i64_field(data, "T")
-            .or_else(|| extract_json_i64_field(data, "E"))
+        let exchange_ts_ms = extract_json_i64_field_by_pattern(data, FIELD_TRADE_TS)
+            .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_EVENT_TS))
             .unwrap_or(0);
 
         Some(BookTicker::new(
@@ -199,14 +206,15 @@ impl BinanceMarketData {
         local_ts_ns: i64,
     ) -> Option<Trade> {
         let symbol = extract_json_string_field_ref_by_pattern(data, FIELD_S)?;
-        let trade_id =
-            extract_json_i64_field(data, "t").or_else(|| extract_json_i64_field(data, "a"))?;
-        let price =
-            extract_json_string_field_ref_by_pattern(data, FIELD_TRADE_PRICE).and_then(price_to_ticks)?;
-        let qty =
-            extract_json_string_field_ref_by_pattern(data, FIELD_TRADE_QTY).and_then(qty_to_ticks)?;
-        let is_buyer_maker = extract_json_bool_field(data, "m").unwrap_or(false);
-        let exchange_ts = extract_json_i64_field(data, "T").unwrap_or(0);
+        let trade_id = extract_json_i64_field_by_pattern(data, FIELD_TRADE_ID)
+            .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_AGG_TRADE_ID))?;
+        let price = extract_json_string_field_ref_by_pattern(data, FIELD_TRADE_PRICE)
+            .and_then(price_to_ticks)?;
+        let qty = extract_json_string_field_ref_by_pattern(data, FIELD_TRADE_QTY)
+            .and_then(qty_to_ticks)?;
+        let is_buyer_maker =
+            extract_json_bool_field_by_pattern(data, FIELD_IS_BUYER_MAKER).unwrap_or(false);
+        let exchange_ts = extract_json_i64_field_by_pattern(data, FIELD_TRADE_TS).unwrap_or(0);
 
         Some(Trade::new(
             symbol_cache.intern_bytes(&symbol),
@@ -497,9 +505,8 @@ impl MarketDataStream for BinanceMarketData {
                 .recv()
                 .await
                 .ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
-            let data_str = String::from_utf8_lossy(&data);
 
-            if data_str.contains("bookTicker") {
+            if contains_bytes(&data, EVENT_BOOK_TICKER) {
                 if let Some(ticker) =
                     Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns)
                 {
@@ -520,9 +527,8 @@ impl MarketDataStream for BinanceMarketData {
                 .recv()
                 .await
                 .ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
-            let data_str = String::from_utf8_lossy(&data);
 
-            if data_str.contains("\"e\":\"aggTrade\"") {
+            if contains_bytes(&data, EVENT_AGG_TRADE) {
                 if let Some(trade) = Self::parse_trade_static(&data, &self.symbol_cache, recv_ts_ns)
                 {
                     return Ok(trade);
@@ -572,8 +578,8 @@ mod tests {
             "T":1700000000000
         }"#;
 
-        let ticker =
-            BinanceMarketData::parse_book_ticker_static(payload, &cache, 99).expect("ticker parses");
+        let ticker = BinanceMarketData::parse_book_ticker_static(payload, &cache, 99)
+            .expect("ticker parses");
         assert_eq!(ticker.symbol.as_ref(), b"BTCUSDT");
         assert_eq!(ticker.bid_qty_ticks, 150_000_000);
         assert_eq!(ticker.ask_qty_ticks, 200_000_000);

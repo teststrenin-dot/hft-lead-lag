@@ -1,7 +1,6 @@
 use super::{
-    ingest_exchange_batch, updated_strategy_symbol_ids_from_batch, BatchIngestContext,
-    ConfigManager, HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore,
-    SIGNAL_CHECK_BUDGET_PER_TICK,
+    ingest_exchange_batch, strategy_symbol_updates_from_batch, BatchIngestContext, ConfigManager,
+    HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore, SIGNAL_CHECK_BUDGET_PER_TICK,
 };
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -379,8 +378,6 @@ impl EventLoopState {
     ) -> Result<ProcessExchangeResult, hft_lead_lag::domain::ExchangeError> {
         let parsed_ts_ns = Self::now_ns();
         let ticker = result?;
-        let updated_strategy_symbol_ids =
-            updated_strategy_symbol_ids_from_batch(&ticker, &drained, strategy_symbol_index);
         let mut ctx = BatchIngestContext {
             exchange: side.exchange_name(),
             ticker_count: &mut self.ticker_count,
@@ -390,12 +387,9 @@ impl EventLoopState {
             ws_tx,
         };
         ingest_exchange_batch(&ticker, &drained, &mut ctx);
-        self.upsert_latest_books_by_symbol_ids_from_batch(
-            side,
-            &ticker,
-            &drained,
-            strategy_symbol_index,
-        );
+        let (updated_strategy_symbol_ids, strategy_updates) =
+            strategy_symbol_updates_from_batch(ticker, drained, strategy_symbol_index);
+        self.upsert_latest_books_by_symbol_ids(side, strategy_updates);
         let state_updated_ts_ns = Self::now_ns();
         self.record_stage_timestamps_for_batch(
             side,
@@ -501,28 +495,18 @@ impl EventLoopState {
         }
     }
 
-    fn upsert_latest_books_by_symbol_ids_from_batch(
+    fn upsert_latest_books_by_symbol_ids(
         &mut self,
         side: ExchangeSide,
-        first: &hft_lead_lag::domain::BookTicker,
-        drained: &[hft_lead_lag::domain::BookTicker],
-        strategy_symbol_index: &StrategySymbolIndex,
+        updates: Vec<(SymbolId, hft_lead_lag::domain::BookTicker)>,
     ) {
         let cache = self.latest_books_by_symbol_id_mut(side);
-        let mut upsert = |ticker: &hft_lead_lag::domain::BookTicker| {
-            let Some(symbol_id) = strategy_symbol_index.symbol_id(ticker.symbol.as_ref()) else {
-                return;
-            };
+        for (symbol_id, ticker) in updates {
             let idx = symbol_id as usize;
             if cache.len() <= idx {
                 cache.resize(idx + 1, None);
             }
-            cache[idx] = Some(ticker.clone());
-        };
-
-        upsert(first);
-        for ticker in drained {
-            upsert(ticker);
+            cache[idx] = Some(ticker);
         }
     }
 

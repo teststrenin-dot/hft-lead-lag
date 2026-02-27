@@ -1,6 +1,6 @@
-use super::{EventLoopMetrics, MarketDataEvent, ScreenerStore, StrategySymbolIndex, SymbolId};
 #[cfg(test)]
 use super::rebuild_latest_map;
+use super::{EventLoopMetrics, MarketDataEvent, ScreenerStore, StrategySymbolIndex, SymbolId};
 #[cfg(test)]
 use bytes::Bytes;
 use std::collections::HashSet;
@@ -33,6 +33,7 @@ pub(super) fn updated_symbols_from_batch(
     symbols
 }
 
+#[cfg(test)]
 pub(super) fn updated_strategy_symbol_ids_from_batch(
     first: &hft_lead_lag::domain::BookTicker,
     drained: &[hft_lead_lag::domain::BookTicker],
@@ -53,6 +54,36 @@ pub(super) fn updated_strategy_symbol_ids_from_batch(
         }
     }
     ids
+}
+
+pub(super) fn strategy_symbol_updates_from_batch(
+    first: hft_lead_lag::domain::BookTicker,
+    drained: Vec<hft_lead_lag::domain::BookTicker>,
+    strategy_symbol_index: &StrategySymbolIndex,
+) -> (
+    Vec<SymbolId>,
+    Vec<(SymbolId, hft_lead_lag::domain::BookTicker)>,
+) {
+    let mut ids = Vec::with_capacity(drained.len() + 1);
+    let mut updates = Vec::with_capacity(drained.len() + 1);
+    let mut seen: HashSet<SymbolId> = HashSet::with_capacity(drained.len() + 1);
+
+    let mut push = |ticker: hft_lead_lag::domain::BookTicker| {
+        let Some(symbol_id) = strategy_symbol_index.symbol_id(ticker.symbol.as_ref()) else {
+            return;
+        };
+        if seen.insert(symbol_id) {
+            ids.push(symbol_id);
+        }
+        updates.push((symbol_id, ticker));
+    };
+
+    push(first);
+    for ticker in drained {
+        push(ticker);
+    }
+
+    (ids, updates)
 }
 
 #[cfg(test)]
