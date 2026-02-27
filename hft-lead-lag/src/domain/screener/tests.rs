@@ -567,6 +567,32 @@ fn incremental_matches_changed_ids_from_old_or_new_configs() {
 }
 
 #[test]
+fn incremental_allows_removing_existing_fleet_config_without_symbol_state() {
+    let store = ScreenerStore::default();
+    let cfg_a = config_with_gap(141.0);
+    let cfg_b = config_with_gap(142.0);
+
+    store.replace_fleet_configs(vec![cfg_a, cfg_b]);
+    assert_eq!(store.symbols.len(), 0, "test expects no symbol fleets");
+
+    let report = store
+        .try_apply_fleet_patch(
+            vec![cfg_b],
+            FleetPatchPlan::new(
+                FleetPatchMode::Incremental,
+                [cfg_a.config_id()],
+                None::<Vec<String>>,
+            ),
+        )
+        .expect("removing existing fleet config_id should be accepted");
+
+    assert_eq!(report.matched_changed_ids_old, 1);
+    assert_eq!(report.matched_changed_ids_new, 0);
+    assert_eq!(report.unmatched_changed_ids, 0);
+    assert_eq!(report.symbols_reset, 0);
+}
+
+#[test]
 fn incremental_rejects_when_changed_ids_match_nothing() {
     let store = ScreenerStore::default();
     let old_cfg = config_with_gap(101.0);

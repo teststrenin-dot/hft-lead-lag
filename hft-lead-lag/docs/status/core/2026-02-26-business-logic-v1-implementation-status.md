@@ -45,6 +45,7 @@ Locked objective for all CP4+ work:
 | Forward fairness + hard caps (`CP4.4`) | `Implemented` | `ray_driver/expand.py:13`, `ray_driver/cli.py:12`, `ray_driver/tests/test_forward_limits.py:52`, `src/api/runner/command.rs:3`, `src/api/templates/trials.html:126` | При capped-forward конфиги заполняются round-robin по refs (без first-ref bias); лимиты дополнительно ограничены safe cap (`max_refs<=256`, `max_configs<=5000`) в CLI/Runner/UI. |
 | ASHA trial granularity (`CP4.5`) | `Implemented` | `ray_driver/cli.py:213`, `ray_driver/trainable.py:11`, `ray_driver/config_store.py:78`, `ray_driver/tests/test_trainable.py:21` | Forward запускает единый runtime batch и затем оценивает каждый `config_id` отдельным Ray trial (`grid_search`), что убирает batch-агрегацию метрик внутри ASHA. |
 | Runtime auto-prune during forward (`CP4.6`) | `Implemented` | `ray_driver/cli.py:19`, `ray_driver/cli.py:291`, `ray_driver/ipc.py:42`, `ray_driver/tests/test_forward_limits.py:247` | Ранние `ASHA STOP` автоматически собираются в batched incremental patch и удаляются из runtime active set, снижая нагрузку прямо в процессе forward-run. |
+| CP4.6 review remediation (`CP4.6-R1`) | `Implemented` | `src/domain/screener/fleet_reload.rs:130`, `src/domain/screener/tests.rs:569`, `ray_driver/cli.py:383`, `ray_driver/tests/test_forward_limits.py:133` | Исправлены два P1 из review: incremental prune больше не отклоняется для “untouched” config_id, и forward гарантированно очищает `run_id` lease после завершения/ошибки. |
 
 ## 3) Portfolio Topology
 | Item | Status | Evidence | Notes |
@@ -114,6 +115,7 @@ Locked objective for all CP4+ work:
 3. `P1` (`CP4.4`): убран first-ref bias в capped-forward (round-robin across refs) и добавлены hard-cap guardrails на `max_refs/max_configs`.
 4. `P1` (`CP4.5`): forward переведён на модель `1 config = 1 trial` в ASHA (пер-config метрики вместо batch-агрегата).
 5. `P1` (`CP4.6`): ранние ASHA-stop теперь автоматически prun-ятся в runtime через incremental patch.
+6. `P1` (`CP4.6-R1`): закрыты review-баги incremental prune matching и stale run lease cleanup.
 
 ## Что Нужно Сделать Для 100% Бизнес-Логики
 1. Реализовать явный runtime слой `portfolio -> bot` (изолированный execution loop, health, restart policy по каждому портфелю).

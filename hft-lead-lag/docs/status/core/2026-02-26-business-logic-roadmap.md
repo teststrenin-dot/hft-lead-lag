@@ -28,7 +28,7 @@ Checkpoint ownership over economic nodes:
 | `CP1` Рыночные данные и время | `Done` | Ingest, clock offsets, drift и базовые time-domain гарантии в коде и тестах. |
 | `CP2` Lead-Lag и shadow execution | `Done` | Сигналы, shadow lifecycle, stop/exit-ветки и базовая устойчивость закрыты. |
 | `CP3` Математика кандидатов | `Done` | Eligibility/ranking/pm_raw/useful_winrate в рабочем контуре. |
-| `CP4` Портфельная гонка (paper runtime) | `In Progress` | Assignment/paper-state работает; `CP4.1` (operator UI `/portfolio`), `CP4.2` (startup command-gating hotfix), `CP4.3` (bounded forward hotfix), `CP4.4` (forward fairness + hard guardrails), `CP4.5` (`1 config = 1 ASHA trial`) и `CP4.6` (runtime auto-prune ранних ASHA-stop) реализованы, остаются winner-promotion и runtime-isolation задачи. |
+| `CP4` Портфельная гонка (paper runtime) | `In Progress` | Assignment/paper-state работает; `CP4.1` (operator UI `/portfolio`), `CP4.2` (startup command-gating hotfix), `CP4.3` (bounded forward hotfix), `CP4.4` (forward fairness + hard guardrails), `CP4.5` (`1 config = 1 ASHA trial`) и `CP4.6` (runtime auto-prune ранних ASHA-stop) реализованы. После review-remediation добавлены: безопасный `run_id` cleanup после forward и корректный incremental-match для prune even-without-symbol-state. |
 | `CP5` Надёжность состояния | `In Progress` | Persistence/restore усилены, нужны доп. e2e-гарантии restart/recovery на уровне checkpoint. |
 | `CP6` Контрольный слой и UI | `In Progress` | Базовые API/health/read-model есть; фокус на operational UX, алертах и incident-сценариях. |
 | `CP7` Предзапуск к rebalance/live | `Planned` | Rebalance/live safety layer ещё не включены в runtime. |
@@ -64,6 +64,7 @@ Checkpoint ownership over economic nodes:
 7. `CP4.4` Hotfix forward fairness: `expand_around_references` при capped-forward распределяет конфиги round-robin по refs, а `max_refs/max_configs` дополнительно зажаты hard-cap guardrails в CLI/Runner/UI. `Done`.
 8. `CP4.5` ASHA granularity refactor: forward запускает единый batch `run_id`, после чего Ray ведёт отдельный trial на каждый `config_id` (`1 config = 1 trial`) вместо агрегатного batch-trial. `Done`.
 9. `CP4.6` Runtime auto-prune: при раннем `ASHA STOP` (до terminal rung) runtime получает batched incremental patch и удаляет stop-нутые config-ы из активного fleet, уменьшая нагрузку в ходе forward-run. `Done`.
+10. `CP4.6-R1` Review remediation: incremental prune теперь валиден даже когда удаляемый config ещё не привязан к symbol fleet (changed-id матчится и по текущему fleet config set), а `forward` гарантированно освобождает `run_id` lease после завершения. `Done`.
 
 ### `CP5` Надёжность состояния
 1. Persistence/restore runtime и paper-state.
@@ -142,6 +143,7 @@ Exit gate:
 8. `CP4.4` `Done` (`P1 remediation`): capped-forward больше не вырождается в первый reference; добавлены round-robin распределение конфигов и hard-cap guardrails (`max_refs<=256`, `max_configs<=5000`) на всех входах.
 9. `CP4.5` `Done` (`P1 architecture shift`): forward переведён на `1 config = 1 ASHA trial` через `grid_search(config_id)` на общем `run_id`.
 10. `CP4.6` `Done` (`P1 performance shift`): ранние ASHA-stop автоматически prun-ятся из runtime (incremental patch), что снижает фактическое число активных конфигов во время прогона.
+11. `CP4.6-R1` `Done` (`P1 bugfix`): устранён reject incremental prune для “untouched” config_id и устранён stale active run lease после завершения forward.
 Exit gate:
 1. В рантайме есть стабильный winner selection и promotion flow.
 2. Портфели изолированы по execution-state.

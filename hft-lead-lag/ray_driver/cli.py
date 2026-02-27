@@ -30,6 +30,7 @@ def _asha_terminal_budget_s(max_budget_s: int, grace_period_s: int, reduction_fa
 
 class ForwardRuntimePruneCallback:
     """Batch runtime incremental patches for ASHA early-stopped config_ids."""
+    _SAVED_FILE_TEMPLATES = []
 
     def __init__(
         self,
@@ -382,19 +383,25 @@ def cmd_forward(args):
         min_patch_interval_s=max(10.0, float(args.report_interval) * 2.0),
     )
 
-    tune.run(
-        FleetTrial,
-        config={
-            "run_id": run_id,
-            "config_id": tune.grid_search(config_ids),
-            "report_interval_s": args.report_interval,
-        },
-        scheduler=scheduler,
-        num_samples=1,
-        max_concurrent_trials=FORWARD_MAX_CONCURRENT_TRIALS,
-        callbacks=[prune_callback],
-        verbose=1,
-    )
+    try:
+        tune.run(
+            FleetTrial,
+            config={
+                "run_id": run_id,
+                "config_id": tune.grid_search(config_ids),
+                "report_interval_s": args.report_interval,
+            },
+            scheduler=scheduler,
+            num_samples=1,
+            max_concurrent_trials=FORWARD_MAX_CONCURRENT_TRIALS,
+            callbacks=[prune_callback],
+            verbose=1,
+        )
+    finally:
+        try:
+            ipc.clear_active_run(run_id)
+        except Exception as exc:
+            print(f"[forward] warning: failed to clear active run_id={run_id}: {exc}")
 
 
 def cmd_promote(args):

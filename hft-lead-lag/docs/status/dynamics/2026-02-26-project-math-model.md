@@ -1,7 +1,7 @@
 # Project Math Model — HFT Lead-Lag
 
 Date: 2026-02-26
-Last sync: commits up to `ad041ca`
+Last sync: working tree after `b64a2c5` + `CP4.6-R1` remediation
 Scope: математика и формулы, реально используемые в runtime.
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 
@@ -31,6 +31,29 @@ admission requires useful_winrate >= 0.30 and avg_pnl_pct >= 0
    - `Risk`: reset/cooldown trigger math.
    - `Capital`: allocation metrics (planned in CP7).
    - `Feedback`: health/read-model observability metrics.
+
+## Forward/ASHA Runtime Math (CP4.5/CP4.6)
+1. ASHA trial granularity:
+```text
+trial := one config_id
+metric(trial, t) := avg_pnl_pct for that config_id at time_budget_s=t
+```
+2. Terminal rung (not considered early-prune):
+```text
+terminal_budget_s = max grace_period_s * (reduction_factor^k), where <= max_budget_s
+```
+3. Early-prune condition used for runtime removal:
+```text
+trial_done and time_budget_s < terminal_budget_s
+```
+4. Runtime prune patch semantics:
+```text
+mode = incremental
+changed_config_ids = pruned_config_ids
+new_runtime_config_set = active_config_ids - pruned_config_ids
+```
+5. Review remediation constraint:
+`changed_config_ids` matching must use full active fleet config set, not only symbol-attached fleets, otherwise untouched config removals are false-rejected.
 
 ## 0) Units and Conventions
 - `bps` (basis points): `1 bps = 0.01%`.

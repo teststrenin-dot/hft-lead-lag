@@ -2,6 +2,7 @@
 
 Date: 2026-02-27
 Status: Active strategic anchor for CP4+
+Last implementation sync: `CP4.6-R1` (ASHA per-config + runtime auto-prune + review remediations)
 
 ## 1) Locked Business Objective
 Maximize risk-adjusted return under constrained capital by continuously selecting robust alpha contexts (symbols/configs/portfolios) from shadow validation into paper execution, while strictly containing drawdown and operational failure risk.
@@ -28,6 +29,12 @@ Control chain:
 1. Every checkpoint task must declare target node(s) in the control map.
 2. Every milestone must declare expected metric effect and failure mode if omitted.
 3. Checkpoint exits are valid only if node-level risks are demonstrably reduced.
+
+## 3.1) CP4 Runtime Note (latest)
+1. `Competition`: `forward` now evaluates configs as independent ASHA trials (`1 config = 1 trial`), so winner/loser decisions are no longer batch-aggregated.
+2. `Risk`: early-stopped ASHA trials are now auto-pruned from runtime via incremental patches, reducing runtime load during forward execution.
+3. `Risk` remediation: incremental prune matching now uses full active fleet config set (not only symbol-attached fleets), preventing false rejects on untouched config removal.
+4. `Feedback` hygiene: `forward` now clears active `run_id` lease on completion, preventing stale background execution after trial end.
 
 Binding by checkpoint:
 1. `CP0`: freeze contracts that expose node boundaries.

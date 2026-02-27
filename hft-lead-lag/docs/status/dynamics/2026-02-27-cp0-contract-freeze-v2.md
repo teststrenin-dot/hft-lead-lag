@@ -4,6 +4,7 @@ Date: 2026-02-27
 Contract version: `cp0-v2`
 Pinned baseline commit: `3c501387d99e27a67c329c07b23bdcd3ad77347a`
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+Last validation sync: `CP4.6-R1` (no contract surface deltas)
 
 ## 0) Strategic Boundary Mapping (Frozen for cp0-v2)
 Business objective boundary:

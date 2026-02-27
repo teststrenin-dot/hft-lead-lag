@@ -133,6 +133,9 @@ def test_cmd_forward_applies_ref_and_config_caps(monkeypatch, tmp_path):
             submitted["configs"] = list(configs)
             return SimpleNamespace(config_count=len(configs), drained_trades=0)
 
+        def clear_active_run(self, run_id=None):
+            submitted["cleared_run_id"] = run_id
+
     monkeypatch.setattr(cli, "FleetIPC", FakeIPC)
     monkeypatch.setattr(
         cli,
@@ -165,6 +168,7 @@ def test_cmd_forward_applies_ref_and_config_caps(monkeypatch, tmp_path):
     assert run_cfg["config_id"] == {"grid_search": [101, 102]}
     assert captured["grid_search_values"] == [101, 102]
     assert captured["run_kwargs"]["num_samples"] == 1
+    assert submitted["cleared_run_id"] == submitted["run_id"]
 
 
 def test_cmd_forward_clamps_limits_to_hard_caps(monkeypatch, tmp_path):
@@ -193,6 +197,9 @@ def test_cmd_forward_clamps_limits_to_hard_caps(monkeypatch, tmp_path):
 
         def submit_batch(self, _run_id, _configs):
             return SimpleNamespace(config_count=1, drained_trades=0)
+
+        def clear_active_run(self, _run_id=None):
+            return None
 
     monkeypatch.setattr(cli, "FleetIPC", FakeIPC)
     monkeypatch.setattr(
@@ -235,6 +242,9 @@ def test_cmd_forward_fails_when_config_pairs_not_resolved(monkeypatch, tmp_path)
 
         def submit_batch(self, _run_id, _configs):
             return SimpleNamespace(config_count=1, drained_trades=0)
+
+        def clear_active_run(self, _run_id=None):
+            return None
 
     monkeypatch.setattr(cli, "FleetIPC", FakeIPC)
     monkeypatch.setattr(cli, "resolve_config_pairs_for_configs", lambda _db, _cfgs: [])

@@ -3,6 +3,7 @@
 Date: 2026-02-26  
 Scope: обязательный рабочий процесс для всех следующих изменений (CP4+ и дальше).
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+Last delivery sync: `CP4.6-R1`
 
 ## 0) Strategic Pre-Check (mandatory)
 Перед стартом любой вехи команда обязана зафиксировать:
@@ -40,6 +41,12 @@ Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-contr
 ### CP4 — Portfolio Race & Paper Runtime
 Outcome:
 - `1 portfolio = 1 execution loop` (paper mode), winner-promotion path, health per portfolio.
+
+Current delivered subset:
+1. `forward` работает как `1 config = 1 ASHA trial`.
+2. Ранние ASHA-stop автоматически удаляются из runtime (`incremental` prune patches).
+3. Forward run lease автоматически очищается по завершению (`clear_active_run(run_id)`).
+4. Incremental prune корректно принимает removal even when config не был привязан к symbol fleet.
 
 DoD:
 - loop каждого портфеля изолирован;

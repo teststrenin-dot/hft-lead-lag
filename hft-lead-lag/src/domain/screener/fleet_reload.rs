@@ -130,7 +130,12 @@ fn collect_patch_match_stats(
     plan: &FleetPatchPlan,
     new_configs: &[TraderConfig],
 ) -> FleetPatchMatchStats {
-    let mut old_ids = HashSet::new();
+    let mut old_ids: HashSet<u64> = store
+        .fleet_configs
+        .load()
+        .iter()
+        .map(TraderConfig::config_id)
+        .collect();
     for entry in store.symbols.iter() {
         if let Some(fleet) = entry.value().fleet.as_ref() {
             fleet.collect_config_ids(&mut old_ids);
