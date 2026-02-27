@@ -888,6 +888,222 @@ fn screener_portfolio_runtime_supports_dynamic_portfolio_ids() {
 }
 
 #[test]
+fn portfolio_paper_money_updates_only_for_active_symbols() {
+    let store = ScreenerStore::default();
+    store.restore_portfolio_runtime_v1_from_db_rows(
+        &[
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec!["BTCUSDT".to_string()],
+                active_symbols: vec!["BTCUSDT".to_string()],
+                updated_at_ms: 600_000,
+            },
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: vec!["ETHUSDT".to_string()],
+                active_symbols: vec!["ETHUSDT".to_string()],
+                updated_at_ms: 600_000,
+            },
+        ],
+        &[],
+    );
+
+    let before = store.portfolio_paper_states_v1();
+    let a_before = before.get("A").expect("portfolio A paper state");
+    let b_before = before.get("B").expect("portfolio B paper state");
+    assert!((a_before.equity_usd - 10_000.0).abs() < 1e-9);
+    assert!((b_before.equity_usd - 10_000.0).abs() < 1e-9);
+    assert_eq!(a_before.closed_trades, 0);
+    assert_eq!(b_before.closed_trades, 0);
+
+    store.observe_closed_trade_for_portfolio("BTCUSDT", 1.0, false, 700_000);
+    store.observe_closed_trade_for_portfolio("ETHUSDT", -2.0, true, 710_000);
+    store.observe_closed_trade_for_portfolio("XRPUSDT", 5.0, false, 720_000);
+
+    let after = store.portfolio_paper_states_v1();
+    let a_after = after.get("A").expect("portfolio A paper state");
+    let b_after = after.get("B").expect("portfolio B paper state");
+
+    assert!((a_after.realized_pnl_usd - 1.0).abs() < 1e-9);
+    assert!((a_after.equity_usd - 10_001.0).abs() < 1e-9);
+    assert_eq!(a_after.closed_trades, 1);
+    assert_eq!(a_after.profitable_trades, 1);
+    assert_eq!(a_after.losing_trades, 0);
+
+    assert!((b_after.realized_pnl_usd + 2.0).abs() < 1e-9);
+    assert!((b_after.equity_usd - 9_998.0).abs() < 1e-9);
+    assert_eq!(b_after.closed_trades, 1);
+    assert_eq!(b_after.profitable_trades, 0);
+    assert_eq!(b_after.losing_trades, 1);
+}
+
+#[test]
+fn portfolio_paper_money_resets_with_new_portfolio_ids() {
+    let store = ScreenerStore::default();
+    store.restore_portfolio_runtime_v1_from_db_rows(
+        &[crate::infrastructure::db::PortfolioStateRecordV1 {
+            portfolio_id: "A".to_string(),
+            shortlist: vec!["BTCUSDT".to_string()],
+            active_symbols: vec!["BTCUSDT".to_string()],
+            updated_at_ms: 600_000,
+        }],
+        &[],
+    );
+    store.observe_closed_trade_for_portfolio("BTCUSDT", 1.0, false, 700_000);
+    let before = store.portfolio_paper_states_v1();
+    assert!((before.get("A").expect("portfolio A").equity_usd - 10_001.0).abs() < 1e-9);
+
+    store.set_portfolio_ids_v1(vec!["X".to_string(), "Y".to_string()]);
+    let after = store.portfolio_paper_states_v1();
+    assert_eq!(after.len(), 2);
+    assert!(!after.contains_key("A"));
+    assert!(after.contains_key("X"));
+    assert!(after.contains_key("Y"));
+    for state in after.values() {
+        assert!((state.equity_usd - 10_000.0).abs() < 1e-9);
+        assert!((state.realized_pnl_usd - 0.0).abs() < 1e-9);
+        assert_eq!(state.closed_trades, 0);
+    }
+}
+
+#[test]
+fn portfolio_paper_money_attributes_to_owner_at_entry_not_close() {
+    let store = ScreenerStore::default();
+    store.restore_portfolio_runtime_v1_from_db_rows(
+        &[
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec!["BTCUSDT".to_string()],
+                active_symbols: vec!["BTCUSDT".to_string()],
+                updated_at_ms: 1_000,
+            },
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: vec![],
+                active_symbols: vec![],
+                updated_at_ms: 1_000,
+            },
+        ],
+        &[],
+    );
+
+    // Simulate reassignment after entry: close should still be attributed to A.
+    store.restore_portfolio_runtime_v1_from_db_rows(
+        &[
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec![],
+                active_symbols: vec![],
+                updated_at_ms: 2_000,
+            },
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: vec!["BTCUSDT".to_string()],
+                active_symbols: vec!["BTCUSDT".to_string()],
+                updated_at_ms: 2_000,
+            },
+        ],
+        &[],
+    );
+
+    let mut trade = sample_closed_trade(2_500);
+    trade.entry_ts_ms = 1_500;
+    store.handle_drained_fleet_trades(vec![FleetTrade {
+        config_id: TraderConfig::default().config_id(),
+        symbol: "BTCUSDT".to_string(),
+        run_id: None,
+        trade,
+    }]);
+
+    let paper = store.portfolio_paper_states_v1();
+    let a = paper.get("A").expect("portfolio A");
+    let b = paper.get("B").expect("portfolio B");
+    assert_eq!(a.closed_trades, 1);
+    assert_eq!(b.closed_trades, 0);
+}
+
+#[test]
+fn portfolio_runtime_restore_with_paper_rows_restores_totals() {
+    let store = ScreenerStore::default();
+    store.restore_portfolio_runtime_v1_from_db_rows_with_paper(
+        &[
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec!["BTCUSDT".to_string()],
+                active_symbols: vec!["BTCUSDT".to_string()],
+                updated_at_ms: 1_000,
+            },
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: vec![],
+                active_symbols: vec![],
+                updated_at_ms: 1_000,
+            },
+        ],
+        &[],
+        &[crate::infrastructure::db::PortfolioPaperStateRecordV1 {
+            portfolio_id: "A".to_string(),
+            equity_usd: 10_123.0,
+            realized_pnl_usd: 123.0,
+            closed_trades: 9,
+            profitable_trades: 6,
+            losing_trades: 3,
+            last_trade_ts_ms: Some(950),
+            updated_at_ms: 1_000,
+        }],
+    );
+
+    let paper = store.portfolio_paper_states_v1();
+    let a = paper.get("A").expect("portfolio A");
+    let b = paper.get("B").expect("portfolio B");
+    assert!((a.equity_usd - 10_123.0).abs() < 1e-9);
+    assert!((a.realized_pnl_usd - 123.0).abs() < 1e-9);
+    assert_eq!(a.closed_trades, 9);
+    assert_eq!(a.profitable_trades, 6);
+    assert_eq!(a.losing_trades, 3);
+    assert_eq!(a.last_trade_ts_ms, Some(950));
+    assert!((b.equity_usd - 10_000.0).abs() < 1e-9);
+    assert_eq!(b.closed_trades, 0);
+}
+
+#[test]
+fn portfolio_paper_money_falls_back_to_active_owner_when_entry_snapshot_missing() {
+    let store = ScreenerStore::default();
+    store.restore_portfolio_runtime_v1_from_db_rows(
+        &[
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec![],
+                active_symbols: vec![],
+                updated_at_ms: 2_000,
+            },
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: vec!["BTCUSDT".to_string()],
+                active_symbols: vec!["BTCUSDT".to_string()],
+                updated_at_ms: 2_000,
+            },
+        ],
+        &[],
+    );
+
+    let mut trade = sample_closed_trade(2_500);
+    trade.entry_ts_ms = 1_000; // older than only known assignment snapshot
+    store.handle_drained_fleet_trades(vec![FleetTrade {
+        config_id: TraderConfig::default().config_id(),
+        symbol: "BTCUSDT".to_string(),
+        run_id: None,
+        trade,
+    }]);
+
+    let paper = store.portfolio_paper_states_v1();
+    let a = paper.get("A").expect("portfolio A");
+    let b = paper.get("B").expect("portfolio B");
+    assert_eq!(a.closed_trades, 0);
+    assert_eq!(b.closed_trades, 1);
+}
+
+#[test]
 fn stop_loss_streak_triggers_cooldown_exclusion_until_expiry() {
     let store = ScreenerStore::default();
     store.symbols.insert(

@@ -132,6 +132,10 @@ impl HttpServer {
                 get(handlers::get_portfolio_candidates),
             )
             .route(
+                "/api/v1/portfolio/performance",
+                get(handlers::get_portfolio_performance),
+            )
+            .route(
                 "/api/v1/portfolio/guards",
                 get(handlers::get_portfolio_guards),
             )

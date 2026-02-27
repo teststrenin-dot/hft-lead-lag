@@ -124,6 +124,26 @@ pub(crate) struct PortfolioActiveResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct PortfolioPerformanceRow {
+    portfolio_id: String,
+    equity_usd: f64,
+    realized_pnl_usd: f64,
+    closed_trades: u64,
+    profitable_trades: u64,
+    losing_trades: u64,
+    useful_winrate_pct: f64,
+    last_trade_ts_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PortfolioPerformanceResponse {
+    generated_at_ms: i64,
+    total_equity_usd: f64,
+    total_realized_pnl_usd: f64,
+    portfolios: Vec<PortfolioPerformanceRow>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct PortfolioCandidateRow {
     symbol: String,
     age_minutes_from_first_tick: u64,
@@ -304,6 +324,47 @@ pub(crate) async fn get_portfolio_candidates(
         generated_at_ms,
         total_candidates: rows.len(),
         rows,
+    })
+}
+
+pub(crate) async fn get_portfolio_performance(
+    State(state): State<Arc<HttpState>>,
+) -> Json<PortfolioPerformanceResponse> {
+    let generated_at_ms = crate::domain::screener::utils::now_ms();
+    let paper = state.screener.portfolio_paper_states_v1();
+    let mut portfolios: Vec<PortfolioPerformanceRow> = state
+        .screener
+        .portfolio_ids_v1()
+        .into_iter()
+        .map(|portfolio_id| {
+            let stats = paper.get(&portfolio_id).copied().unwrap_or_default();
+            let useful_winrate_pct = if stats.closed_trades == 0 {
+                0.0
+            } else {
+                (stats.profitable_trades as f64 / stats.closed_trades as f64) * 100.0
+            };
+            PortfolioPerformanceRow {
+                portfolio_id,
+                equity_usd: stats.equity_usd,
+                realized_pnl_usd: stats.realized_pnl_usd,
+                closed_trades: stats.closed_trades,
+                profitable_trades: stats.profitable_trades,
+                losing_trades: stats.losing_trades,
+                useful_winrate_pct,
+                last_trade_ts_ms: stats.last_trade_ts_ms,
+            }
+        })
+        .collect();
+    portfolios.sort_by(|a, b| a.portfolio_id.cmp(&b.portfolio_id));
+
+    let total_equity_usd: f64 = portfolios.iter().map(|row| row.equity_usd).sum();
+    let total_realized_pnl_usd: f64 = portfolios.iter().map(|row| row.realized_pnl_usd).sum();
+
+    Json(PortfolioPerformanceResponse {
+        generated_at_ms,
+        total_equity_usd,
+        total_realized_pnl_usd,
+        portfolios,
     })
 }
 

@@ -232,6 +232,7 @@ pub(super) fn init_screener_persistence(
     hft_lead_lag::infrastructure::db::upsert_configs(&conn, fleet_configs.as_ref())?;
     let persisted_portfolios = hft_lead_lag::infrastructure::db::load_portfolio_state_v1(&conn)?;
     let persisted_guards = hft_lead_lag::infrastructure::db::load_portfolio_guards_v1(&conn)?;
+    let persisted_paper = hft_lead_lag::infrastructure::db::load_portfolio_paper_state_v1(&conn)?;
     let persisted_candidate_history =
         hft_lead_lag::infrastructure::db::load_portfolio_candidate_history_v1(&conn)?;
     if !persisted_candidate_history.is_empty() {
@@ -241,13 +242,20 @@ pub(super) fn init_screener_persistence(
             persisted_candidate_history.len()
         );
     }
-    if !persisted_portfolios.is_empty() || !persisted_guards.is_empty() {
-        screener
-            .restore_portfolio_runtime_v1_from_db_rows(&persisted_portfolios, &persisted_guards);
+    if !persisted_portfolios.is_empty()
+        || !persisted_guards.is_empty()
+        || !persisted_paper.is_empty()
+    {
+        screener.restore_portfolio_runtime_v1_from_db_rows_with_paper(
+            &persisted_portfolios,
+            &persisted_guards,
+            &persisted_paper,
+        );
         info!(
-            "Restored portfolio runtime snapshot: states={} guards={}",
+            "Restored portfolio runtime snapshot: states={} guards={} paper={}",
             persisted_portfolios.len(),
-            persisted_guards.len()
+            persisted_guards.len(),
+            persisted_paper.len()
         );
     }
     info!(

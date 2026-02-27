@@ -6,6 +6,8 @@ pub const MAX_ACTIVE_SYMBOLS: usize = 4;
 pub const FAST_STREAK_WINDOW_MS: i64 = 120_000;
 pub const COOLDOWN_MS: i64 = 300_000;
 pub const DEFAULT_PORTFOLIO_IDS: &[&str] = &["A", "B"];
+pub const PORTFOLIO_PAPER_INITIAL_EQUITY_USD: f64 = 10_000.0;
+pub const PORTFOLIO_PAPER_TRADE_NOTIONAL_USD: f64 = 100.0;
 
 pub type PortfolioId = String;
 
@@ -32,6 +34,48 @@ pub struct SymbolGuardStateV1 {
     pub cooldown_until_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PortfolioPaperStateV1 {
+    pub equity_usd: f64,
+    pub realized_pnl_usd: f64,
+    pub closed_trades: u64,
+    pub profitable_trades: u64,
+    pub losing_trades: u64,
+    pub last_trade_ts_ms: Option<i64>,
+}
+
+impl Default for PortfolioPaperStateV1 {
+    fn default() -> Self {
+        Self {
+            equity_usd: PORTFOLIO_PAPER_INITIAL_EQUITY_USD,
+            realized_pnl_usd: 0.0,
+            closed_trades: 0,
+            profitable_trades: 0,
+            losing_trades: 0,
+            last_trade_ts_ms: None,
+        }
+    }
+}
+
+impl PortfolioPaperStateV1 {
+    pub fn observe_trade(&mut self, pnl_pct: f64, ts_ms: i64) {
+        let pnl_usd = PORTFOLIO_PAPER_TRADE_NOTIONAL_USD * (pnl_pct / 100.0);
+        self.realized_pnl_usd += pnl_usd;
+        self.equity_usd += pnl_usd;
+        self.closed_trades = self.closed_trades.saturating_add(1);
+        if pnl_pct > 0.0 {
+            self.profitable_trades = self.profitable_trades.saturating_add(1);
+        } else if pnl_pct < 0.0 {
+            self.losing_trades = self.losing_trades.saturating_add(1);
+        }
+        self.last_trade_ts_ms = Some(
+            self.last_trade_ts_ms
+                .map(|last| last.max(ts_ms))
+                .unwrap_or(ts_ms),
+        );
+    }
+}
+
 #[derive(Debug)]
 pub struct PortfolioEngineV1 {
     guards: HashMap<String, SymbolGuardStateV1>,
@@ -51,6 +95,15 @@ pub fn default_portfolio_ids() -> Vec<PortfolioId> {
     DEFAULT_PORTFOLIO_IDS
         .iter()
         .map(|id| (*id).to_string())
+        .collect()
+}
+
+pub fn default_portfolio_paper_states_v1(
+    portfolio_ids: &[PortfolioId],
+) -> BTreeMap<PortfolioId, PortfolioPaperStateV1> {
+    portfolio_ids
+        .iter()
+        .map(|id| (id.clone(), PortfolioPaperStateV1::default()))
         .collect()
 }
 

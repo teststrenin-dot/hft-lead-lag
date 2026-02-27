@@ -242,14 +242,11 @@ fn list_trial_batch_queue_files_returns_sorted_json_files() {
         .map(ToString::to_string)
         .collect();
     assert_eq!(
-        names,
-        vec![
-            "run-z-10.json".to_string(),
-            "run-a-20.json".to_string(),
-            "aaa.json".to_string(),
-            "zzz.json".to_string(),
-        ]
+        names[..2],
+        ["run-z-10.json".to_string(), "run-a-20.json".to_string()]
     );
+    assert!(names[2..].iter().any(|name| name == "aaa.json"));
+    assert!(names[2..].iter().any(|name| name == "zzz.json"));
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -338,6 +335,33 @@ fn list_trial_batch_queue_files_uses_mtime_fallback_for_non_timestamp_files() {
                 .to_string(),
         ]
     );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn list_trial_batch_queue_files_orders_non_timestamp_files_by_mtime_fifo() {
+    let dir = std::env::temp_dir().join(format!(
+        "hft-lead-lag-main-batch-queue-nonts-fifo-{}-{}",
+        std::process::id(),
+        EventLoopState::now_ms()
+    ));
+    let queue_dir = trial_batch_queue_dir(&dir);
+    fs::create_dir_all(&queue_dir).expect("create queue dir");
+
+    let older = queue_dir.join("zzz.json");
+    let newer = queue_dir.join("aaa.json");
+    fs::write(&older, "{}").expect("write older");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    fs::write(&newer, "{}").expect("write newer");
+
+    let files = list_trial_batch_queue_files(&dir);
+    let names: Vec<String> = files
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|n| n.to_str()))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(names, vec!["zzz.json".to_string(), "aaa.json".to_string()]);
 
     let _ = fs::remove_dir_all(dir);
 }

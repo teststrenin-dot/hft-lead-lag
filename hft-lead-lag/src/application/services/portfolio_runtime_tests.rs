@@ -1,6 +1,6 @@
 use super::portfolio_runtime::{
-    default_portfolio_ids, eligible, rank_candidates, PortfolioEngineV1, SymbolGuardStateV1,
-    SymbolStatsV1,
+    default_portfolio_ids, eligible, rank_candidates, PortfolioEngineV1, PortfolioPaperStateV1,
+    SymbolGuardStateV1, SymbolStatsV1,
 };
 use std::collections::HashSet;
 
@@ -38,6 +38,14 @@ fn portfolio_runtime_eligible_requires_all_v1_thresholds() {
 
     let negative_avg = stats("NEG", 6, 8, 4, 4, -0.01);
     assert!(!eligible(&negative_avg));
+}
+
+#[test]
+fn portfolio_paper_state_last_trade_ts_is_monotonic() {
+    let mut paper = PortfolioPaperStateV1::default();
+    paper.observe_trade(0.2, 1_000);
+    paper.observe_trade(-0.1, 900);
+    assert_eq!(paper.last_trade_ts_ms, Some(1_000));
 }
 
 #[test]

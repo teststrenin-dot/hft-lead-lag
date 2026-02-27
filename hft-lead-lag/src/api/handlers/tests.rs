@@ -482,6 +482,68 @@ async fn portfolio_candidates_endpoint_returns_derived_metrics() {
 }
 
 #[tokio::test]
+async fn portfolio_performance_endpoint_returns_paper_money_stats() {
+    let health_state = Arc::new(HealthState::new());
+    let screener = ScreenerStore::default();
+    screener.restore_portfolio_runtime_v1_from_db_rows(
+        &[
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                shortlist: vec!["BTCUSDT".to_string()],
+                active_symbols: vec!["BTCUSDT".to_string()],
+                updated_at_ms: 1_000,
+            },
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                shortlist: vec!["ETHUSDT".to_string()],
+                active_symbols: vec!["ETHUSDT".to_string()],
+                updated_at_ms: 1_000,
+            },
+        ],
+        &[],
+    );
+    screener.portfolio_observe_closed_trade_v1("BTCUSDT", 1.0, false, 2_000);
+    screener.portfolio_observe_closed_trade_v1("ETHUSDT", -2.0, true, 3_000);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener,
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let Json(resp) = get_portfolio_performance(State(state)).await;
+    assert_eq!(resp.portfolios.len(), 2);
+    let a = resp
+        .portfolios
+        .iter()
+        .find(|row| row.portfolio_id == "A")
+        .expect("portfolio A");
+    let b = resp
+        .portfolios
+        .iter()
+        .find(|row| row.portfolio_id == "B")
+        .expect("portfolio B");
+    assert_eq!(a.closed_trades, 1);
+    assert_eq!(a.profitable_trades, 1);
+    assert!((a.realized_pnl_usd - 1.0).abs() < 1e-9);
+    assert!((a.equity_usd - 10_001.0).abs() < 1e-9);
+    assert_eq!(b.closed_trades, 1);
+    assert_eq!(b.losing_trades, 1);
+    assert!((b.realized_pnl_usd + 2.0).abs() < 1e-9);
+    assert!((b.equity_usd - 9_998.0).abs() < 1e-9);
+    assert!((resp.total_realized_pnl_usd + 1.0).abs() < 1e-9);
+    assert!((resp.total_equity_usd - 19_999.0).abs() < 1e-9);
+}
+
+#[tokio::test]
 async fn portfolio_guards_endpoint_reports_cooldown_state() {
     let health_state = Arc::new(HealthState::new());
     let screener = ScreenerStore::default();

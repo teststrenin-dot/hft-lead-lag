@@ -39,11 +39,13 @@ fn system_time_to_unix_ns(ts: SystemTime) -> Option<u128> {
         .map(|delta| delta.as_nanos())
 }
 
+fn queue_modified_timestamp(path: &Path) -> Option<u128> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    system_time_to_unix_ns(modified)
+}
+
 fn queue_order_timestamp(path: &Path) -> Option<u128> {
-    queue_submission_timestamp(path).or_else(|| {
-        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-        system_time_to_unix_ns(modified)
-    })
+    queue_submission_timestamp(path).or_else(|| queue_modified_timestamp(path))
 }
 
 fn submission_timestamp_from_id(submission_id: &str) -> Option<u128> {

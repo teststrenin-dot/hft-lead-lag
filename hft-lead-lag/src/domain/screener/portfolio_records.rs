@@ -24,3 +24,15 @@ pub struct PortfolioCandidateHistoryRecordV1 {
     pub pnl_sum_pct: f64,
     pub first_trade_ts_ms: Option<i64>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortfolioPaperStateRecordV1 {
+    pub portfolio_id: String,
+    pub equity_usd: f64,
+    pub realized_pnl_usd: f64,
+    pub closed_trades: u64,
+    pub profitable_trades: u64,
+    pub losing_trades: u64,
+    pub last_trade_ts_ms: Option<i64>,
+    pub updated_at_ms: i64,
+}

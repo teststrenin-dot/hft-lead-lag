@@ -137,6 +137,17 @@ CREATE TABLE IF NOT EXISTS portfolio_symbol_guard_v1 (
     updated_at_ms INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS portfolio_paper_state_v1 (
+    portfolio_id TEXT PRIMARY KEY,
+    equity_usd REAL NOT NULL,
+    realized_pnl_usd REAL NOT NULL,
+    closed_trades INTEGER NOT NULL,
+    profitable_trades INTEGER NOT NULL,
+    losing_trades INTEGER NOT NULL,
+    last_trade_ts_ms INTEGER,
+    updated_at_ms INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_config ON trades(config_id);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_exit_ts ON trades(exit_ts_ms);
@@ -334,6 +345,20 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
             "updated_at_ms",
         ],
     )?;
+    ensure_table_columns(
+        &conn,
+        "portfolio_paper_state_v1",
+        &[
+            "portfolio_id",
+            "equity_usd",
+            "realized_pnl_usd",
+            "closed_trades",
+            "profitable_trades",
+            "losing_trades",
+            "last_trade_ts_ms",
+            "updated_at_ms",
+        ],
+    )?;
     Ok(conn)
 }
 
@@ -471,7 +496,8 @@ pub fn close_trial_run_meta(
 }
 
 pub use crate::domain::screener::{
-    PortfolioCandidateHistoryRecordV1, PortfolioGuardRecordV1, PortfolioStateRecordV1,
+    PortfolioCandidateHistoryRecordV1, PortfolioGuardRecordV1, PortfolioPaperStateRecordV1,
+    PortfolioStateRecordV1,
 };
 
 fn encode_symbols_json(symbols: &[String]) -> rusqlite::Result<String> {
@@ -515,6 +541,7 @@ pub fn replace_portfolio_snapshot_v1(
     conn: &Connection,
     states: &[PortfolioStateRecordV1],
     guards: &[PortfolioGuardRecordV1],
+    paper_states: &[PortfolioPaperStateRecordV1],
 ) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM portfolio_state_v1", [])?;
@@ -552,6 +579,27 @@ pub fn replace_portfolio_snapshot_v1(
             ])?;
         }
     }
+    tx.execute("DELETE FROM portfolio_paper_state_v1", [])?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO portfolio_paper_state_v1 (
+                portfolio_id, equity_usd, realized_pnl_usd, closed_trades,
+                profitable_trades, losing_trades, last_trade_ts_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for row in paper_states {
+            stmt.execute(params![
+                row.portfolio_id,
+                row.equity_usd,
+                row.realized_pnl_usd,
+                row.closed_trades.min(i64::MAX as u64) as i64,
+                row.profitable_trades.min(i64::MAX as u64) as i64,
+                row.losing_trades.min(i64::MAX as u64) as i64,
+                row.last_trade_ts_ms,
+                row.updated_at_ms
+            ])?;
+        }
+    }
     tx.commit()?;
     Ok(())
 }
@@ -574,6 +622,36 @@ pub fn replace_portfolio_guards_v1(
                 row.streak_count as i64,
                 row.first_streak_ts_ms,
                 row.cooldown_until_ms,
+                row.updated_at_ms
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn replace_portfolio_paper_state_v1(
+    conn: &Connection,
+    rows: &[PortfolioPaperStateRecordV1],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM portfolio_paper_state_v1", [])?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO portfolio_paper_state_v1 (
+                portfolio_id, equity_usd, realized_pnl_usd, closed_trades,
+                profitable_trades, losing_trades, last_trade_ts_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for row in rows {
+            stmt.execute(params![
+                row.portfolio_id,
+                row.equity_usd,
+                row.realized_pnl_usd,
+                row.closed_trades.min(i64::MAX as u64) as i64,
+                row.profitable_trades.min(i64::MAX as u64) as i64,
+                row.losing_trades.min(i64::MAX as u64) as i64,
+                row.last_trade_ts_ms,
                 row.updated_at_ms
             ])?;
         }
@@ -617,6 +695,34 @@ pub fn load_portfolio_guards_v1(
             first_streak_ts_ms: row.get(2)?,
             cooldown_until_ms: row.get(3)?,
             updated_at_ms: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn load_portfolio_paper_state_v1(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<PortfolioPaperStateRecordV1>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            portfolio_id, equity_usd, realized_pnl_usd, closed_trades,
+            profitable_trades, losing_trades, last_trade_ts_ms, updated_at_ms
+         FROM portfolio_paper_state_v1
+         ORDER BY portfolio_id ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let closed_trades_i64: i64 = row.get(3)?;
+        let profitable_trades_i64: i64 = row.get(4)?;
+        let losing_trades_i64: i64 = row.get(5)?;
+        Ok(PortfolioPaperStateRecordV1 {
+            portfolio_id: row.get(0)?,
+            equity_usd: row.get(1)?,
+            realized_pnl_usd: row.get(2)?,
+            closed_trades: closed_trades_i64.max(0) as u64,
+            profitable_trades: profitable_trades_i64.max(0) as u64,
+            losing_trades: losing_trades_i64.max(0) as u64,
+            last_trade_ts_ms: row.get(6)?,
+            updated_at_ms: row.get(7)?,
         })
     })?;
     rows.collect()
@@ -678,6 +784,7 @@ enum DbCommand {
         seq: u64,
         states: Vec<PortfolioStateRecordV1>,
         guards: Vec<PortfolioGuardRecordV1>,
+        paper_states: Vec<PortfolioPaperStateRecordV1>,
     },
     Flush {
         target_seq: u64,
@@ -809,17 +916,19 @@ impl DbWriter {
         self.enqueue_command(command, "trade batch");
     }
 
-    /// Enqueue a portfolio snapshot (active/shortlist + guard state).
+    /// Enqueue a portfolio snapshot (active/shortlist + guard + paper state).
     pub fn send_portfolio_snapshot_v1(
         &self,
         states: Vec<PortfolioStateRecordV1>,
         guards: Vec<PortfolioGuardRecordV1>,
+        paper_states: Vec<PortfolioPaperStateRecordV1>,
     ) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let command = DbCommand::PortfolioSnapshotV1 {
             seq,
             states,
             guards,
+            paper_states,
         };
         self.enqueue_command(command, "portfolio snapshot");
     }
@@ -975,7 +1084,12 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
                                 complete_ready_flushes(observed_max_seq, &mut pending_flushes);
                             }
                         }
-                        Some(DbCommand::PortfolioSnapshotV1 { seq, states, guards }) => {
+                        Some(DbCommand::PortfolioSnapshotV1 {
+                            seq,
+                            states,
+                            guards,
+                            paper_states,
+                        }) => {
                             observed_max_seq = observed_max_seq.max(seq);
                             flush_trade_buffer(&conn, &mut buf);
                             if seq <= latest_portfolio_snapshot_seq {
@@ -985,7 +1099,12 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
                                     latest_portfolio_snapshot_seq
                                 );
                             } else {
-                                match replace_portfolio_snapshot_v1(&conn, &states, &guards) {
+                                match replace_portfolio_snapshot_v1(
+                                    &conn,
+                                    &states,
+                                    &guards,
+                                    &paper_states,
+                                ) {
                                     Ok(_) => latest_portfolio_snapshot_seq = seq,
                                     Err(e) => warn!("db portfolio snapshot flush error: {e}"),
                                 }
@@ -1447,6 +1566,14 @@ mod tests {
             "portfolio_symbol_guard_v1 table must exist"
         );
 
+        let has_paper_table: bool = conn
+            .prepare(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='portfolio_paper_state_v1'",
+            )
+            .and_then(|mut stmt| stmt.exists([]))
+            .expect("portfolio_paper_state_v1 exists query");
+        assert!(has_paper_table, "portfolio_paper_state_v1 table must exist");
+
         for column in [
             "portfolio_id",
             "shortlist_json",
@@ -1476,6 +1603,28 @@ mod tests {
             assert!(
                 has_col,
                 "portfolio_symbol_guard_v1.{column} column must exist"
+            );
+        }
+
+        for column in [
+            "portfolio_id",
+            "equity_usd",
+            "realized_pnl_usd",
+            "closed_trades",
+            "profitable_trades",
+            "losing_trades",
+            "last_trade_ts_ms",
+            "updated_at_ms",
+        ] {
+            let has_col: bool = conn
+                .prepare(
+                    "SELECT 1 FROM pragma_table_info('portfolio_paper_state_v1') WHERE name=?1",
+                )
+                .and_then(|mut stmt| stmt.exists([column]))
+                .expect("portfolio_paper_state_v1 column exists query");
+            assert!(
+                has_col,
+                "portfolio_paper_state_v1.{column} column must exist"
             );
         }
 
@@ -1522,15 +1671,42 @@ mod tests {
                 updated_at_ms: 600_000,
             },
         ];
+        let paper_rows = vec![
+            PortfolioPaperStateRecordV1 {
+                portfolio_id: "A".to_string(),
+                equity_usd: 10_125.5,
+                realized_pnl_usd: 125.5,
+                closed_trades: 12,
+                profitable_trades: 8,
+                losing_trades: 4,
+                last_trade_ts_ms: Some(700_000),
+                updated_at_ms: 700_000,
+            },
+            PortfolioPaperStateRecordV1 {
+                portfolio_id: "B".to_string(),
+                equity_usd: 9_975.0,
+                realized_pnl_usd: -25.0,
+                closed_trades: 5,
+                profitable_trades: 2,
+                losing_trades: 3,
+                last_trade_ts_ms: Some(650_000),
+                updated_at_ms: 700_000,
+            },
+        ];
 
         replace_portfolio_state_v1(&conn, &state_rows).expect("replace portfolio_state_v1");
         replace_portfolio_guards_v1(&conn, &guard_rows).expect("replace portfolio_symbol_guard_v1");
+        replace_portfolio_paper_state_v1(&conn, &paper_rows)
+            .expect("replace portfolio_paper_state_v1");
 
         let loaded_state = load_portfolio_state_v1(&conn).expect("load portfolio_state_v1");
         let loaded_guards =
             load_portfolio_guards_v1(&conn).expect("load portfolio_symbol_guard_v1");
+        let loaded_paper =
+            load_portfolio_paper_state_v1(&conn).expect("load portfolio_paper_state_v1");
         assert_eq!(loaded_state, state_rows);
         assert_eq!(loaded_guards, guard_rows);
+        assert_eq!(loaded_paper, paper_rows);
 
         drop(conn);
         cleanup_temp_db(&path);
@@ -1911,6 +2087,7 @@ mod tests {
                 seq: 2,
                 states: newer_states,
                 guards: Vec::new(),
+                paper_states: Vec::new(),
             })
             .await
             .expect("enqueue newer snapshot");
@@ -1920,6 +2097,7 @@ mod tests {
                 seq: 1,
                 states: stale_states,
                 guards: Vec::new(),
+                paper_states: Vec::new(),
             })
             .await
             .expect("enqueue stale snapshot");
