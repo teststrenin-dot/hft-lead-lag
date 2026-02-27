@@ -1,84 +1,48 @@
 # Delivery Playbook — Outcome First, Contract First
 
-Date: 2026-02-26  
-Scope: обязательный рабочий процесс для всех следующих изменений (CP4+ и дальше).
+Date: 2026-02-26
+Scope: mandatory workflow for `HFT-CP*` delivery.
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Last delivery sync: `CP4.6-R1`
+Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
+Last delivery sync: 2026-02-28 (`HFT-CP` re-baseline)
 
-## 0) Strategic Pre-Check (mandatory)
-Перед стартом любой вехи команда обязана зафиксировать:
-1. Какой узел Economic Control Map изменяется (`Signal/Validation/Competition/Risk/Capital/Feedback`).
-2. Какую бизнес-метрику это должно улучшить.
-3. Какой риск снижается.
-4. Что сломается, если этот шаг не сделать.
+## 0) Strategic pre-check (mandatory)
+Before any implementation:
+1. Declare target economic node(s).
+2. Declare KPI impact.
+3. Declare reduced risk.
+4. Declare failure mode if skipped.
 
-Без этого шага реализация не начинается.
+## 1) Architecture guardrail (mandatory)
+1. Runtime hot path is Rust-only.
+2. Python is prohibited in target data-plane.
+3. Transitional legacy components must include removal gate.
 
-## 1) Core Principle
-Сначала фиксируем **результат и критерии готовности**, потом делаем **контракты и тестируемые вехи**, и только потом реализацию.
+## 2) Delivery order (mandatory)
+1. Strategic pre-check.
+2. Outcome + DoD.
+3. Scope and quality gates.
+4. Contracts and payload formats.
+5. Failing tests/scenarios.
+6. Minimal implementation to green.
+7. Refactor only after green.
 
-Запрещено:
-- начинать код до явных контрактов и сценариев проверки;
-- расширять scope в ходе вехи;
-- смешивать архитектурный рефактор и новую бизнес-логику в одном шаге.
+## 3) Required artifacts per checkpoint
+1. Spec (goal/scope/DoD).
+2. Contracts (interfaces/events/state).
+3. Tests (unit/integration/scenario).
+4. Verification report (pass/fail/open risks).
 
-## 2) Delivery Order (mandatory)
-1. Strategic pre-check (economic node + metric + risk + failure mode).
-2. Outcome + Definition of Done.
-3. Ограничения и quality gates (метрики, риск, стабильность).
-4. Контракты модулей и payload-форматы.
-5. Веха (минимально изолируемая) + Given/When/Then тесты.
-6. Минимальная реализация до green.
-7. Рефактор только после green.
+## 4) Current HFT mapping
+1. `HFT-CP0`: latency/allocation observability.
+2. `HFT-CP1`: `SymbolId` and allocation removal.
+3. `HFT-CP2`: lock-free strategy state.
+4. `HFT-CP3`: updated-only event processing.
+5. `HFT-CP4`: minimal-copy parse path.
+6. `HFT-CP5`: deterministic replay harness.
+7. `HFT-CP6`: execution fast path.
+8. `HFT-CP7`: production ops and recovery.
 
-## 3) Required Artifacts per Milestone
-- `spec`: цель, scope, DoD, acceptance.
-- `contracts`: DTO/events/interfaces.
-- `tests`: unit + integration + scenario/property (где нужно).
-- `report`: результат проверки вехи (что прошло/что осталось).
-
-## 4) Current Project Mapping
-### CP4 — Portfolio Race & Paper Runtime
-Outcome:
-- `1 portfolio = 1 execution loop` (paper mode), winner-promotion path, health per portfolio.
-
-Current delivered subset:
-1. `forward` работает как `1 config = 1 ASHA trial`.
-2. Ранние ASHA-stop автоматически удаляются из runtime (`incremental` prune patches).
-3. Forward run lease автоматически очищается по завершению (`clear_active_run(run_id)`).
-4. Incremental prune корректно принимает removal even when config не был привязан к symbol fleet.
-
-DoD:
-- loop каждого портфеля изолирован;
-- winner switch детерминирован и воспроизводим;
-- API показывает execution state по каждому портфелю;
-- e2e smoke green после рестарта/ошибок связи.
-
-Contract-first artifacts:
-- execution state contract (`portfolio_id`, `winner`, `loop_state`, `last_error`, `last_tick_ms`);
-- winner selection contract (входные метрики, tie-break, versioned ruleset);
-- restart/recovery contract (какое состояние обязательно переживает рестарт).
-
-### CP7 — Capital Rebalance + Live
-Outcome:
-- управляемый ребаланс капитала + безопасный live rollout.
-
-DoD:
-- allocation/reallocation policy формально определена и детерминирована;
-- risk guards (kill switch, daily stop, cap limits) в runtime обязательны;
-- есть rollback/runbook на уровень портфеля и символа.
-
-Contract-first artifacts:
-- capital allocation contract;
-- live safety contract;
-- incident/recovery runbook contract.
-
-## 5) Engineering Rules for This Repository
-- Любой новый endpoint/DTO: сначала schema и контрактные тесты.
-- Любая новая runtime-логика: сначала сценарии Given/When/Then.
-- Любая миграция state: versioned format + migration test.
-- Любая “оптимизация”: только после доказанной корректности.
-
-## 6) Working Agreement
-С этого момента все следующие шаги выполняются только в этом порядке:
+## 5) Working agreement
+All work follows:
 `Strategic Pre-Check -> Outcome -> Contracts -> Tests -> Minimal Implementation -> Verification`.

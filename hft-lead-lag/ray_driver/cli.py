@@ -14,7 +14,8 @@ from .run_id import generate_run_id
 
 FORWARD_MAX_REFS_HARD_CAP = 256
 FORWARD_MAX_CONFIGS_HARD_CAP = 5000
-FORWARD_MAX_CONCURRENT_TRIALS = 16
+FORWARD_MAX_CONCURRENT_TRIALS = 64
+FORWARD_TRIAL_CPU_FRACTION = 0.1
 
 
 def _asha_terminal_budget_s(max_budget_s: int, grace_period_s: int, reduction_factor: int) -> int:
@@ -320,7 +321,9 @@ def cmd_forward(args):
         print("[error] run scout first")
         sys.exit(1)
 
-    ipc = FleetIPC(Path(args.config_dir), Path(args.db_path))
+    config_dir = Path(args.config_dir).resolve()
+    db_path = Path(args.db_path).resolve()
+    ipc = FleetIPC(config_dir, db_path)
     refs = rows_to_metrics(json.loads(refs_path.read_text()))
     requested_max_refs = int(args.max_refs)
     requested_max_configs = int(args.max_configs)
@@ -390,10 +393,13 @@ def cmd_forward(args):
                 "run_id": run_id,
                 "config_id": tune.grid_search(config_ids),
                 "report_interval_s": args.report_interval,
+                "config_dir": str(config_dir),
+                "db_path": str(db_path),
             },
             scheduler=scheduler,
             num_samples=1,
             max_concurrent_trials=FORWARD_MAX_CONCURRENT_TRIALS,
+            resources_per_trial={"cpu": FORWARD_TRIAL_CPU_FRACTION},
             callbacks=[prune_callback],
             verbose=1,
         )

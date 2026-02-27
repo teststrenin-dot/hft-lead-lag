@@ -1,9 +1,10 @@
 # Project Math Model — HFT Lead-Lag
 
 Date: 2026-02-26
-Last sync: working tree after `b64a2c5` + `CP4.6-R1` remediation
+Last sync: 2026-02-28 (`HFT-CP` re-baseline)
 Scope: математика и формулы, реально используемые в runtime.
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## Strategic Math Targets (Control Plane)
 These targets align math with business objective (risk-adjusted return under constrained capital).
@@ -29,10 +30,11 @@ admission requires useful_winrate >= 0.30 and avg_pnl_pct >= 0
    - `Validation`: admission and ranking math.
    - `Competition`: shortlist/assignment ranking effects.
    - `Risk`: reset/cooldown trigger math.
-   - `Capital`: allocation metrics (planned in CP7).
+   - `Capital`: allocation metrics (planned in `HFT-CP6`, extended in `HFT-CP7`).
    - `Feedback`: health/read-model observability metrics.
 
-## Forward/ASHA Runtime Math (CP4.5/CP4.6)
+## Forward Runtime Math (legacy + target)
+Legacy path (transitional only):
 1. ASHA trial granularity:
 ```text
 trial := one config_id
@@ -54,6 +56,15 @@ new_runtime_config_set = active_config_ids - pruned_config_ids
 ```
 5. Review remediation constraint:
 `changed_config_ids` matching must use full active fleet config set, not only symbol-attached fleets, otherwise untouched config removals are false-rejected.
+
+Target path (`HFT-CP1`..`HFT-CP4`, `HFT-CP6`):
+1. Runtime math runs on `SymbolId`/array-state without per-tick string conversion.
+2. Per-config metric extraction:
+```text
+for each config_id:
+  trades, wins, losses, pnl_sum -> avg_pnl_pct, useful_winrate, pm_raw
+```
+3. Candidate ranking/reduction remains deterministic and checkpoint-bound, without introducing hot-path Python dependencies.
 
 ## 0) Units and Conventions
 - `bps` (basis points): `1 bps = 0.01%`.

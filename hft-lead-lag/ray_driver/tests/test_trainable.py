@@ -24,6 +24,9 @@ def test_fleet_trial_reports_only_assigned_config(monkeypatch):
     import ray_driver.trainable as trainable
 
     class FakeIPC:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
         def query_run_metrics(self, run_id):
             assert run_id == "forward-test"
             return [
@@ -52,6 +55,9 @@ def test_fleet_trial_returns_zero_metrics_when_config_absent(monkeypatch):
     import ray_driver.trainable as trainable
 
     class FakeIPC:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
         def query_run_metrics(self, _run_id):
             return [RunMetrics(1, 3, 0.1, 33.0, 0.3, 0.0)]
 
@@ -69,3 +75,38 @@ def test_fleet_trial_returns_zero_metrics_when_config_absent(monkeypatch):
     assert metrics["total_pnl_pct"] == 0.0
     assert metrics["stop_loss_share_pct"] == 0.0
     assert metrics["configs_with_trades"] == 0
+
+
+def test_fleet_trial_uses_configured_ipc_paths(monkeypatch, tmp_path):
+    install_fake_ray(monkeypatch)
+    import ray_driver.trainable as trainable
+
+    captured = {}
+
+    class FakeIPC:
+        def __init__(self, config_dir, db_path):
+            captured["config_dir"] = str(config_dir)
+            captured["db_path"] = str(db_path)
+
+        def query_run_metrics(self, _run_id):
+            return []
+
+    monkeypatch.setattr(trainable, "FleetIPC", FakeIPC)
+    monkeypatch.setattr(trainable.time, "sleep", lambda _s: None)
+
+    cfg_dir = tmp_path / "cfg"
+    db_path = tmp_path / "data" / "optimizer.db"
+    trial = trainable.FleetTrial()
+    trial.setup(
+        {
+            "run_id": "forward-test",
+            "config_id": 7,
+            "report_interval_s": 1,
+            "config_dir": str(cfg_dir),
+            "db_path": str(db_path),
+        }
+    )
+    trial.step()
+
+    assert captured["config_dir"] == str(cfg_dir)
+    assert captured["db_path"] == str(db_path)

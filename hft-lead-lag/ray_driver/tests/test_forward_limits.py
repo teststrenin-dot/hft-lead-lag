@@ -166,6 +166,8 @@ def test_cmd_forward_applies_ref_and_config_caps(monkeypatch, tmp_path):
     assert run_cfg["run_id"] == submitted["run_id"]
     assert run_cfg["report_interval_s"] == 5
     assert run_cfg["config_id"] == {"grid_search": [101, 102]}
+    assert run_cfg["config_dir"] == str((tmp_path / "config").resolve())
+    assert run_cfg["db_path"] == str((tmp_path / "data" / "optimizer.db").resolve())
     assert captured["grid_search_values"] == [101, 102]
     assert captured["run_kwargs"]["num_samples"] == 1
     assert submitted["cleared_run_id"] == submitted["run_id"]

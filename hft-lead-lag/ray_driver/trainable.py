@@ -1,6 +1,7 @@
 """Ray Tune Trainable — wraps a fleet trial as a long-running ASHA-compatible trial."""
 
 import time
+from pathlib import Path
 
 from ray import tune
 
@@ -16,7 +17,9 @@ class FleetTrial(tune.Trainable):
     """
 
     def setup(self, config: dict):
-        self.ipc = FleetIPC()
+        config_dir = Path(config.get("config_dir", "config"))
+        db_path = Path(config.get("db_path", "data/optimizer.db"))
+        self.ipc = FleetIPC(config_dir=config_dir, db_path=db_path)
         self.run_id = config["run_id"]
         self.config_id = int(config["config_id"])
         self.report_interval_s = config.get("report_interval_s", 60)
