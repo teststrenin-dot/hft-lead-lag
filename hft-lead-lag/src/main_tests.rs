@@ -1126,11 +1126,10 @@ fn strategy_symbol_updates_from_batch_preserves_latest_duplicate_update() {
     );
 
     assert_eq!(ids, vec![0, 1]);
-    assert_eq!(updates.len(), 3);
+    assert_eq!(updates.len(), 2);
     assert_eq!(updates[0].0, 0);
     assert_eq!(updates[1].0, 1);
-    assert_eq!(updates[2].0, 0);
-    assert_eq!(updates[2].1.exchange_ts_ns, 30);
+    assert_eq!(updates[0].1.exchange_ts_ns, 30);
 }
 
 #[test]
@@ -1399,6 +1398,49 @@ fn process_exchange_batch_with_single_tick_updates_once() {
     let event = ws_rx.try_recv().expect("ws event");
     assert_eq!(event.symbol, "BTCUSDT");
     assert_eq!(event.exchange, "gate");
+}
+
+#[test]
+fn ingest_exchange_batch_deduplicates_symbol_and_keeps_latest_tick() {
+    let first = test_ticker("BTCUSDT", 100_000_000);
+    let drained = vec![
+        test_ticker("ETHUSDT", 110_000_000),
+        test_ticker("BTCUSDT", 120_000_000),
+    ];
+    let mut ticker_count = 0usize;
+    let mut metrics = EventLoopMetrics::new();
+    let screener = ScreenerStore::default();
+    let (ws_tx, mut ws_rx) = tokio::sync::broadcast::channel(8);
+    let now_ms = || 150i64;
+    let mut ctx = BatchIngestContext {
+        exchange: "binance",
+        ticker_count: &mut ticker_count,
+        metrics: &mut metrics,
+        now_ms: &now_ms,
+        screener: &screener,
+        ws_tx: Some(&ws_tx),
+    };
+
+    ingest_exchange_batch(&first, &drained, &mut ctx);
+
+    assert_eq!(ticker_count, 2);
+    assert_eq!(
+        metrics.drift_stats_string_and_reset(),
+        "n=2 avg=35ms p50=40ms p95=40ms p99=40ms max=40ms"
+    );
+    let mut events = [
+        ws_rx.try_recv().expect("first ws event"),
+        ws_rx.try_recv().expect("second ws event"),
+    ];
+    events.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    assert_eq!(events[0].symbol, "BTCUSDT");
+    assert_eq!(events[0].timestamp_ns, 120_000_000);
+    assert_eq!(events[1].symbol, "ETHUSDT");
+    assert_eq!(events[1].timestamp_ns, 110_000_000);
+    assert!(matches!(
+        ws_rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }
 
 #[test]

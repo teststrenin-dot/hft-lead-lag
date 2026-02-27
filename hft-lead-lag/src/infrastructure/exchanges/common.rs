@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
+use memchr::memmem;
 use sha2::{Sha256, Sha512};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -116,9 +117,7 @@ pub fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
     }
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+    memmem::find(haystack, needle).is_some()
 }
 
 /// Convert price string to ticks (1e-8 precision)

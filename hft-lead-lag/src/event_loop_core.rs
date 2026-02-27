@@ -2,7 +2,9 @@ use super::{
     ingest_exchange_batch, strategy_symbol_updates_from_batch, BatchIngestContext, ConfigManager,
     HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore, SIGNAL_CHECK_BUDGET_PER_TICK,
 };
+#[cfg(test)]
 use bytes::Bytes;
+#[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
@@ -159,6 +161,7 @@ pub(super) struct EventLoopState {
 pub(super) type SymbolId = hft_lead_lag::domain::SymbolId;
 
 pub(super) struct StrategySymbolIndex {
+    #[cfg(test)]
     symbol_to_id: HashMap<Bytes, SymbolId>,
     #[cfg(test)]
     id_to_symbol: Vec<String>,
@@ -166,33 +169,39 @@ pub(super) struct StrategySymbolIndex {
 
 impl StrategySymbolIndex {
     pub(super) fn new(strategy_symbols: &[String]) -> Self {
-        let mut symbol_to_id = HashMap::with_capacity(strategy_symbols.len());
+        #[cfg(not(test))]
+        {
+            let _ = strategy_symbols;
+            Self {}
+        }
+
         #[cfg(test)]
+        {
+        let mut symbol_to_id = HashMap::with_capacity(strategy_symbols.len());
         let mut id_to_symbol = Vec::with_capacity(strategy_symbols.len());
-        let mut next_symbol_id: SymbolId = 0;
+        let mut next_symbol_id: usize = 0;
 
         for symbol in strategy_symbols {
             let key = Bytes::copy_from_slice(symbol.as_bytes());
             if symbol_to_id.contains_key(&key) {
                 continue;
             }
-            if next_symbol_id == SymbolId::MAX {
+            let Ok(symbol_id) = SymbolId::try_from(next_symbol_id) else {
                 break;
-            }
-            let symbol_id = next_symbol_id;
+            };
             symbol_to_id.insert(key, symbol_id);
             next_symbol_id = next_symbol_id.saturating_add(1);
-            #[cfg(test)]
             id_to_symbol.push(symbol.clone());
         }
 
         Self {
             symbol_to_id,
-            #[cfg(test)]
             id_to_symbol,
+        }
         }
     }
 
+    #[cfg(test)]
     pub(super) fn symbol_id(&self, symbol: &[u8]) -> Option<SymbolId> {
         self.symbol_to_id.get(symbol).copied()
     }

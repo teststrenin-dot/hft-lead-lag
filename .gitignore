@@ -1,2 +1,7 @@
 new.txt
 telemetry-id
+
+# Runtime artifacts (must not be versioned)
+/data/
+/logs/
+/hft-lead-lag/config/trial-batches-archive/

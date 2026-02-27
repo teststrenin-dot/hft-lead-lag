@@ -75,6 +75,7 @@ base64 = "0.21"
 
 # Fast float parsing
 fast-float = "0.2"
+memchr = "2.7"
 
 # Concurrent map for symbol cache
 dashmap = "5.5"

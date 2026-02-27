@@ -114,13 +114,26 @@ impl BinanceMarketData {
 
     pub fn set_strategy_symbol_ids(&mut self, strategy_symbols: &[String]) {
         self.strategy_symbol_ids.clear();
-        for (idx, symbol) in strategy_symbols.iter().enumerate() {
-            if idx >= SymbolId::MAX as usize {
-                break;
+        let mut next_symbol_id: usize = 0;
+        let mut truncated = false;
+
+        for symbol in strategy_symbols {
+            let key = bytes::Bytes::copy_from_slice(symbol.as_bytes());
+            if self.strategy_symbol_ids.contains_key(&key) {
+                continue;
             }
-            self.strategy_symbol_ids.insert(
-                bytes::Bytes::copy_from_slice(symbol.as_bytes()),
-                idx as SymbolId,
+            let Ok(symbol_id) = SymbolId::try_from(next_symbol_id) else {
+                truncated = true;
+                break;
+            };
+            self.strategy_symbol_ids.insert(key, symbol_id);
+            next_symbol_id = next_symbol_id.saturating_add(1);
+        }
+
+        if truncated {
+            warn!(
+                "Binance strategy symbol-id map truncated at {} symbols (SymbolId capacity reached)",
+                self.strategy_symbol_ids.len()
             );
         }
     }
@@ -623,6 +636,20 @@ mod tests {
 
         let mapped = market.attach_strategy_symbol_id(ticker);
         assert_eq!(mapped.strategy_symbol_id, Some(1));
+    }
+
+    #[test]
+    fn set_strategy_symbol_ids_keeps_first_seen_id_for_duplicates() {
+        let mut market = BinanceMarketData::new();
+        market.set_strategy_symbol_ids(&[
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+            "BTCUSDT".to_string(),
+        ]);
+        let ticker = BookTicker::new(bytes::Bytes::from_static(b"BTCUSDT"), 1, 2, 3, 4, 5, 6);
+
+        let mapped = market.attach_strategy_symbol_id(ticker);
+        assert_eq!(mapped.strategy_symbol_id, Some(0));
     }
 
     #[test]

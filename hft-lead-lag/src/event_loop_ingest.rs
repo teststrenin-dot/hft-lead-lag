@@ -3,6 +3,8 @@ use super::rebuild_latest_map;
 use super::{EventLoopMetrics, MarketDataEvent, ScreenerStore, StrategySymbolIndex, SymbolId};
 #[cfg(test)]
 use bytes::Bytes;
+use std::collections::HashMap;
+#[cfg(test)]
 use std::collections::HashSet;
 
 #[cfg(test)]
@@ -66,18 +68,18 @@ pub(super) fn strategy_symbol_updates_from_batch(
 ) {
     let mut ids = Vec::with_capacity(drained.len() + 1);
     let mut updates = Vec::with_capacity(drained.len() + 1);
-    let mut seen: HashSet<SymbolId> = HashSet::with_capacity(drained.len() + 1);
+    let mut positions: HashMap<SymbolId, usize> = HashMap::with_capacity(drained.len() + 1);
 
     let mut push = |ticker: hft_lead_lag::domain::BookTicker| {
-        let Some(symbol_id) = ticker
-            .strategy_symbol_id
-            .or_else(|| strategy_symbol_index.symbol_id(ticker.symbol.as_ref()))
-        else {
+        let Some(symbol_id) = resolve_strategy_symbol_id(&ticker, strategy_symbol_index) else {
             return;
         };
-        if seen.insert(symbol_id) {
-            ids.push(symbol_id);
+        if let Some(idx) = positions.get(&symbol_id).copied() {
+            updates[idx] = (symbol_id, ticker);
+            return;
         }
+        positions.insert(symbol_id, updates.len());
+        ids.push(symbol_id);
         updates.push((symbol_id, ticker));
     };
 
@@ -87,6 +89,46 @@ pub(super) fn strategy_symbol_updates_from_batch(
     }
 
     (ids, updates)
+}
+
+#[inline]
+fn resolve_strategy_symbol_id(
+    ticker: &hft_lead_lag::domain::BookTicker,
+    strategy_symbol_index: &StrategySymbolIndex,
+) -> Option<SymbolId> {
+    #[cfg(test)]
+    {
+        ticker
+            .strategy_symbol_id
+            .or_else(|| strategy_symbol_index.symbol_id(ticker.symbol.as_ref()))
+    }
+    #[cfg(not(test))]
+    {
+        let _ = strategy_symbol_index;
+        ticker.strategy_symbol_id
+    }
+}
+
+pub(super) fn ingest_exchange_batch<F: Fn() -> i64>(
+    first: &hft_lead_lag::domain::BookTicker,
+    drained: &[hft_lead_lag::domain::BookTicker],
+    ctx: &mut BatchIngestContext<'_, F>,
+) {
+    let mut positions: HashMap<bytes::Bytes, usize> = HashMap::with_capacity(drained.len() + 1);
+    let mut latest: Vec<&hft_lead_lag::domain::BookTicker> = Vec::with_capacity(drained.len() + 1);
+
+    for ticker in std::iter::once(first).chain(drained.iter()) {
+        if let Some(idx) = positions.get(&ticker.symbol).copied() {
+            latest[idx] = ticker;
+            continue;
+        }
+        positions.insert(ticker.symbol.clone(), latest.len());
+        latest.push(ticker);
+    }
+
+    for ticker in latest {
+        ingest_ticker(ticker, ctx);
+    }
 }
 
 #[cfg(test)]
@@ -173,16 +215,5 @@ fn ingest_ticker<F: Fn() -> i64>(
             ask,
             timestamp_ns: ticker.exchange_ts_ns,
         });
-    }
-}
-
-pub(super) fn ingest_exchange_batch<F: Fn() -> i64>(
-    first: &hft_lead_lag::domain::BookTicker,
-    drained: &[hft_lead_lag::domain::BookTicker],
-    ctx: &mut BatchIngestContext<'_, F>,
-) {
-    ingest_ticker(first, ctx);
-    for ticker in drained {
-        ingest_ticker(ticker, ctx);
     }
 }
