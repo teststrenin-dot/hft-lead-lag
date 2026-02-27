@@ -25,6 +25,30 @@ pub enum Direction {
     Long,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitReason {
+    StopLoss,
+    Breakeven,
+    TrailingTake,
+    Timeout,
+}
+
+impl ExitReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StopLoss => "stop_loss",
+            Self::Breakeven => "breakeven",
+            Self::TrailingTake => "trailing_take",
+            Self::Timeout => "timeout",
+        }
+    }
+
+    pub fn is_stop_loss(self) -> bool {
+        matches!(self, Self::StopLoss)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OpenPosition {
     direction: Direction,
@@ -50,7 +74,7 @@ pub struct ClosedTrade {
     pub entry_ts_ms: i64,
     pub entry_price: f64,
     pub exit_price: f64,
-    pub exit_reason: &'static str,
+    pub exit_reason: ExitReason,
     pub spike_bps: f64,
     pub catchup_pct: f64,
     pub catchup_ms: i64,
@@ -82,7 +106,7 @@ enum PendingOrder {
     Exit {
         fire_ts_ms: i64,
         pos: OpenPosition,
-        reason: &'static str,
+        reason: ExitReason,
     },
 }
 
@@ -340,22 +364,22 @@ impl ShadowTrader {
         pos: &OpenPosition,
         unrealized_bps: f64,
         hold_ms: i64,
-    ) -> Option<&'static str> {
+    ) -> Option<ExitReason> {
         let timed_out = hold_ms >= cfg.max_hold_ms;
         if pos.breakeven_activated {
             if unrealized_bps <= 0.0 {
-                Some("breakeven")
+                Some(ExitReason::Breakeven)
             } else if unrealized_bps <= pos.peak_unrealized_bps * cfg.trailing_decay_ratio {
-                Some("trailing_take")
+                Some(ExitReason::TrailingTake)
             } else if timed_out {
-                Some("timeout")
+                Some(ExitReason::Timeout)
             } else {
                 None
             }
         } else if unrealized_bps <= -cfg.stop_loss_bps {
-            Some("stop_loss")
+            Some(ExitReason::StopLoss)
         } else if timed_out {
-            Some("timeout")
+            Some(ExitReason::Timeout)
         } else {
             None
         }
@@ -527,7 +551,7 @@ impl ShadowTrader {
         gate: &Quote,
         window_ms: i64,
         pos: OpenPosition,
-        exit_reason: &'static str,
+        exit_reason: ExitReason,
     ) {
         let fees = self.config.taker_fee * 2.0;
         let (pnl_pct, catchup_pct, exit_price) = match pos.direction {
@@ -543,7 +567,7 @@ impl ShadowTrader {
             }
         };
         let hold_ms = ts_ms.saturating_sub(pos.entry_ts_ms);
-        let early_stop_churn = exit_reason == "stop_loss" && hold_ms <= EARLY_STOP_CHURN_HOLD_MS;
+        let early_stop_churn = exit_reason.is_stop_loss() && hold_ms <= EARLY_STOP_CHURN_HOLD_MS;
 
         self.completed_trades.push_back(ClosedTrade {
             pnl_pct,
@@ -707,7 +731,7 @@ impl ShadowTrader {
                 exit_ts_ms: t.ts_ms,
                 direction: t.direction_str(),
                 pnl_pct: t.pnl_pct,
-                exit_reason: t.exit_reason,
+                exit_reason: t.exit_reason.as_str(),
                 spike_bps: t.spike_bps,
                 catchup_pct: t.catchup_pct,
                 entry_price: t.entry_price,
@@ -1012,7 +1036,7 @@ mod tests {
         trader.tick(50_400, &bn, &gt_drop, &samples, WINDOW_MS);
         assert_eq!(trader.position_label(), "FLAT");
         let t = &trader.completed_trades()[0];
-        assert_eq!(t.exit_reason, "stop_loss");
+        assert_eq!(t.exit_reason, ExitReason::StopLoss);
     }
 
     #[test]
@@ -1046,7 +1070,7 @@ mod tests {
         assert_eq!(trader.position_label(), "FLAT");
         let trades = trader.completed_trades();
         assert_eq!(trades.len(), 1);
-        assert_eq!(trades[0].exit_reason, "timeout");
+        assert_eq!(trades[0].exit_reason, ExitReason::Timeout);
     }
 
     #[test]
@@ -1082,7 +1106,7 @@ mod tests {
         trader.tick(50_600, &bn, &gt_drop, &samples, WINDOW_MS); // fill exit
         assert_eq!(trader.position_label(), "FLAT");
         let t = &trader.completed_trades()[0];
-        assert_eq!(t.exit_reason, "trailing_take");
+        assert_eq!(t.exit_reason, ExitReason::TrailingTake);
         // exit at 100.09, entry at 100.0 → raw 9bps, fees 10bps → net -1bp
         // With trailing take the trade is in profit pre-fees but not after.
         // The important thing is the mechanism works — trailing_take fires correctly.
@@ -1115,7 +1139,7 @@ mod tests {
         trader.tick(50_500, &bn, &gt_crash, &samples, WINDOW_MS); // fill exit
         assert_eq!(trader.position_label(), "FLAT");
         let t = &trader.completed_trades()[0];
-        assert_eq!(t.exit_reason, "breakeven");
+        assert_eq!(t.exit_reason, ExitReason::Breakeven);
     }
 
     #[test]
@@ -1141,7 +1165,7 @@ mod tests {
         trader.tick(50_500, &bn, &gt_flat, &samples, WINDOW_MS); // fill exit
         assert_eq!(trader.position_label(), "FLAT");
         let t = &trader.completed_trades()[0];
-        assert_eq!(t.exit_reason, "timeout");
+        assert_eq!(t.exit_reason, ExitReason::Timeout);
     }
 
     // -- Spread filter ----------------------------------------------------------
@@ -1241,7 +1265,7 @@ mod tests {
         let pos = make_pos(false, 0.0, 20.0);
         assert_eq!(
             ShadowTrader::determine_exit_reason(&cfg, &pos, -6.0, 100),
-            Some("stop_loss")
+            Some(ExitReason::StopLoss)
         );
     }
 
@@ -1255,7 +1279,7 @@ mod tests {
         let pos = make_pos(true, 10.0, 20.0);
         assert_eq!(
             ShadowTrader::determine_exit_reason(&cfg, &pos, -0.5, 100),
-            Some("breakeven")
+            Some(ExitReason::Breakeven)
         );
     }
 
@@ -1270,7 +1294,7 @@ mod tests {
         // unrealized 8 bps < peak 20 * 0.5 = 10 → trailing_take
         assert_eq!(
             ShadowTrader::determine_exit_reason(&cfg, &pos, 8.0, 100),
-            Some("trailing_take")
+            Some(ExitReason::TrailingTake)
         );
     }
 
@@ -1283,7 +1307,7 @@ mod tests {
         let pos = make_pos(false, 5.0, 20.0);
         assert_eq!(
             ShadowTrader::determine_exit_reason(&cfg, &pos, 3.0, 100),
-            Some("timeout")
+            Some(ExitReason::Timeout)
         );
     }
 

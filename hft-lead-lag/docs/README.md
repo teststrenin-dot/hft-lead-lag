@@ -2,9 +2,10 @@
 
 Актуальная документация по состоянию `main` (code-verified).
 
-**Snapshot:** 2026-02-24  
-**Branch/commit:** `main @ HEAD`  
+**Snapshot:** 2026-02-27  
+**Branch/commit:** `main @ 3c501387d99e`  
 **Mode:** paper trading + shadow fleet optimizer + Ray/ASHA orchestration
+**CP0 contract freeze:** `docs/status/2026-02-27-cp0-contract-freeze-v1.md`
 
 ---
 
@@ -129,14 +130,26 @@ scout -> expand -> forward(ASHA) -> promote
 | GET | `/health` | health/runtime status |
 | GET | `/api/v1/symbols` | universe symbols |
 | GET | `/api/v1/screener` | screener rows + shadow stats |
+| GET | `/api/v1/portfolio/active` | active/shortlist snapshot per runtime portfolio ID |
+| GET | `/api/v1/portfolio/candidates` | ranked candidate symbols for portfolio assignment |
+| GET | `/api/v1/portfolio/performance` | paper-money performance per portfolio |
+| GET | `/api/v1/portfolio/guards` | cooldown/streak guard-state per symbol |
 | GET | `/api/v1/shadow/:symbol` | per-symbol shadow debug |
 | GET | `/api/v1/chart/:symbol` | chart + trades |
 | GET | `/api/v1/fleet` | expectancy ranking |
 | GET | `/api/v1/fleet/ranked` | composite ranking (sharpe/pf/composite) |
 | GET | `/api/v1/fleet/symbols` | best config per symbol |
+| GET | `/api/v1/fleet/policy` | per-symbol top policy configs |
+| GET | `/api/v1/fleet/policy/:symbol` | detailed policy configs for one symbol |
+| GET | `/api/v1/forward/runs` | forward run summaries from `trial_runs_meta` |
+| GET | `/api/v1/forward/symbols` | best config per symbol scoped by forward run |
 | GET | `/api/v1/trials` | summary по `run_id` |
 | GET | `/api/v1/trials/:run_id` | per-config метрики в run |
 | GET | `/api/v1/trials/axes?run_id=...` | агрегаты по 7 осям |
+| GET | `/api/v1/trials/runner/config` | trial runner UI/runtime config |
+| GET | `/api/v1/trials/runner/status` | trial runner state + optional logs tail |
+| POST | `/api/v1/trials/runner/start` | start runner with requested mode |
+| POST | `/api/v1/trials/runner/stop` | stop active trial runner |
 | GET | `/screener` | HTML screener page |
 | GET | `/fleet` | HTML fleet page |
 | GET | `/trials` | HTML trials page |
@@ -285,4 +298,4 @@ python3 -m ray_driver forward --max-budget 240 --grace-period 60 --report-interv
 
 ---
 
-*Last updated: 2026-02-24 (incremental fleet patch contract documented)*
+*Last updated: 2026-02-27 (CP0 route/contract freeze sync)*

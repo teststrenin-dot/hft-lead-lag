@@ -2,7 +2,7 @@ use super::{
     shadow_fleet::{FleetTrade, ShadowFleet},
     FleetPatchApplyError, FleetPatchMode, FleetPatchPlan, ScreenerStore, SymbolState, TraderConfig,
 };
-use crate::domain::screener::shadow_trader::{ClosedTrade, Direction};
+use crate::domain::screener::shadow_trader::{ClosedTrade, Direction, ExitReason};
 
 fn config_with_gap(spike_threshold_bps: f64) -> TraderConfig {
     TraderConfig {
@@ -28,7 +28,7 @@ fn sample_closed_trade(ts_ms: i64) -> ClosedTrade {
         exit_price: 100.2,
         spike_bps: 50.0,
         pnl_pct: 0.2,
-        exit_reason: "trailing_take",
+        exit_reason: ExitReason::TrailingTake,
         catchup_pct: 0.2,
         catchup_ms: 500,
         gate_spread_at_entry_bps: 1.0,
@@ -839,12 +839,12 @@ fn drained_trades_collapse_same_symbol_timestamp_for_candidate_math() {
     let mut first = sample_closed_trade(80_000);
     first.entry_ts_ms = 20_000;
     first.pnl_pct = 0.4;
-    first.exit_reason = "target";
+    first.exit_reason = ExitReason::TrailingTake;
 
     let mut second = sample_closed_trade(80_000);
     second.entry_ts_ms = 20_000;
     second.pnl_pct = -0.2;
-    second.exit_reason = "stop_loss";
+    second.exit_reason = ExitReason::StopLoss;
 
     store.handle_drained_fleet_trades(vec![
         FleetTrade {
@@ -1269,15 +1269,15 @@ fn drained_trades_apply_guard_logic_in_chronological_order() {
 
     let mut loss_one = sample_closed_trade(2_200);
     loss_one.pnl_pct = -0.2;
-    loss_one.exit_reason = "stop_loss";
+    loss_one.exit_reason = ExitReason::StopLoss;
 
     let mut loss_two = sample_closed_trade(2_300);
     loss_two.pnl_pct = -0.2;
-    loss_two.exit_reason = "stop_loss";
+    loss_two.exit_reason = ExitReason::StopLoss;
 
     let mut win_earlier = sample_closed_trade(2_000);
     win_earlier.pnl_pct = 0.3;
-    win_earlier.exit_reason = "target";
+    win_earlier.exit_reason = ExitReason::TrailingTake;
 
     // Deliberately out-of-order input (wins/losses interleaved by config traversal order).
     store.handle_drained_fleet_trades(vec![

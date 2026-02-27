@@ -34,8 +34,8 @@
 //! - **SOLID**: Each module has single responsibility
 //! - **Zero-copy hot path**: Market data parsing avoids allocations
 //! - **WebSocket-first**: All market data via WS (except cold auth)
-//! - **Deterministic cognitive load**: Each module < 500 LOC
-//! - **No god objects**: Clear separation of concerns
+//! - **Deterministic cognitive load**: complexity budgets are reviewed per checkpoint
+//! - **No god objects**: enforced incrementally via review-driven refactors
 //!
 //! # Example Usage
 //!

@@ -124,58 +124,58 @@ impl HttpServer {
             .route(endpoints::SCREENER_DATA, get(handlers::get_screener))
             .route(endpoints::SCREENER_PAGE, get(templates::screener_page))
             .route(
-                "/api/v1/portfolio/active",
+                endpoints::PORTFOLIO_ACTIVE,
                 get(handlers::get_portfolio_active),
             )
             .route(
-                "/api/v1/portfolio/candidates",
+                endpoints::PORTFOLIO_CANDIDATES,
                 get(handlers::get_portfolio_candidates),
             )
             .route(
-                "/api/v1/portfolio/performance",
+                endpoints::PORTFOLIO_PERFORMANCE,
                 get(handlers::get_portfolio_performance),
             )
             .route(
-                "/api/v1/portfolio/guards",
+                endpoints::PORTFOLIO_GUARDS,
                 get(handlers::get_portfolio_guards),
             )
-            .route("/api/v1/shadow/:symbol", get(handlers::get_shadow_debug))
-            .route("/api/v1/chart/:symbol", get(handlers::get_chart_data))
-            .route("/api/v1/fleet", get(handlers::get_fleet_ranking))
-            .route("/api/v1/fleet/ranked", get(handlers::get_fleet_ranked))
-            .route("/api/v1/fleet/symbols", get(handlers::get_fleet_by_symbol))
+            .route(endpoints::SHADOW_DEBUG, get(handlers::get_shadow_debug))
+            .route(endpoints::CHART_DATA, get(handlers::get_chart_data))
+            .route(endpoints::FLEET_RANKING, get(handlers::get_fleet_ranking))
+            .route(endpoints::FLEET_RANKED, get(handlers::get_fleet_ranked))
+            .route(endpoints::FLEET_SYMBOLS, get(handlers::get_fleet_by_symbol))
             .route(
-                "/api/v1/fleet/policy",
+                endpoints::FLEET_POLICY_OVERVIEW,
                 get(handlers::get_fleet_policy_overview),
             )
             .route(
-                "/api/v1/fleet/policy/:symbol",
+                endpoints::FLEET_POLICY_FOR_SYMBOL,
                 get(handlers::get_fleet_policy_for_symbol),
             )
-            .route("/api/v1/forward/runs", get(handlers::get_forward_runs))
+            .route(endpoints::FORWARD_RUNS, get(handlers::get_forward_runs))
             .route(
-                "/api/v1/forward/symbols",
+                endpoints::FORWARD_SYMBOLS,
                 get(handlers::get_forward_by_symbol),
             )
-            .route("/fleet", get(templates::fleet_page))
-            .route("/trials", get(templates::trials_page))
-            .route("/api/v1/trials", get(handlers::get_trial_runs))
-            .route("/api/v1/trials/axes", get(handlers::get_trial_axes))
-            .route("/api/v1/trials/:run_id", get(handlers::get_trial_configs))
+            .route(endpoints::FLEET_PAGE, get(templates::fleet_page))
+            .route(endpoints::TRIALS_PAGE, get(templates::trials_page))
+            .route(endpoints::TRIALS, get(handlers::get_trial_runs))
+            .route(endpoints::TRIALS_AXES, get(handlers::get_trial_axes))
+            .route(endpoints::TRIALS_RUN_ID, get(handlers::get_trial_configs))
             .route(
-                "/api/v1/trials/runner/config",
+                endpoints::TRIALS_RUNNER_CONFIG,
                 get(handlers::get_trial_runner_config),
             )
             .route(
-                "/api/v1/trials/runner/status",
+                endpoints::TRIALS_RUNNER_STATUS,
                 get(handlers::get_trial_runner_status),
             )
             .route(
-                "/api/v1/trials/runner/start",
+                endpoints::TRIALS_RUNNER_START,
                 post(handlers::start_trial_runner),
             )
             .route(
-                "/api/v1/trials/runner/stop",
+                endpoints::TRIALS_RUNNER_STOP,
                 post(handlers::stop_trial_runner),
             )
             .with_state(state);
@@ -191,4 +191,26 @@ pub mod endpoints {
     pub const SYMBOLS: &str = "/api/v1/symbols";
     pub const SCREENER_DATA: &str = "/api/v1/screener";
     pub const SCREENER_PAGE: &str = "/screener";
+    pub const PORTFOLIO_ACTIVE: &str = "/api/v1/portfolio/active";
+    pub const PORTFOLIO_CANDIDATES: &str = "/api/v1/portfolio/candidates";
+    pub const PORTFOLIO_PERFORMANCE: &str = "/api/v1/portfolio/performance";
+    pub const PORTFOLIO_GUARDS: &str = "/api/v1/portfolio/guards";
+    pub const SHADOW_DEBUG: &str = "/api/v1/shadow/:symbol";
+    pub const CHART_DATA: &str = "/api/v1/chart/:symbol";
+    pub const FLEET_RANKING: &str = "/api/v1/fleet";
+    pub const FLEET_RANKED: &str = "/api/v1/fleet/ranked";
+    pub const FLEET_SYMBOLS: &str = "/api/v1/fleet/symbols";
+    pub const FLEET_POLICY_OVERVIEW: &str = "/api/v1/fleet/policy";
+    pub const FLEET_POLICY_FOR_SYMBOL: &str = "/api/v1/fleet/policy/:symbol";
+    pub const FORWARD_RUNS: &str = "/api/v1/forward/runs";
+    pub const FORWARD_SYMBOLS: &str = "/api/v1/forward/symbols";
+    pub const FLEET_PAGE: &str = "/fleet";
+    pub const TRIALS_PAGE: &str = "/trials";
+    pub const TRIALS: &str = "/api/v1/trials";
+    pub const TRIALS_AXES: &str = "/api/v1/trials/axes";
+    pub const TRIALS_RUN_ID: &str = "/api/v1/trials/:run_id";
+    pub const TRIALS_RUNNER_CONFIG: &str = "/api/v1/trials/runner/config";
+    pub const TRIALS_RUNNER_STATUS: &str = "/api/v1/trials/runner/status";
+    pub const TRIALS_RUNNER_START: &str = "/api/v1/trials/runner/start";
+    pub const TRIALS_RUNNER_STOP: &str = "/api/v1/trials/runner/stop";
 }

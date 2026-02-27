@@ -151,6 +151,7 @@ pub(crate) struct PortfolioCandidateRow {
     profitable_trades: u32,
     losing_trades: u32,
     useful_winrate: f64,
+    useful_winrate_pct: f64,
     pm_raw: i64,
     avg_pnl_pct: f64,
 }
@@ -282,12 +283,6 @@ pub(crate) async fn get_portfolio_active(
                     {
                         slot.shortlist = row.shortlist;
                         slot.active_symbols = row.active_symbols;
-                    } else {
-                        portfolios.push(PortfolioActiveRow {
-                            portfolio_id: row.portfolio_id,
-                            shortlist: row.shortlist,
-                            active_symbols: row.active_symbols,
-                        });
                     }
                 }
                 portfolios.sort_by(|a, b| a.portfolio_id.cmp(&b.portfolio_id));
@@ -308,15 +303,19 @@ pub(crate) async fn get_portfolio_candidates(
     let ranked = rank_candidates(&state.screener.portfolio_candidate_stats_v1(generated_at_ms));
     let rows: Vec<PortfolioCandidateRow> = ranked
         .iter()
-        .map(|stats| PortfolioCandidateRow {
-            symbol: stats.symbol.clone(),
-            age_minutes_from_first_tick: stats.age_minutes_from_first_tick,
-            closed_trades: stats.closed_trades,
-            profitable_trades: stats.profitable_trades,
-            losing_trades: stats.losing_trades,
-            useful_winrate: compute_useful_winrate(stats),
-            pm_raw: compute_pm_raw(stats),
-            avg_pnl_pct: stats.avg_pnl_pct,
+        .map(|stats| {
+            let useful_winrate = compute_useful_winrate(stats);
+            PortfolioCandidateRow {
+                symbol: stats.symbol.clone(),
+                age_minutes_from_first_tick: stats.age_minutes_from_first_tick,
+                closed_trades: stats.closed_trades,
+                profitable_trades: stats.profitable_trades,
+                losing_trades: stats.losing_trades,
+                useful_winrate,
+                useful_winrate_pct: useful_winrate * 100.0,
+                pm_raw: compute_pm_raw(stats),
+                avg_pnl_pct: stats.avg_pnl_pct,
+            }
         })
         .collect();
 

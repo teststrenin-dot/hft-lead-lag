@@ -1,7 +1,7 @@
 # Delivery Playbook — Outcome First, Contract First
 
 Date: 2026-02-26  
-Scope: обязательный рабочий процесс для всех следующих изменений (CP2/CP3 и дальше).
+Scope: обязательный рабочий процесс для всех следующих изменений (CP4+ и дальше).
 
 ## 1) Core Principle
 Сначала фиксируем **результат и критерии готовности**, потом делаем **контракты и тестируемые вехи**, и только потом реализацию.
@@ -26,7 +26,7 @@ Scope: обязательный рабочий процесс для всех с
 - `report`: результат проверки вехи (что прошло/что осталось).
 
 ## 4) Current Project Mapping
-### CP2 — Promotion & Bot Runtime
+### CP4 — Portfolio Race & Paper Runtime
 Outcome:
 - `1 portfolio = 1 execution loop` (paper mode), winner-promotion path, health per portfolio.
 
@@ -41,7 +41,7 @@ Contract-first artifacts:
 - winner selection contract (входные метрики, tie-break, versioned ruleset);
 - restart/recovery contract (какое состояние обязательно переживает рестарт).
 
-### CP3 — Capital Rebalance + Live
+### CP7 — Capital Rebalance + Live
 Outcome:
 - управляемый ребаланс капитала + безопасный live rollout.
 

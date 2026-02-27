@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 
 use super::price_samples::PriceSamples;
-use super::shadow_trader::{ClosedTrade, ShadowTrader};
+use super::shadow_trader::{ClosedTrade, ExitReason, ShadowTrader};
 use super::state::Quote;
 use super::trader_config::TraderConfig;
 
@@ -203,7 +203,7 @@ impl ConfigPolicyState {
     }
 
     fn observe_trade(&mut self, trade: &ClosedTrade) {
-        let is_stop_loss = trade.exit_reason == "stop_loss";
+        let is_stop_loss = trade.exit_reason.is_stop_loss();
         let is_early_stop_churn = trade.early_stop_churn;
         self.window_1h.observe_trade(
             trade.ts_ms,
@@ -600,7 +600,7 @@ mod tests {
                 entry_ts_ms: ts_ms - 500,
                 entry_price: 100.0,
                 exit_price: 100.3,
-                exit_reason: "trailing_take",
+                exit_reason: ExitReason::TrailingTake,
                 spike_bps: 50.0,
                 catchup_pct: 0.3,
                 catchup_ms: 500,
@@ -623,9 +623,9 @@ mod tests {
         for idx in 0..10 {
             let pnl = if idx < 7 { 0.20 } else { -0.05 };
             let reason = if idx < 2 {
-                "stop_loss"
+                ExitReason::StopLoss
             } else {
-                "trailing_take"
+                ExitReason::TrailingTake
             };
             state.observe_trade(&ClosedTrade {
                 pnl_pct: pnl,
@@ -676,7 +676,7 @@ mod tests {
             entry_ts_ms: 999_500,
             entry_price: 100.0,
             exit_price: 100.2,
-            exit_reason: "trailing_take",
+            exit_reason: ExitReason::TrailingTake,
             spike_bps: 50.0,
             catchup_pct: 0.2,
             catchup_ms: 500,
@@ -716,7 +716,7 @@ mod tests {
                 entry_ts_ms: ts_ms - 300,
                 entry_price: 100.0,
                 exit_price: 100.2,
-                exit_reason: "trailing_take",
+                exit_reason: ExitReason::TrailingTake,
                 spike_bps: 50.0,
                 catchup_pct: 0.2,
                 catchup_ms: 300,
@@ -732,7 +732,7 @@ mod tests {
                 entry_ts_ms: ts_ms - 300,
                 entry_price: 100.0,
                 exit_price: 99.8,
-                exit_reason: "stop_loss",
+                exit_reason: ExitReason::StopLoss,
                 spike_bps: 50.0,
                 catchup_pct: -0.2,
                 catchup_ms: 300,

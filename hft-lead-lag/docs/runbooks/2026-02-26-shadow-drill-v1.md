@@ -43,6 +43,7 @@ sqlite3 data/optimizer.db \
 ```bash
 curl -s http://127.0.0.1:5000/api/v1/portfolio/active | jq
 curl -s http://127.0.0.1:5000/api/v1/portfolio/candidates | jq '.total_candidates'
+curl -s http://127.0.0.1:5000/api/v1/portfolio/performance | jq '.total_equity_usd'
 curl -s http://127.0.0.1:5000/api/v1/portfolio/guards | jq '.total_symbols'
 ```
 

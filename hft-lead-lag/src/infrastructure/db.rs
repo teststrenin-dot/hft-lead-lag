@@ -732,14 +732,23 @@ pub fn load_portfolio_candidate_history_v1(
     conn: &Connection,
 ) -> rusqlite::Result<Vec<PortfolioCandidateHistoryRecordV1>> {
     let mut stmt = conn.prepare(
-        "SELECT
+        "WITH candidate_events AS (
+            SELECT
+                symbol,
+                exit_ts_ms,
+                AVG(pnl_pct) AS event_pnl_pct,
+                MIN(entry_ts_ms) AS first_entry_ts_ms
+            FROM trades
+            GROUP BY symbol, exit_ts_ms
+         )
+         SELECT
             symbol,
             COUNT(*) AS closed_trades,
-            SUM(CASE WHEN pnl_pct > 0.0 THEN 1 ELSE 0 END) AS profitable_trades,
-            SUM(CASE WHEN pnl_pct < 0.0 THEN 1 ELSE 0 END) AS losing_trades,
-            COALESCE(SUM(pnl_pct), 0.0) AS pnl_sum_pct,
-            MIN(entry_ts_ms) AS first_trade_ts_ms
-         FROM trades
+            SUM(CASE WHEN event_pnl_pct > 0.0 THEN 1 ELSE 0 END) AS profitable_trades,
+            SUM(CASE WHEN event_pnl_pct < 0.0 THEN 1 ELSE 0 END) AS losing_trades,
+            COALESCE(SUM(event_pnl_pct), 0.0) AS pnl_sum_pct,
+            MIN(first_entry_ts_ms) AS first_trade_ts_ms
+         FROM candidate_events
          GROUP BY symbol
          ORDER BY symbol ASC",
     )?;
@@ -1287,7 +1296,7 @@ fn insert_trades_tx(tx: &rusqlite::Transaction<'_>, trades: &[FleetTrade]) -> ru
                 t.exit_price,
                 t.spike_bps,
                 t.pnl_pct,
-                t.exit_reason,
+                t.exit_reason.as_str(),
                 t.gate_spread_at_entry_bps,
                 t.gate_natr_30m_pct_at_entry,
                 t.hold_ms,
@@ -1380,7 +1389,7 @@ fn replace_portfolio_snapshot_with_trades_v1(
 mod tests {
     use super::*;
     use crate::domain::screener::{
-        shadow_trader::{ClosedTrade, Direction},
+        shadow_trader::{ClosedTrade, Direction, ExitReason},
         TraderConfig,
     };
     use tokio::time::{timeout, Duration};
@@ -1411,7 +1420,7 @@ mod tests {
                 entry_ts_ms: 1,
                 entry_price: 100.0,
                 exit_price: 101.0,
-                exit_reason: "target",
+                exit_reason: ExitReason::TrailingTake,
                 spike_bps: 35.0,
                 catchup_pct: 0.5,
                 catchup_ms: 5,
@@ -1909,7 +1918,8 @@ mod tests {
             &conn,
             &[
                 sample_trade_with("BTCUSDT", 0.5, 100, 200),
-                sample_trade_with("BTCUSDT", -0.2, 300, 400),
+                sample_trade_with("BTCUSDT", -0.2, 110, 200),
+                sample_trade_with("BTCUSDT", 0.3, 300, 400),
                 sample_trade_with("ETHUSDT", 0.0, 500, 600),
             ],
         )
@@ -1922,9 +1932,9 @@ mod tests {
             .find(|row| row.symbol == "BTCUSDT")
             .expect("BTCUSDT aggregate");
         assert_eq!(btc.closed_trades, 2);
-        assert_eq!(btc.profitable_trades, 1);
-        assert_eq!(btc.losing_trades, 1);
-        assert!((btc.pnl_sum_pct - 0.3).abs() < 1e-12);
+        assert_eq!(btc.profitable_trades, 2);
+        assert_eq!(btc.losing_trades, 0);
+        assert!((btc.pnl_sum_pct - 0.45).abs() < 1e-12);
         assert_eq!(btc.first_trade_ts_ms, Some(100));
 
         let eth = rows

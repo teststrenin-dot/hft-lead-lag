@@ -4,6 +4,7 @@
 //! - `state`          — per-symbol state (quotes, drift, lag)
 //! - `cycle_tracker`  — divergence/convergence half-life measurement
 //! - `shadow_trader`  — paper-trading spike-follow model with DTOs
+//! - `portfolio_runtime` — portfolio candidate/guard/assignment math
 //! - `utils`          — percentile math, timestamp normalisation
 
 mod catalog_cache;
@@ -13,6 +14,7 @@ pub mod fleet_patch;
 mod fleet_reload;
 mod policy_views;
 mod portfolio_records;
+pub mod portfolio_runtime;
 pub mod price_samples;
 mod quote_ingest;
 pub mod shadow_fleet;
@@ -38,7 +40,7 @@ use self::shadow_trader::{ChartData, ShadowDebug};
 use self::state::SymbolState;
 use self::utils::now_ms;
 
-use crate::application::services::{
+use self::portfolio_runtime::{
     default_portfolio_paper_states_v1, PortfolioEngineV1, PortfolioPaperStateV1, PortfolioStateV1,
     SymbolGuardStateV1, SymbolStatsV1,
 };
@@ -702,7 +704,7 @@ impl ScreenerStore {
                 runtime.engine.record_closed_trade(
                     &ft.symbol,
                     ft.trade.pnl_pct,
-                    ft.trade.exit_reason == "stop_loss",
+                    ft.trade.exit_reason.is_stop_loss(),
                     ft.trade.ts_ms,
                 );
                 let after = runtime.engine.guard_state(&ft.symbol);

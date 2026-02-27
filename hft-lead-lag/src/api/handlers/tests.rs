@@ -479,6 +479,7 @@ async fn portfolio_candidates_endpoint_returns_derived_metrics() {
     assert_eq!(resp.rows[0].symbol, "BTCUSDT");
     assert_eq!(resp.rows[0].pm_raw, 0);
     assert!((resp.rows[0].useful_winrate - (1.0 / 3.0)).abs() < 1e-9);
+    assert!((resp.rows[0].useful_winrate_pct - (100.0 / 3.0)).abs() < 1e-9);
 }
 
 #[tokio::test]
@@ -596,6 +597,12 @@ async fn portfolio_active_endpoint_falls_back_to_db_state_snapshot() {
                 active_symbols: vec![],
                 updated_at_ms: 1_000,
             },
+            crate::infrastructure::db::PortfolioStateRecordV1 {
+                portfolio_id: "LEGACY".to_string(),
+                shortlist: vec!["SOLUSDT".to_string()],
+                active_symbols: vec!["SOLUSDT".to_string()],
+                updated_at_ms: 1_000,
+            },
         ],
     )
     .expect("seed portfolio state");
@@ -616,6 +623,7 @@ async fn portfolio_active_endpoint_falls_back_to_db_state_snapshot() {
     });
 
     let Json(resp) = get_portfolio_active(State(state)).await;
+    assert_eq!(resp.portfolios.len(), 2);
     let a = resp
         .portfolios
         .iter()
@@ -626,6 +634,12 @@ async fn portfolio_active_endpoint_falls_back_to_db_state_snapshot() {
         .iter()
         .find(|p| p.portfolio_id == "B")
         .expect("portfolio B");
+    assert!(
+        resp.portfolios
+            .iter()
+            .all(|p| p.portfolio_id == "A" || p.portfolio_id == "B"),
+        "fallback must not leak non-runtime portfolio ids"
+    );
     assert_eq!(a.active_symbols, vec!["BTCUSDT".to_string()]);
     assert_eq!(b.shortlist, vec!["ETHUSDT".to_string()]);
 

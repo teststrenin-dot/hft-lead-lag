@@ -16,7 +16,7 @@ Build a trading system where shadow fleet first accumulates reliable symbol/conf
 
 ## 3) Portfolio Topology
 
-1. Exactly 2 portfolios are active at a time.
+1. Portfolio set is configurable via `PORTFOLIO_IDS` (default: `A,B`).
 2. Mapping is strict: 1 portfolio = 1 bot.
 3. Portfolio size is dynamic from 0 to 4 symbols.
 
@@ -42,7 +42,7 @@ A symbol is transferable only if all minimum conditions pass:
 
 1. Symbol has been observed for more than 5 minutes.
 2. Symbol has more than 5 closed trades in shadow fleet.
-3. Entry metrics are computed globally across the full shadow fleet.
+3. Entry metrics are computed globally across the full shadow fleet in current run scope.
 4. Entry metrics are computed on full cumulative history (no rolling window in v1).
 5. Symbol has minimum useful winrate (`useful_winrate >= 30%`).
 6. Symbol has non-negative average pnl (`avg_pnl_pct >= 0`).
@@ -58,6 +58,11 @@ A symbol is transferable only if all minimum conditions pass:
 Formal entry check:
 
 `eligible(symbol) = (age_minutes_from_first_tick > 5) AND (closed_trades > 5) AND (useful_winrate >= 0.30) AND (avg_pnl_pct >= 0)`
+
+Restore semantics:
+- Candidate history uses event-level collapse by `(symbol, exit_ts_ms)`:
+  per event pnl = average pnl of closes with same `(symbol, exit_ts_ms)`.
+- `closed_trades/profitable/losing/pnl_sum` are built over collapsed events, not raw rows.
 
 ## 6) Eject and Reset Rules
 

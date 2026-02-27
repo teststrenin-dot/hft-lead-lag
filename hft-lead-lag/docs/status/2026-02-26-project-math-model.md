@@ -312,7 +312,7 @@ max_active_capacity = N_portfolios * 4
 ```
 
 Evidence:
-- `src/application/services/portfolio_runtime.rs`
+- `src/domain/screener/portfolio_runtime.rs`
 - `src/domain/screener/mod.rs`
 - `src/event_loop_runtime.rs`
 
@@ -350,11 +350,15 @@ Evidence:
 ## 10) DB-Level Aggregation Math
 Portfolio candidate history из `trades`:
 ```text
-closed_trades = COUNT(*)
-profitable_trades = SUM(pnl_pct > 0)
-losing_trades = SUM(pnl_pct < 0)
-pnl_sum_pct = SUM(pnl_pct)
-first_trade_ts_ms = MIN(entry_ts_ms)
+event(symbol, exit_ts_ms):
+  event_pnl_pct = AVG(pnl_pct for rows with same symbol+exit_ts_ms)
+  event_first_entry_ts_ms = MIN(entry_ts_ms for rows with same symbol+exit_ts_ms)
+
+closed_trades = COUNT(events)
+profitable_trades = SUM(event_pnl_pct > 0)
+losing_trades = SUM(event_pnl_pct < 0)
+pnl_sum_pct = SUM(event_pnl_pct)
+first_trade_ts_ms = MIN(event_first_entry_ts_ms)
 ```
 
 Evidence:
