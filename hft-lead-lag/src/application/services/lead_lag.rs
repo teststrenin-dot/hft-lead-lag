@@ -5,6 +5,7 @@
 //! - Executes arbitrage when spread exceeds threshold
 //! - Manages position lifecycle
 
+use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
@@ -188,9 +189,9 @@ pub struct LeadLagStrategy {
     /// Current positions
     positions: Arc<RwLock<Vec<PositionState>>>,
     /// Latest book tickers from primary exchange
-    primary_books: Arc<RwLock<std::collections::HashMap<String, BookTicker>>>,
+    primary_books: Arc<RwLock<std::collections::HashMap<Bytes, BookTicker>>>,
     /// Latest book tickers from hedge exchange
-    hedge_books: Arc<RwLock<std::collections::HashMap<String, BookTicker>>>,
+    hedge_books: Arc<RwLock<std::collections::HashMap<Bytes, BookTicker>>>,
     primary_clock_offset: Arc<Mutex<ExchangeClockOffset>>,
     hedge_clock_offset: Arc<Mutex<ExchangeClockOffset>>,
 }
@@ -209,7 +210,7 @@ impl LeadLagStrategy {
 
     /// Update primary exchange book ticker
     pub async fn update_primary_book(&self, ticker: BookTicker) {
-        let symbol = String::from_utf8_lossy(&ticker.symbol).to_string();
+        let symbol = ticker.symbol.clone();
         self.primary_clock_offset
             .lock()
             .expect("primary clock offset mutex poisoned")
@@ -220,7 +221,7 @@ impl LeadLagStrategy {
 
     /// Update hedge exchange book ticker
     pub async fn update_hedge_book(&self, ticker: BookTicker) {
-        let symbol = String::from_utf8_lossy(&ticker.symbol).to_string();
+        let symbol = ticker.symbol.clone();
         self.hedge_clock_offset
             .lock()
             .expect("hedge clock offset mutex poisoned")
@@ -234,8 +235,8 @@ impl LeadLagStrategy {
         let primary_books = self.primary_books.read().await;
         let hedge_books = self.hedge_books.read().await;
 
-        let primary = primary_books.get(symbol)?;
-        let hedge = hedge_books.get(symbol)?;
+        let primary = primary_books.get(symbol.as_bytes())?;
+        let hedge = hedge_books.get(symbol.as_bytes())?;
 
         if primary.local_ts_ns <= 0 || hedge.local_ts_ns <= 0 {
             return None;

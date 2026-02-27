@@ -91,16 +91,16 @@ const ENABLE_SCREENER_CHART_PIPELINE: bool = false;
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
 
 fn rebuild_latest_map(
-    latest: &mut std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    latest: &mut std::collections::HashMap<bytes::Bytes, hft_lead_lag::domain::BookTicker>,
     first: hft_lead_lag::domain::BookTicker,
     drained: Vec<hft_lead_lag::domain::BookTicker>,
-) -> std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> {
-    let mut batch_latest: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker> =
+) -> std::collections::HashMap<bytes::Bytes, hft_lead_lag::domain::BookTicker> {
+    let mut batch_latest: std::collections::HashMap<bytes::Bytes, hft_lead_lag::domain::BookTicker> =
         std::collections::HashMap::new();
-    let first_symbol = String::from_utf8_lossy(&first.symbol).to_string();
+    let first_symbol = first.symbol.clone();
     batch_latest.insert(first_symbol, first);
     for ticker in drained {
-        let symbol = String::from_utf8_lossy(&ticker.symbol).to_string();
+        let symbol = ticker.symbol.clone();
         batch_latest.insert(symbol, ticker);
     }
     for (symbol, ticker) in &batch_latest {

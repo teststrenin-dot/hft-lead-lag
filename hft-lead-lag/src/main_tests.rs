@@ -916,7 +916,7 @@ async fn event_loop_state_process_exchange_result_updates_binance_map() {
 
     assert_eq!(
         updated_symbols,
-        vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
+        vec![sym("BTCUSDT"), sym("ETHUSDT")]
     );
     assert_eq!(state.latest_bn.len(), 2);
     assert!(state.latest_gt.is_empty());
@@ -960,15 +960,19 @@ fn test_ticker(symbol: &str, exchange_ts_ns: i64) -> hft_lead_lag::domain::BookT
     )
 }
 
+fn sym(symbol: &str) -> bytes::Bytes {
+    bytes::Bytes::copy_from_slice(symbol.as_bytes())
+}
+
 #[test]
 fn rebuild_latest_map_preserves_old_entries() {
     let mut latest = std::collections::HashMap::new();
-    latest.insert("OLD".to_string(), test_ticker("OLD", 1));
+    latest.insert(sym("OLD"), test_ticker("OLD", 1));
 
     rebuild_latest_map(&mut latest, test_ticker("BTCUSDT", 10), Vec::new());
 
-    assert!(latest.contains_key("OLD"));
-    assert!(latest.contains_key("BTCUSDT"));
+    assert!(latest.contains_key("OLD".as_bytes()));
+    assert!(latest.contains_key("BTCUSDT".as_bytes()));
 }
 
 #[test]
@@ -981,14 +985,14 @@ fn rebuild_latest_map_keeps_latest_ticker_per_symbol() {
     );
 
     assert_eq!(latest.len(), 2);
-    assert_eq!(latest["BTCUSDT"].exchange_ts_ns, 20);
-    assert_eq!(latest["ETHUSDT"].exchange_ts_ns, 30);
+    assert_eq!(latest["BTCUSDT".as_bytes()].exchange_ts_ns, 20);
+    assert_eq!(latest["ETHUSDT".as_bytes()].exchange_ts_ns, 30);
 }
 
 #[test]
 fn process_exchange_batch_preserves_cached_symbols_and_ingests_only_updates() {
     let mut latest = std::collections::HashMap::new();
-    latest.insert("OLD".to_string(), test_ticker("OLD", 1));
+    latest.insert(sym("OLD"), test_ticker("OLD", 1));
 
     let mut ticker_count = 0usize;
     let mut metrics = EventLoopMetrics::new();
@@ -1012,10 +1016,10 @@ fn process_exchange_batch_preserves_cached_symbols_and_ingests_only_updates() {
     );
 
     assert!(
-        latest.contains_key("OLD"),
+        latest.contains_key("OLD".as_bytes()),
         "latest cache should preserve non-updated symbols"
     );
-    assert!(latest.contains_key("BTCUSDT"));
+    assert!(latest.contains_key("BTCUSDT".as_bytes()));
     assert_eq!(ticker_count, 1);
 
     let event = ws_rx.try_recv().expect("ws event");
@@ -1027,7 +1031,7 @@ fn process_exchange_batch_preserves_cached_symbols_and_ingests_only_updates() {
 }
 
 #[test]
-fn updated_symbols_from_batch_deduplicates_and_sorts() {
+fn updated_symbols_from_batch_deduplicates_and_preserves_first_seen_order() {
     let symbols = updated_symbols_from_batch(
         &test_ticker("BTCUSDT", 10),
         &[
@@ -1039,9 +1043,9 @@ fn updated_symbols_from_batch_deduplicates_and_sorts() {
     assert_eq!(
         symbols,
         vec![
-            "ADAUSDT".to_string(),
-            "BTCUSDT".to_string(),
-            "ETHUSDT".to_string()
+            sym("BTCUSDT"),
+            sym("ETHUSDT"),
+            sym("ADAUSDT")
         ]
     );
 }
@@ -1126,9 +1130,11 @@ blacklist = ["BTCUSDT", "ETHUSDT"]
 
 #[test]
 fn strategy_ticks_in_order_skips_missing_symbols() {
-    let strategy_symbols = vec!["BTCUSDT", "ETHUSDT"];
+    let btc = sym("BTCUSDT");
+    let eth = sym("ETHUSDT");
+    let strategy_symbols = vec![&btc, &eth];
     let mut latest = std::collections::HashMap::new();
-    latest.insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 10));
+    latest.insert(sym("BTCUSDT"), test_ticker("BTCUSDT", 10));
 
     let ticks: Vec<i64> = strategy_ticks_in_order(&strategy_symbols, &latest)
         .map(|t| t.exchange_ts_ns)
@@ -1138,10 +1144,12 @@ fn strategy_ticks_in_order_skips_missing_symbols() {
 
 #[test]
 fn strategy_ticks_in_order_preserves_strategy_order() {
-    let strategy_symbols = vec!["ETHUSDT", "BTCUSDT"];
+    let eth = sym("ETHUSDT");
+    let btc = sym("BTCUSDT");
+    let strategy_symbols = vec![&eth, &btc];
     let mut latest = std::collections::HashMap::new();
-    latest.insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 10));
-    latest.insert("ETHUSDT".to_string(), test_ticker("ETHUSDT", 20));
+    latest.insert(sym("BTCUSDT"), test_ticker("BTCUSDT", 10));
+    latest.insert(sym("ETHUSDT"), test_ticker("ETHUSDT", 20));
 
     let symbols: Vec<String> = strategy_ticks_in_order(&strategy_symbols, &latest)
         .map(|t| String::from_utf8_lossy(&t.symbol).to_string())
@@ -1180,7 +1188,7 @@ fn ingest_latest_batch_is_noop_for_empty_map() {
 #[test]
 fn ingest_latest_batch_updates_counter_metrics_screener_and_ws() {
     let mut latest = std::collections::HashMap::new();
-    latest.insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 100_000_000));
+    latest.insert(sym("BTCUSDT"), test_ticker("BTCUSDT", 100_000_000));
     let mut ticker_count = 0usize;
     let mut metrics = EventLoopMetrics::new();
     let screener = ScreenerStore::default();
@@ -1218,7 +1226,7 @@ fn ingest_latest_batch_updates_counter_metrics_screener_and_ws() {
 #[test]
 fn process_exchange_batch_rebuilds_and_ingests_latest_state() {
     let mut latest = std::collections::HashMap::new();
-    latest.insert("OLD".to_string(), test_ticker("OLD", 1));
+    latest.insert(sym("OLD"), test_ticker("OLD", 1));
     let mut ticker_count = 5usize;
     let mut metrics = EventLoopMetrics::new();
     let screener = ScreenerStore::default();
@@ -1243,9 +1251,9 @@ fn process_exchange_batch_rebuilds_and_ingests_latest_state() {
         &mut ctx,
     );
 
-    assert!(latest.contains_key("OLD"));
+    assert!(latest.contains_key("OLD".as_bytes()));
     assert_eq!(latest.len(), 3);
-    assert_eq!(latest["BTCUSDT"].exchange_ts_ns, 120_000_000);
+    assert_eq!(latest["BTCUSDT".as_bytes()].exchange_ts_ns, 120_000_000);
     assert_eq!(ticker_count, 7);
     assert_eq!(
         metrics.drift_stats_string_and_reset(),
@@ -1486,16 +1494,16 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
     let mut state = EventLoopState::new();
     state
         .latest_bn
-        .insert("BTCUSDT".to_string(), test_ticker("BTCUSDT", 100_000_000));
+        .insert(sym("BTCUSDT"), test_ticker("BTCUSDT", 100_000_000));
     state
         .latest_gt
-        .insert("ETHUSDT".to_string(), test_ticker("ETHUSDT", 100_000_000));
+        .insert(sym("ETHUSDT"), test_ticker("ETHUSDT", 100_000_000));
 
     let strategy = RecordingRuntimeStrategy::default();
-    let strategy_symbol_set: std::collections::HashSet<&str> =
-        ["BTCUSDT", "ETHUSDT"].into_iter().collect();
-    let updated_binance = vec!["BTCUSDT".to_string()];
-    let updated_gate = vec!["ETHUSDT".to_string()];
+    let strategy_symbol_set: std::collections::HashSet<bytes::Bytes> =
+        [sym("BTCUSDT"), sym("ETHUSDT")].into_iter().collect();
+    let updated_binance = vec![sym("BTCUSDT")];
+    let updated_gate = vec![sym("ETHUSDT")];
 
     state
         .update_strategy_books(
@@ -1542,13 +1550,13 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
     let strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
 
-    let strategy_symbol_set: std::collections::HashSet<&str> =
-        ["BTCUSDT", "ETHUSDT"].into_iter().collect();
+    let strategy_symbol_set: std::collections::HashSet<bytes::Bytes> =
+        [sym("BTCUSDT"), sym("ETHUSDT")].into_iter().collect();
     let updated = vec![
-        "BTCUSDT".to_string(),
-        "SOLUSDT".to_string(),
-        "ETHUSDT".to_string(),
-        "BTCUSDT".to_string(),
+        sym("BTCUSDT"),
+        sym("SOLUSDT"),
+        sym("ETHUSDT"),
+        sym("BTCUSDT"),
     ];
     state.mark_pending_signal_symbols(&updated, &strategy_symbol_set);
 
@@ -1586,7 +1594,9 @@ async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
     let total = SIGNAL_CHECK_BUDGET_PER_TICK + 2;
 
     for idx in 0..total {
-        state.pending_signal_symbols.insert(format!("SYM{idx:04}"));
+        state
+            .pending_signal_symbols
+            .insert(sym(&format!("SYM{idx:04}")));
     }
 
     state.handle_signal_tick(&strategy, &health).await;

@@ -1,8 +1,10 @@
 use super::{rebuild_latest_map, EventLoopMetrics, MarketDataEvent, ScreenerStore};
+use bytes::Bytes;
+use std::collections::HashSet;
 
 pub(super) fn strategy_ticks_in_order<'a>(
-    strategy_symbols: &'a [&'a str],
-    latest: &'a std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    strategy_symbols: &'a [&'a Bytes],
+    latest: &'a std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
 ) -> impl Iterator<Item = &'a hft_lead_lag::domain::BookTicker> + 'a {
     strategy_symbols
         .iter()
@@ -12,29 +14,35 @@ pub(super) fn strategy_ticks_in_order<'a>(
 pub(super) fn updated_symbols_from_batch(
     first: &hft_lead_lag::domain::BookTicker,
     drained: &[hft_lead_lag::domain::BookTicker],
-) -> Vec<String> {
+) -> Vec<Bytes> {
     let mut symbols = Vec::with_capacity(drained.len() + 1);
-    symbols.push(String::from_utf8_lossy(&first.symbol).to_string());
-    for ticker in drained {
-        symbols.push(String::from_utf8_lossy(&ticker.symbol).to_string());
+    let mut seen: HashSet<Bytes> = HashSet::with_capacity(drained.len() + 1);
+    if seen.insert(first.symbol.clone()) {
+        symbols.push(first.symbol.clone());
     }
-    symbols.sort_unstable();
-    symbols.dedup();
+    for ticker in drained {
+        if seen.insert(ticker.symbol.clone()) {
+            symbols.push(ticker.symbol.clone());
+        }
+    }
     symbols
 }
 
 pub(super) fn ingest_latest_batch<F: Fn() -> i64>(
-    latest: &std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    latest: &std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
     ctx: &mut BatchIngestContext<'_, F>,
 ) {
     for (symbol, ticker) in latest {
+        let Ok(symbol_str) = std::str::from_utf8(symbol) else {
+            continue;
+        };
         *ctx.ticker_count += 1;
         ctx.metrics
             .record_tick_drift((ctx.now_ms)(), ticker.exchange_ts_ns);
         let bid = ticker.bid_price();
         let ask = ticker.ask_price();
         ctx.screener.update(
-            symbol,
+            symbol_str,
             ctx.exchange,
             bid,
             ask,
@@ -43,7 +51,7 @@ pub(super) fn ingest_latest_batch<F: Fn() -> i64>(
         );
         if let Some(ws_tx) = ctx.ws_tx {
             let _ = ws_tx.send(MarketDataEvent {
-                symbol: symbol.clone(),
+                symbol: symbol_str.to_string(),
                 exchange: ctx.exchange,
                 bid,
                 ask,
@@ -63,7 +71,7 @@ pub(super) struct BatchIngestContext<'a, F: Fn() -> i64> {
 }
 
 pub(super) fn process_exchange_batch<F: Fn() -> i64>(
-    latest: &mut std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
+    latest: &mut std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
     first: hft_lead_lag::domain::BookTicker,
     drained: Vec<hft_lead_lag::domain::BookTicker>,
     ctx: &mut BatchIngestContext<'_, F>,

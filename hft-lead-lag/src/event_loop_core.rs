@@ -3,6 +3,8 @@ use super::{
     BatchIngestContext, ConfigManager, HealthState, MarketDataEvent, RuntimeStrategy,
     ScreenerStore, SIGNAL_CHECK_BUDGET_PER_TICK,
 };
+use bytes::Bytes;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{error, info, warn};
@@ -147,10 +149,10 @@ pub(super) struct EventLoopState {
     pub(super) signal_count: usize,
     last_status_at: Instant,
     pub(super) signal_interval: tokio::time::Interval,
-    pub(super) latest_bn: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
-    pub(super) latest_gt: std::collections::HashMap<String, hft_lead_lag::domain::BookTicker>,
-    pub(super) pending_signal_symbols: std::collections::BTreeSet<String>,
-    symbol_stage_timestamps: std::collections::HashMap<String, SymbolStageTimestamps>,
+    pub(super) latest_bn: std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
+    pub(super) latest_gt: std::collections::HashMap<Bytes, hft_lead_lag::domain::BookTicker>,
+    pub(super) pending_signal_symbols: std::collections::BTreeSet<Bytes>,
+    symbol_stage_timestamps: std::collections::HashMap<Bytes, SymbolStageTimestamps>,
     pub(super) metrics: EventLoopMetrics,
 }
 
@@ -311,7 +313,7 @@ impl EventLoopState {
         drained: Vec<hft_lead_lag::domain::BookTicker>,
         screener: &ScreenerStore,
         ws_tx: Option<&tokio::sync::broadcast::Sender<MarketDataEvent>>,
-    ) -> Result<Vec<String>, hft_lead_lag::domain::ExchangeError> {
+    ) -> Result<Vec<Bytes>, hft_lead_lag::domain::ExchangeError> {
         let parsed_ts_ns = Self::now_ns();
         let ticker = result?;
         let updated_symbols = updated_symbols_from_batch(&ticker, &drained);
@@ -339,7 +341,7 @@ impl EventLoopState {
     fn record_stage_timestamps_for_batch(
         &mut self,
         side: ExchangeSide,
-        updated_symbols: &[String],
+        updated_symbols: &[Bytes],
         parsed_ts_ns: i64,
         state_updated_ts_ns: i64,
     ) {
@@ -368,11 +370,7 @@ impl EventLoopState {
         }
     }
 
-    pub(super) fn sync_stage_timestamps_to_health(
-        &self,
-        updated_symbols: &[String],
-        health: &HealthState,
-    ) {
+    pub(super) fn sync_stage_timestamps_to_health(&self, updated_symbols: &[Bytes], health: &HealthState) {
         for symbol in updated_symbols {
             let Some(stages) = self.symbol_stage_timestamps.get(symbol) else {
                 continue;
@@ -393,13 +391,12 @@ impl EventLoopState {
         &self,
         side: ExchangeSide,
         strategy: &dyn RuntimeStrategy,
-        updated_symbols: &[String],
-        strategy_symbol_set: &std::collections::HashSet<&str>,
+        updated_symbols: &[Bytes],
+        strategy_symbol_set: &HashSet<Bytes>,
         strategy_exchange_routing: StrategyExchangeRouting,
     ) {
-        let symbols_for_side: Vec<&str> = updated_symbols
+        let symbols_for_side: Vec<&Bytes> = updated_symbols
             .iter()
-            .map(String::as_str)
             .filter(|symbol| strategy_symbol_set.contains(*symbol))
             .collect();
 
@@ -428,12 +425,11 @@ impl EventLoopState {
 
     pub(super) fn mark_pending_signal_symbols(
         &mut self,
-        updated_symbols: &[String],
-        strategy_symbol_set: &std::collections::HashSet<&str>,
+        updated_symbols: &[Bytes],
+        strategy_symbol_set: &HashSet<Bytes>,
     ) {
         for symbol in updated_symbols {
-            let raw = symbol.as_str();
-            if strategy_symbol_set.contains(raw) {
+            if strategy_symbol_set.contains(symbol) {
                 self.pending_signal_symbols.insert(symbol.clone());
             }
         }
@@ -456,7 +452,11 @@ impl EventLoopState {
             let Some(symbol) = self.pending_signal_symbols.pop_first() else {
                 break;
             };
-            let signal = strategy.check_signal(&symbol).await;
+            let signal = if let Ok(symbol_str) = std::str::from_utf8(&symbol) {
+                strategy.check_signal(symbol_str).await
+            } else {
+                None
+            };
             let signal_decided_ts_ns = Self::now_ns();
             health
                 .runtime_last_signal_decided_ts_ns
