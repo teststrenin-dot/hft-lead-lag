@@ -67,9 +67,10 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 ## `HFT-CP4` Minimal-Copy WS Parse Path
 1. Done and not touched:
    - Fast float parsing and tick conversion.
+   - Symbol cache now interns raw byte keys/values directly (`Vec<u8> -> Bytes`) without UTF-8 fallback conversion.
 2. Done but must be reworked:
    - Generic extractors using repeated `format!`.
-   - Byte copies for symbol extraction in hot parse path.
+   - Remaining byte-copy points in parse path still require profiling and targeted elimination.
 3. Missing and required:
    - Symbol mapping to `SymbolId` with minimal copy overhead.
    - Specialized hot parse path for required fields only.

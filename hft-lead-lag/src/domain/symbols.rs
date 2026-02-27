@@ -13,8 +13,8 @@ pub struct SymbolCache {
     // Using dashmap for concurrent access without locks
     // In production, consider string-interner crate for better performance
     cache: std::sync::Arc<dashmap::DashMap<String, Arc<str>>>,
-    bytes_cache: std::sync::Arc<dashmap::DashMap<String, Bytes>>,
-    gate_contract_cache: std::sync::Arc<dashmap::DashMap<String, Bytes>>,
+    bytes_cache: std::sync::Arc<dashmap::DashMap<Vec<u8>, Bytes>>,
+    gate_contract_cache: std::sync::Arc<dashmap::DashMap<Vec<u8>, Bytes>>,
 }
 
 impl SymbolCache {
@@ -41,40 +41,43 @@ impl SymbolCache {
 
     /// Get or create as Bytes (for zero-copy parsing)
     pub fn intern_bytes(&self, symbol: &[u8]) -> Bytes {
-        let symbol_str = std::str::from_utf8(symbol).unwrap_or("UNKNOWN");
-        if let Some(existing) = self.bytes_cache.get(symbol_str) {
+        if let Some(existing) = self.bytes_cache.get(symbol) {
             return existing.clone();
         }
 
-        let bytes = Bytes::copy_from_slice(symbol_str.as_bytes());
-        self.bytes_cache
-            .insert(symbol_str.to_string(), bytes.clone());
+        let bytes = Bytes::copy_from_slice(symbol);
+        self.bytes_cache.insert(symbol.to_vec(), bytes.clone());
         bytes
     }
 
     /// Get or create canonical symbol from Gate contract bytes (e.g. BTC_USDT -> BTCUSDT).
     pub fn intern_gate_contract(&self, contract: &[u8]) -> Bytes {
-        let contract_str = std::str::from_utf8(contract).unwrap_or("UNKNOWN");
-        if let Some(existing) = self.gate_contract_cache.get(contract_str) {
+        if let Some(existing) = self.gate_contract_cache.get(contract) {
             return existing.clone();
         }
 
-        let normalized = normalize_gate_contract(contract_str);
-        let symbol = self.intern_bytes(normalized.as_bytes());
+        let normalized = normalize_gate_contract(contract);
+        let symbol = self.intern_bytes(&normalized);
         self.gate_contract_cache
-            .insert(contract_str.to_string(), symbol.clone());
+            .insert(contract.to_vec(), symbol.clone());
         symbol
     }
 }
 
-fn normalize_gate_contract(contract: &str) -> String {
-    if let Some(base) = contract.strip_suffix("_USDT") {
-        return format!("{base}USDT");
+fn normalize_gate_contract(contract: &[u8]) -> Vec<u8> {
+    if let Some(base) = contract.strip_suffix(b"_USDT") {
+        let mut normalized = Vec::with_capacity(base.len() + 4);
+        normalized.extend_from_slice(base);
+        normalized.extend_from_slice(b"USDT");
+        return normalized;
     }
-    if let Some(base) = contract.strip_suffix("_USD") {
-        return format!("{base}USDT");
+    if let Some(base) = contract.strip_suffix(b"_USD") {
+        let mut normalized = Vec::with_capacity(base.len() + 4);
+        normalized.extend_from_slice(base);
+        normalized.extend_from_slice(b"USDT");
+        return normalized;
     }
-    contract.to_string()
+    contract.to_vec()
 }
 
 /// Predefined symbol constants for common pairs.
@@ -115,6 +118,19 @@ mod tests {
         let s2 = cache.intern_bytes(b"BTCUSDT");
 
         assert_eq!(s1, s2);
+        assert_eq!(s1.as_ptr(), s2.as_ptr());
+    }
+
+    #[test]
+    fn test_symbol_bytes_preserves_non_utf8_payload() {
+        let cache = SymbolCache::new();
+        let raw = b"BTC\xffUSDT";
+
+        let s1 = cache.intern_bytes(raw);
+        let s2 = cache.intern_bytes(raw);
+
+        assert_eq!(s1.as_ref(), raw);
+        assert_eq!(s2.as_ref(), raw);
         assert_eq!(s1.as_ptr(), s2.as_ptr());
     }
 
