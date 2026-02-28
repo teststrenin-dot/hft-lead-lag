@@ -77,6 +77,10 @@ pub(crate) struct HealthResponse {
     db_overflowed_batches: u64,
     db_dropped_batch_budget: u64,
     db_overflow_warn_threshold: u64,
+    execution_sent_intents: u64,
+    execution_dropped_intents: u64,
+    execution_send_timeouts: u64,
+    execution_kill_switch_active: bool,
     runtime_stage_timestamps: RuntimeStageTimestamps,
     runtime_latency_us: RuntimeLatencySnapshot,
     runtime_backlog_depth: RuntimeBacklogDepth,
@@ -91,6 +95,7 @@ pub(crate) struct RuntimeStageTimestamps {
     state_updated_ts_ns: i64,
     signal_decided_ts_ns: i64,
     order_intent_enqueued_ts_ns: i64,
+    order_intent_sent_ts_ns: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +112,7 @@ pub(crate) struct RuntimeLatencySnapshot {
     ingest: RuntimeLatencyStats,
     decision: RuntimeLatencyStats,
     end_to_end: RuntimeLatencyStats,
+    execution_intent_to_sent: RuntimeLatencyStats,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +120,7 @@ pub(crate) struct RuntimeBacklogDepth {
     binance_msg_queue_depth: u64,
     gate_msg_queue_depth: u64,
     signal_backlog_depth: u64,
+    execution_intent_queue_depth: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

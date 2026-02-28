@@ -98,6 +98,22 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
     let gate_dropped_messages = GateMarketData::dropped_messages();
     let db_dropped_batches = DbWriter::dropped_batches();
     let db_overflowed_batches = DbWriter::overflowed_batches();
+    let execution_sent_intents = state
+        .health
+        .runtime_execution_sent_intents
+        .load(Ordering::Relaxed);
+    let execution_dropped_intents = state
+        .health
+        .runtime_execution_dropped_intents
+        .load(Ordering::Relaxed);
+    let execution_send_timeouts = state
+        .health
+        .runtime_execution_send_timeouts
+        .load(Ordering::Relaxed);
+    let execution_kill_switch_active = state
+        .health
+        .runtime_execution_kill_switch_active
+        .load(Ordering::Relaxed);
     let db_saturation = evaluate_db_saturation_health(db_dropped_batches, db_overflowed_batches);
     let runtime_stage_timestamps = RuntimeStageTimestamps {
         recv_ws_frame_ts_ns: state
@@ -119,6 +135,10 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
         order_intent_enqueued_ts_ns: state
             .health
             .runtime_last_order_intent_enqueued_ts_ns
+            .load(Ordering::Relaxed),
+        order_intent_sent_ts_ns: state
+            .health
+            .runtime_last_order_intent_sent_ts_ns
             .load(Ordering::Relaxed),
     };
     let runtime_latency_us = RuntimeLatencySnapshot {
@@ -161,6 +181,28 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
                 .runtime_end_to_end_max_us
                 .load(Ordering::Relaxed),
         },
+        execution_intent_to_sent: RuntimeLatencyStats {
+            samples: state
+                .health
+                .runtime_execution_intent_to_sent_samples
+                .load(Ordering::Relaxed),
+            p50_us: state
+                .health
+                .runtime_execution_intent_to_sent_p50_us
+                .load(Ordering::Relaxed),
+            p95_us: state
+                .health
+                .runtime_execution_intent_to_sent_p95_us
+                .load(Ordering::Relaxed),
+            p99_us: state
+                .health
+                .runtime_execution_intent_to_sent_p99_us
+                .load(Ordering::Relaxed),
+            max_us: state
+                .health
+                .runtime_execution_intent_to_sent_max_us
+                .load(Ordering::Relaxed),
+        },
     };
     let runtime_backlog_depth = RuntimeBacklogDepth {
         binance_msg_queue_depth: state
@@ -174,6 +216,10 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
         signal_backlog_depth: state
             .health
             .runtime_signal_backlog_depth
+            .load(Ordering::Relaxed),
+        execution_intent_queue_depth: state
+            .health
+            .runtime_execution_queue_depth
             .load(Ordering::Relaxed),
     };
 
@@ -200,6 +246,15 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
     }
     if db_saturation.overflow_warn {
         warnings.push("db_overflow_batches_high");
+    }
+    if execution_send_timeouts > 0 {
+        warnings.push("execution_send_timeouts_present");
+    }
+    if execution_dropped_intents > 0 {
+        warnings.push("execution_intents_dropped");
+    }
+    if execution_kill_switch_active {
+        issues.push("execution_kill_switch_active");
     }
     if trial_queue_depth >= TRIAL_QUEUE_DEPTH_WARN_THRESHOLD {
         warnings.push("trial_queue_depth_high");
@@ -246,6 +301,10 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
             db_overflowed_batches,
             db_dropped_batch_budget: DbWriter::dropped_batch_budget(),
             db_overflow_warn_threshold: DbWriter::overflow_warn_threshold(),
+            execution_sent_intents,
+            execution_dropped_intents,
+            execution_send_timeouts,
+            execution_kill_switch_active,
             runtime_stage_timestamps,
             runtime_latency_us,
             runtime_backlog_depth,

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 mod event_loop_core;
+mod event_loop_execution;
 mod event_loop_ingest;
 mod event_loop_runtime;
 mod file_fingerprint;
@@ -34,6 +35,7 @@ use event_loop_core::{
     resolve_strategy_exchange_routing, EventLoopMetrics, EventLoopState, ExchangeSide,
     StrategyExchangeRouting, StrategySymbolIndex, SymbolId,
 };
+use event_loop_execution::spawn_execution_runtime;
 use event_loop_ingest::ingest_exchange_batch;
 #[cfg(test)]
 use event_loop_ingest::ingest_latest_batch;
@@ -405,6 +407,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
     let strategy_exchange_routing = resolve_strategy_exchange_routing(&config_manager);
+    let execution = spawn_execution_runtime(health_state.clone());
 
     info!(
         "System initialized; strategy={} symbols={}",
@@ -425,6 +428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             strategy_exchange_routing,
             screener: &screener,
             health_state: health_state.as_ref(),
+            execution: &execution,
             ws_tx: ws_tx.as_ref(),
         },
     )

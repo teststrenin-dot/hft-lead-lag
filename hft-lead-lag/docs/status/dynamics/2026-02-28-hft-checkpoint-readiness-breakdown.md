@@ -6,7 +6,7 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
-   - Stage timestamps in runtime health: `recv_ws_frame_ts`, `parsed_ts`, `state_updated_ts`, `signal_decided_ts`, `order_intent_enqueued_ts` (proxy until CP6 queue).
+   - Stage timestamps in runtime health: `recv_ws_frame_ts`, `parsed_ts`, `state_updated_ts`, `signal_decided_ts`, `order_intent_enqueued_ts`, `order_intent_sent_ts`.
    - Internal latency histograms (`samples/p50/p95/p99/max`) for ingest, decision, end-to-end.
    - Runtime backlog depth counters (`binance`, `gate`, `signal`) exposed via health.
    - Drift sampling and log summary retained.
@@ -105,12 +105,14 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 ## `HFT-CP6` Execution Fast Path
 1. Done and not touched:
    - Signal-producing runtime foundation.
+   - Bounded non-blocking `OrderIntent` queue (`try_send`) is wired from signal loop.
+   - Async execution worker with strict timeout and kill-switch timeout-streak contract.
+   - `/health` exposes execution queue depth, sent/dropped/timeout counters, kill-switch state, and intent->sent latency snapshot.
+   - Evidence is captured in `docs/status/dynamics/2026-02-28-cp6-execution-fast-path-evidence.md`.
 2. Done but must be reworked:
-   - Existing execution path is not SLA-modeled for `intent -> sent`.
+   - None.
 3. Missing and required:
-   - Explicit `OrderIntent` queue.
-   - Non-blocking send path with strict timeout and kill-switch behavior.
-   - Internal send SLA telemetry.
+   - None.
 
 ## `HFT-CP7` Production Operations Layer
 1. Done and not touched:

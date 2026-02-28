@@ -35,13 +35,13 @@ Last sync: 2026-02-28 (core business process formalized with rule traceability)
 ## Checkpoint Status (current baseline)
 | Checkpoint | Status | Notes |
 |---|---|---|
-| `HFT-CP0` Latency and Allocation Observatory | `Completed` | `/health` exposes staged timestamps + latency snapshots + backlog gauges; `order_intent_enqueued_ts` remains proxy-level until CP6 execution queue lands. |
+| `HFT-CP0` Latency and Allocation Observatory | `Completed` | `/health` exposes staged timestamps + latency snapshots + backlog gauges, including execution intent->sent SLA metrics. |
 | `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Runtime/connector path is `SymbolId`-first with canonical id map builder, per-batch latest dedupe, and capacity fail-fast (no silent truncation). |
 | `HFT-CP2` Lock-Free Strategy State | `Completed` | Lead-lag strategy moved to single-owner state and sync `&mut self` runtime path; explicit event-loop queue boundary added for strategy updates; p99 evidence captured (`2026-02-28-cp2-lock-free-p99-evidence.md`). |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated flow is `Bytes`-based with no string-sort path; pending signal store migrated to `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue applies tickers directly without runtime cache-lookup clone; proof stored in `2026-02-28-cp3-updated-only-proof.md`. |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | Fast parsing exists; symbol cache interns raw bytes directly; runtime parse paths use pattern-based extractors with early `strategy_symbol_id` assignment in Binance/Gate; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse avoids redundant re-interning; profile baselines and parser-priority regression proof are captured in CP4 evidence doc. |
 | `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw-feed recorder is wired into WS ingest via opt-in env, offline replay determinism check is available via `REPLAY_RAW_FEED_PATH`, and replay profile harness is in evidence docs. |
-| `HFT-CP6` Execution Fast Path | `Planned` | Order intent queue + non-blocking send SLA are not formalized. |
+| `HFT-CP6` Execution Fast Path | `Completed` | Order intent queue, non-blocking `try_send` path, timeout/kill-switch contract, and intent->sent SLA telemetry are formalized (`2026-02-28-cp6-execution-fast-path-evidence.md`). |
 | `HFT-CP7` Production Operations Layer | `Planned` | Watchdog/recovery/alert stack not closed. |
 
 ## Rule -> Code -> Test Matrix
@@ -80,7 +80,7 @@ Last sync: 2026-02-28 (core business process formalized with rule traceability)
 3. `HFT-CP3` delivered (updated-only execution path).
 4. `HFT-CP4` delivered (minimal-copy parse path).
 5. `HFT-CP5` delivered (deterministic replay for bugs and perf regression).
-6. Deliver `HFT-CP6` (execution fast path and intent->sent SLA).
+6. `HFT-CP6` delivered (execution fast path and intent->sent SLA).
 7. Deliver `HFT-CP7` (operations hardening and deterministic recovery).
 
 ## Legacy continuity map

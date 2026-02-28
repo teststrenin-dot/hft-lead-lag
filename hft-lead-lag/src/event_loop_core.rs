@@ -1,4 +1,5 @@
 use super::{
+    event_loop_execution::{ExecutionQueueTx, OrderIntent},
     ingest_exchange_batch, strategy_symbol_updates_from_batch, BatchIngestContext, ConfigManager,
     HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore, SIGNAL_CHECK_BUDGET_PER_TICK,
 };
@@ -665,6 +666,7 @@ impl EventLoopState {
         &mut self,
         strategy: &mut dyn RuntimeStrategy,
         health: &HealthState,
+        execution: &ExecutionQueueTx,
     ) {
         if self.pending_signal_symbols.is_empty() {
             self.maybe_log_status(health);
@@ -689,10 +691,17 @@ impl EventLoopState {
 
             if let Some(signal) = signal {
                 self.signal_count += 1;
-                // Proxy for CP0 until execution queue is introduced in CP6.
-                health
-                    .runtime_last_order_intent_enqueued_ts_ns
-                    .store(signal_decided_ts_ns, Ordering::Relaxed);
+                let enqueued_ts_ns = Self::now_ns();
+                let intent = OrderIntent {
+                    signal: signal.clone(),
+                    signal_decided_ts_ns,
+                    enqueued_ts_ns,
+                };
+                if execution.try_enqueue(intent) {
+                    health
+                        .runtime_last_order_intent_enqueued_ts_ns
+                        .store(enqueued_ts_ns, Ordering::Relaxed);
+                }
                 info!(
                     "{} signal #{}: {} | spread={:.2}bps | dir={} | bid_ask={:.2}bps ask_bid={:.2}bps | {}",
                     signal.strategy,

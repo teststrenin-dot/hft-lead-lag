@@ -205,6 +205,91 @@ async fn health_reports_trial_lifecycle_telemetry() {
 }
 
 #[tokio::test]
+async fn health_reports_execution_fast_path_telemetry_and_kill_switch_issue() {
+    let health_state = Arc::new(HealthState::new());
+    let now_ms = crate::domain::screener::utils::now_ms();
+    health_state
+        .binance_connected
+        .store(true, Ordering::Relaxed);
+    health_state.gate_connected.store(true, Ordering::Relaxed);
+    health_state
+        .binance_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .gate_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .runtime_execution_sent_intents
+        .store(12, Ordering::Relaxed);
+    health_state
+        .runtime_execution_dropped_intents
+        .store(3, Ordering::Relaxed);
+    health_state
+        .runtime_execution_send_timeouts
+        .store(2, Ordering::Relaxed);
+    health_state
+        .runtime_execution_kill_switch_active
+        .store(true, Ordering::Relaxed);
+    health_state
+        .runtime_execution_queue_depth
+        .store(7, Ordering::Relaxed);
+    health_state
+        .runtime_execution_intent_to_sent_samples
+        .store(50, Ordering::Relaxed);
+    health_state
+        .runtime_execution_intent_to_sent_p50_us
+        .store(300, Ordering::Relaxed);
+    health_state
+        .runtime_execution_intent_to_sent_p95_us
+        .store(700, Ordering::Relaxed);
+    health_state
+        .runtime_execution_intent_to_sent_p99_us
+        .store(1200, Ordering::Relaxed);
+    health_state
+        .runtime_execution_intent_to_sent_max_us
+        .store(2500, Ordering::Relaxed);
+    health_state
+        .runtime_last_order_intent_sent_ts_ns
+        .store(42, Ordering::Relaxed);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let (_code, Json(resp)) = health(State(state)).await;
+    assert_eq!(resp.execution_sent_intents, 12);
+    assert_eq!(resp.execution_dropped_intents, 3);
+    assert_eq!(resp.execution_send_timeouts, 2);
+    assert!(resp.execution_kill_switch_active);
+    assert_eq!(resp.runtime_stage_timestamps.order_intent_sent_ts_ns, 42);
+    assert_eq!(resp.runtime_backlog_depth.execution_intent_queue_depth, 7);
+    assert_eq!(resp.runtime_latency_us.execution_intent_to_sent.samples, 50);
+    assert_eq!(resp.runtime_latency_us.execution_intent_to_sent.p50_us, 300);
+    assert_eq!(resp.runtime_latency_us.execution_intent_to_sent.p95_us, 700);
+    assert_eq!(
+        resp.runtime_latency_us.execution_intent_to_sent.p99_us,
+        1200
+    );
+    assert_eq!(
+        resp.runtime_latency_us.execution_intent_to_sent.max_us,
+        2500
+    );
+    assert!(resp.issues.contains(&"execution_kill_switch_active"));
+    assert!(resp.warnings.contains(&"execution_send_timeouts_present"));
+    assert!(resp.warnings.contains(&"execution_intents_dropped"));
+}
+
+#[tokio::test]
 async fn fleet_policy_endpoint_returns_empty_for_unknown_symbol() {
     let health_state = Arc::new(HealthState::new());
     let state = Arc::new(HttpState {

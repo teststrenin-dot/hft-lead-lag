@@ -1,6 +1,7 @@
 use super::*;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn write_temp_config(name: &str, content: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -1713,6 +1714,7 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
     let mut state = EventLoopState::new();
     let mut strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
+    let execution = spawn_execution_runtime(Arc::new(HealthState::new()));
 
     let strategy_symbol_index =
         StrategySymbolIndex::new(&["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
@@ -1724,7 +1726,7 @@ async fn handle_signal_tick_checks_only_pending_symbols() {
     ];
     state.mark_pending_signal_symbols(&strategy_symbol_index.symbol_ids(&updated));
 
-    state.handle_signal_tick(&mut strategy, &health);
+    state.handle_signal_tick(&mut strategy, &health, &execution);
 
     let checked = strategy.checked_symbols.clone();
     assert_eq!(checked, vec![0, 1]);
@@ -1735,6 +1737,7 @@ async fn handle_signal_tick_scales_with_updates_not_universe_size() {
     let mut state = EventLoopState::new();
     let mut strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
+    let execution = spawn_execution_runtime(Arc::new(HealthState::new()));
 
     let symbols: Vec<String> = (0..5000).map(|idx| format!("SYM{idx:04}")).collect();
     let strategy_symbol_index = StrategySymbolIndex::new(&symbols);
@@ -1747,7 +1750,7 @@ async fn handle_signal_tick_scales_with_updates_not_universe_size() {
         .expect("second id exists");
 
     state.mark_pending_signal_symbols(&[first, second]);
-    state.handle_signal_tick(&mut strategy, &health);
+    state.handle_signal_tick(&mut strategy, &health, &execution);
 
     assert_eq!(strategy.checked_symbols, vec![first, second]);
     assert!(state.pending_signal_symbols.is_empty());
@@ -1758,8 +1761,9 @@ async fn handle_signal_tick_skips_when_no_pending_symbols() {
     let mut state = EventLoopState::new();
     let mut strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
+    let execution = spawn_execution_runtime(Arc::new(HealthState::new()));
 
-    state.handle_signal_tick(&mut strategy, &health);
+    state.handle_signal_tick(&mut strategy, &health, &execution);
 
     let checked = strategy.checked_symbols.clone();
     assert!(checked.is_empty());
@@ -1770,6 +1774,7 @@ async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
     let mut state = EventLoopState::new();
     let mut strategy = RecordingRuntimeStrategy::default();
     let health = HealthState::new();
+    let execution = spawn_execution_runtime(Arc::new(HealthState::new()));
     let total = SIGNAL_CHECK_BUDGET_PER_TICK + 2;
     let symbols: Vec<String> = (0..total).map(|idx| format!("SYM{idx:04}")).collect();
     let strategy_symbol_index = StrategySymbolIndex::new(&symbols);
@@ -1783,12 +1788,12 @@ async fn handle_signal_tick_respects_budget_and_keeps_backlog() {
         );
     }
 
-    state.handle_signal_tick(&mut strategy, &health);
+    state.handle_signal_tick(&mut strategy, &health, &execution);
     assert_eq!(state.pending_signal_symbols.len(), 2);
     let checked_after_first_tick = strategy.checked_symbols.len();
     assert_eq!(checked_after_first_tick, SIGNAL_CHECK_BUDGET_PER_TICK);
 
-    state.handle_signal_tick(&mut strategy, &health);
+    state.handle_signal_tick(&mut strategy, &health, &execution);
     assert!(state.pending_signal_symbols.is_empty());
     let checked_after_second_tick = strategy.checked_symbols.len();
     assert_eq!(checked_after_second_tick, total);

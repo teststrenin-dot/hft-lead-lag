@@ -1,6 +1,7 @@
 use super::{
-    BinanceMarketData, EventLoopState, ExchangeSide, GateMarketData, HealthState, MarketDataEvent,
-    RuntimeStrategy, ScreenerStore, StrategyExchangeRouting, StrategySymbolIndex,
+    event_loop_execution::ExecutionQueueTx, BinanceMarketData, EventLoopState, ExchangeSide,
+    GateMarketData, HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore,
+    StrategyExchangeRouting, StrategySymbolIndex,
 };
 use hft_lead_lag::MarketDataStream;
 use std::sync::atomic::Ordering;
@@ -57,6 +58,7 @@ pub(super) struct EventLoopRuntimeContext<'a> {
     pub(super) strategy_exchange_routing: StrategyExchangeRouting,
     pub(super) screener: &'a ScreenerStore,
     pub(super) health_state: &'a HealthState,
+    pub(super) execution: &'a ExecutionQueueTx,
     pub(super) ws_tx: Option<&'a tokio::sync::broadcast::Sender<MarketDataEvent>>,
 }
 
@@ -114,7 +116,7 @@ pub(super) async fn run_event_loop(
             }
 
             _ = state.signal_interval.tick() => {
-                state.handle_signal_tick(strategy, runtime_context.health_state);
+                state.handle_signal_tick(strategy, runtime_context.health_state, runtime_context.execution);
             }
 
             _ = portfolio_rebalance_interval.tick() => {

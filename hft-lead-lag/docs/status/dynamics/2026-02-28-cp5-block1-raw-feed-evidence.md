@@ -86,4 +86,4 @@ cargo run
 1. Recorder exists and is wired into live ingest path (opt-in).
 2. Replay mode exists and verifies deterministic signal trace equivalence.
 3. Benchmark harness exists for replay regression monitoring.
-4. CP5 is closed; next stage is CP6 execution fast path.
+4. CP5 is closed; CP6 execution fast path is now delivered.
