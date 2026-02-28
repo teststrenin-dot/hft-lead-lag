@@ -1,7 +1,7 @@
 # Implementation Status — HFT Runtime Migration
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (`HFT-CP` re-baseline)
+Last sync: 2026-02-28 (CP4 parse-path and early symbol-id assignment updates)
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Roadmap anchor: `docs/status/core/2026-02-26-business-logic-roadmap.md`
 Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
@@ -23,7 +23,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 ## 3) HFT checkpoint progress
 | Checkpoint | Status | Evidence | Main gap |
 |---|---|---|---|
-| `HFT-CP0` Latency and Allocation Observatory | `In Progress` | `/health` now includes staged timestamps, ingest/decision/e2e latency stats, runtime backlog depths | `order_intent_enqueued_ts` is currently proxy-level until CP6 execution queue is live |
+| `HFT-CP0` Latency and Allocation Observatory | `Completed` | `/health` includes staged timestamps, ingest/decision/e2e latency stats, and runtime backlog depths | `order_intent_enqueued_ts` remains proxy-level until CP6 execution queue is live |
 | `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Hot-path ingest now dedupes latest-per-symbol, runtime consumes connector-attached `strategy_symbol_id`, and connectors/runtime use canonical `symbol->id` builder with fail-fast capacity guard | None |
 | `HFT-CP2` Lock-Free Strategy State | `Completed` | `LeadLagStrategy` migrated to single-owner state (no `RwLock/Mutex` in hot path); runtime strategy interface is `&mut self` sync; strategy updates pass through explicit event-loop queue boundary; p99 capture recorded | None (`docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md`) |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated-symbol batch de-duplicates without sort; pending-signal queue uses `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue carries tickers directly into strategy apply (no runtime cache-lookup clone in flush path) | None (`docs/status/core/2026-02-28-cp3-updated-only-proof.md`) |
@@ -43,10 +43,10 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 3. Any new feature that introduces Python into runtime data-plane.
 
 ## 6) Top open gaps (priority)
-1. `P0`: validate `HFT-CP0` metrics under live load and finalize dashboard/read-model for operator use.
-2. `P1`: close `HFT-CP4` and remove remaining symbol-copy overhead.
-3. `P1`: implement `HFT-CP5` replay harness for deterministic bug/perf validation.
-4. `P2`: implement `HFT-CP6` execution SLA contracts and `HFT-CP7` ops hardening.
+1. `P1`: close `HFT-CP4` and remove remaining symbol-copy overhead with profiling evidence.
+2. `P1`: implement `HFT-CP5` replay harness for deterministic bug/perf validation.
+3. `P2`: implement `HFT-CP6` execution SLA contracts and `HFT-CP7` ops hardening.
+4. `P2`: optional `HFT-CP0` baseline snapshot automation for before/after regression diffs.
 
 ## 7) Tracking rule
 For every status change:

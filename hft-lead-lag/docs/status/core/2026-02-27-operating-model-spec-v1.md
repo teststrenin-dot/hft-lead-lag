@@ -3,6 +3,7 @@
 Date: 2026-02-27
 Status: Canonical operating model for `HFT-CP*`
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+Last sync: 2026-02-28 (CP4 parse-path and early symbol-id assignment updates)
 
 ## 1) Purpose
 Define one executable operating model that binds business flow to implementation checkpoints and enforces Rust-only hot path.

@@ -39,7 +39,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - None.
 3. Missing and required:
    - None.
-   - Optional cleanup: migrate/trim non-hot legacy parser wrappers that still rely on dynamic field-name formatting for test-only compatibility.
+   - Optional cleanup: migrate/trim non-hot legacy parser wrappers that still rely on dynamic field-name formatting for compatibility callers.
 
 ## `HFT-CP2` Lock-Free Strategy State
 1. Done and not touched:
@@ -70,6 +70,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - Symbol cache now interns raw byte keys/values directly (`Vec<u8> -> Bytes`) without UTF-8 fallback conversion.
    - Runtime parse paths are pattern-based; dynamic wrapper APIs remain for compatibility but are not used on hot path.
    - Binance/Gate `parse_book_ticker_static` now assign `strategy_symbol_id` directly during parse (no post-parse attach step).
+   - Fast numeric extractors now handle scientific notation (`e/E`) in numeric token paths.
 2. Done but must be reworked:
    - Generic extractors using repeated `format!` still exist as compatibility helpers.
    - Remaining byte-copy points in parse path still require profiling-backed elimination.

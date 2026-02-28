@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (`HFT-CP` re-baseline)
+Last sync: 2026-02-28 (CP4 parse-path and early symbol-id assignment updates)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -17,7 +17,7 @@ Last sync: 2026-02-28 (`HFT-CP` re-baseline)
 ## Checkpoint Status (current baseline)
 | Checkpoint | Status | Notes |
 |---|---|---|
-| `HFT-CP0` Latency and Allocation Observatory | `In Progress` | `/health` exposes staged timestamps + latency snapshots + backlog gauges; final operator polish pending. |
+| `HFT-CP0` Latency and Allocation Observatory | `Completed` | `/health` exposes staged timestamps + latency snapshots + backlog gauges; `order_intent_enqueued_ts` remains proxy-level until CP6 execution queue lands. |
 | `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Runtime/connector path is `SymbolId`-first with canonical id map builder, per-batch latest dedupe, and capacity fail-fast (no silent truncation). |
 | `HFT-CP2` Lock-Free Strategy State | `Completed` | Lead-lag strategy moved to single-owner state and sync `&mut self` runtime path; explicit event-loop queue boundary added for strategy updates; p99 evidence captured (`2026-02-28-cp2-lock-free-p99-evidence.md`). |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated flow is `Bytes`-based with no string-sort path; pending signal store migrated to `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue applies tickers directly without runtime cache-lookup clone; proof stored in `2026-02-28-cp3-updated-only-proof.md`. |
@@ -27,7 +27,7 @@ Last sync: 2026-02-28 (`HFT-CP` re-baseline)
 | `HFT-CP7` Production Operations Layer | `Planned` | Watchdog/recovery/alert stack not closed. |
 
 ## Delivery sequence to production
-1. Close `HFT-CP0` and capture baseline p99/drop/backlog.
+1. `HFT-CP0` delivered; optional baseline snapshot automation remains as non-blocking enhancement.
 2. `HFT-CP1` and `HFT-CP2` delivered (allocation and lock-jitter elimination).
 3. `HFT-CP3` delivered (updated-only execution path).
 4. Deliver `HFT-CP4` (minimal-copy parse path).

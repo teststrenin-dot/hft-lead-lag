@@ -2,7 +2,7 @@
 
 Date: 2026-02-27
 Status: Active strategic anchor (Rust-only migration stage)
-Last sync: 2026-02-28 (`HFT-CP` re-baseline)
+Last sync: 2026-02-28 (CP4 parse-path and early symbol-id assignment updates)
 
 ## 1) Locked Business Objective
 Maximize risk-adjusted return under constrained capital by continuously selecting robust alpha contexts (symbols/configs/portfolios) from shadow validation into paper/live execution, while strictly containing drawdown and operational failure risk.
