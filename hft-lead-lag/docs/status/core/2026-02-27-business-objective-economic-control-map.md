@@ -2,7 +2,7 @@
 
 Date: 2026-02-27
 Status: Active strategic anchor (Rust-only migration stage)
-Last sync: 2026-02-28 (CP4 completed with parse-profile evidence + contract-priority regression guard)
+Last sync: 2026-02-28 (business contract formalized with thresholds/state transitions)
 
 ## 1) Locked Business Objective
 Maximize risk-adjusted return under constrained capital by continuously selecting robust alpha contexts (symbols/configs/portfolios) from shadow validation into paper/live execution, while strictly containing drawdown and operational failure risk.
@@ -42,7 +42,63 @@ Control chain:
 4. State integrity metrics (silent-loss and silent-duplication incidence).
 5. Capital readiness metrics (policy determinism, guard coverage).
 
-## 6) Change policy
+## 6) Business Process Contract (V1, current implementation)
+1. Shadow-first lifecycle:
+   - Symbol starts in shadow statistics accumulation.
+   - Portfolio participation is allowed only after passing eligibility gate.
+2. Portfolio topology:
+   - Default portfolios: `A`, `B` (configurable count).
+   - Per-portfolio shortlist capacity: `5`.
+   - Per-portfolio active capacity: `0..4`.
+   - Shortlists are built without overlap across portfolios.
+   - Active symbols are built without overlap across portfolios.
+3. Eligibility gate (symbol-level):
+   - `age_minutes_from_first_tick > 5`
+   - `closed_trades > 5`
+   - `useful_winrate = profitable_trades / closed_trades >= 0.30`
+   - `avg_pnl_pct >= 0`
+4. Candidate ranking tuple (descending):
+   - `useful_winrate`
+   - `pm_raw = profitable_trades - losing_trades`
+   - `avg_pnl_pct`
+   - `closed_trades`
+   - `symbol` (lexicographic tiebreak)
+5. Risk guard / hard reset:
+   - Streak counts only stop-loss exits with non-positive pnl.
+   - Positive pnl trade resets streak counter.
+   - Fast trigger: `stop_loss_streak >= 5` within `120_000 ms`.
+   - Persistent trigger: `stop_loss_streak >= 6` (even if fast window missed).
+   - On trigger: symbol goes to cooldown for `300_000 ms`.
+6. Re-entry rule:
+   - During cooldown symbol is ineligible.
+   - After cooldown symbol must pass full eligibility gate again.
+7. Rebalance cadence:
+   - Portfolio scheduler tick period: `120_000 ms`.
+8. Stage scope:
+   - Paper competition is active.
+   - Live money rebalance/allocation across portfolios is not enabled yet.
+
+## 7) State Machine (business view)
+1. `ShadowCollecting` -> `EligiblePool`:
+   - Trigger: eligibility gate passes.
+2. `EligiblePool` -> `Shortlisted`:
+   - Trigger: ranking + no-overlap shortlist assignment.
+3. `Shortlisted` -> `Active`:
+   - Trigger: no-overlap active assignment with `<=4` cap.
+4. `Active` -> `Cooldown`:
+   - Trigger: hard-reset risk rule fires (fast or persistent).
+5. `Cooldown` -> `ShadowCollecting`:
+   - Trigger: cooldown expires; symbol returns to common candidate pool.
+6. `Any` -> `ShadowCollecting`:
+   - Trigger: rebalance drop, metric deterioration, or portfolio reassignment.
+
+## 8) Definition of Done (current stage)
+1. End-to-end paper flow works with configured portfolio count and visible assignments in UI.
+2. Portfolio race obeys capacities and no-overlap constraints on every rebalance.
+3. Guard/cooldown behavior is deterministic and reproducible from persisted trades.
+4. Runtime hot path remains Rust-only and checkpoint-tracked (`HFT-CP*`).
+
+## 9) Change policy
 Any architecture or runtime change must update:
 1. This control map.
 2. `docs/status/core/2026-02-26-business-logic-roadmap.md`.
