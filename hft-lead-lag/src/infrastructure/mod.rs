@@ -10,6 +10,7 @@ pub mod db;
 pub mod enrichment;
 pub mod exchanges;
 pub mod logging;
+pub mod replay;
 pub mod rest;
 
 pub use exchanges::*;

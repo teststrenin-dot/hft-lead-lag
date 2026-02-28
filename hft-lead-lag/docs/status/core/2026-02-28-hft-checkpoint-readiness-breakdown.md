@@ -85,10 +85,15 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 ## `HFT-CP5` Deterministic Replay Harness
 1. Done and not touched:
    - General tests and reliability fixes from legacy track.
+   - CP5 block 1: `src/infrastructure/replay/raw_feed.rs` adds:
+     - JSONL raw-feed recorder (`seq`, `exchange`, `recv_ts_ns`, `payload_b64`).
+     - Strict replay reader with sequence-order validation and payload decode validation.
+     - Contract tests for deterministic round-trip and invalid payload rejection.
+   - Evidence captured in `docs/status/core/2026-02-28-cp5-block1-raw-feed-evidence.md`.
 2. Done but must be reworked:
-   - None (feature not implemented yet).
+   - Recorder currently flushes per frame for reliability-first baseline; batching can be optimized after runtime wiring.
 3. Missing and required:
-   - Raw feed recorder.
+   - Runtime capture wiring from connector ingest (`recv_ts + raw frame`) into recorder.
    - Replay engine with deterministic decision/trade equivalence checks.
    - Replay benchmark for regression detection.
 

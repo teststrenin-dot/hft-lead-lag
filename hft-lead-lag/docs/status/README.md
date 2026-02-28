@@ -2,7 +2,7 @@
 
 Date: 2026-02-28
 Status: active
-Last sync: 2026-02-28 (CP4 completed with parse-profile evidence + contract-priority regression guard)
+Last sync: 2026-02-28 (CP4 closed; CP5 block 1 raw-feed recorder/replay reader delivered)
 
 ## Purpose
 Single entry point for project status, checkpoint tracking, and operating constraints.
@@ -15,12 +15,13 @@ Single entry point for project status, checkpoint tracking, and operating constr
 1. `core/2026-02-27-business-objective-economic-control-map.md`
 2. `core/2026-02-28-hft-rust-only-checkpoints.md`
 3. `core/2026-02-28-cp4-parse-path-evidence.md`
-4. `core/2026-02-26-business-logic-roadmap.md`
-5. `core/2026-02-26-business-logic-v1-implementation-status.md`
-6. `core/2026-02-27-operating-model-spec-v1.md`
-7. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
-8. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
-9. `dynamics/2026-02-26-project-math-model.md`
+4. `core/2026-02-28-cp5-block1-raw-feed-evidence.md`
+5. `core/2026-02-26-business-logic-roadmap.md`
+6. `core/2026-02-26-business-logic-v1-implementation-status.md`
+7. `core/2026-02-27-operating-model-spec-v1.md`
+8. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
+9. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
+10. `dynamics/2026-02-26-project-math-model.md`
 
 ## Checkpoint system (`HFT-CP*`)
 1. `HFT-CP0` Latency and Allocation Observatory

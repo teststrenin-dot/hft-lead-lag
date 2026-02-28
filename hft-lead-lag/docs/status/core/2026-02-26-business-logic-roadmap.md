@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (CP4 completed with parse-profile evidence + contract-priority regression guard)
+Last sync: 2026-02-28 (CP4 closed; CP5 block 1 raw-feed recorder/replay reader delivered)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -22,7 +22,7 @@ Last sync: 2026-02-28 (CP4 completed with parse-profile evidence + contract-prio
 | `HFT-CP2` Lock-Free Strategy State | `Completed` | Lead-lag strategy moved to single-owner state and sync `&mut self` runtime path; explicit event-loop queue boundary added for strategy updates; p99 evidence captured (`2026-02-28-cp2-lock-free-p99-evidence.md`). |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated flow is `Bytes`-based with no string-sort path; pending signal store migrated to `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue applies tickers directly without runtime cache-lookup clone; proof stored in `2026-02-28-cp3-updated-only-proof.md`. |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | Fast parsing exists; symbol cache interns raw bytes directly; runtime parse paths use pattern-based extractors with early `strategy_symbol_id` assignment in Binance/Gate; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse avoids redundant re-interning; profile baselines and parser-priority regression proof are captured in CP4 evidence doc. |
-| `HFT-CP5` Deterministic Replay Harness | `Planned` | Full record/replay contract is not implemented. |
+| `HFT-CP5` Deterministic Replay Harness | `In Progress` | Block 1 delivered: raw-feed JSONL recorder + strict replay reader with contract tests; runtime capture wiring and equivalence runner pending. |
 | `HFT-CP6` Execution Fast Path | `Planned` | Order intent queue + non-blocking send SLA are not formalized. |
 | `HFT-CP7` Production Operations Layer | `Planned` | Watchdog/recovery/alert stack not closed. |
 
