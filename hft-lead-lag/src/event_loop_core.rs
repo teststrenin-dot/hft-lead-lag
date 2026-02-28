@@ -33,10 +33,27 @@ struct SymbolStageTimestamps {
 pub(super) struct PendingSymbolSet {
     words: Vec<u64>,
     len: usize,
-    next_hint_word: usize,
+    next_cursor_symbol: usize,
 }
 
 impl PendingSymbolSet {
+    fn pop_from_word(&mut self, word_idx: usize, mask: u64, total_bits: usize) -> Option<SymbolId> {
+        let word = self.words[word_idx] & mask;
+        if word == 0 {
+            return None;
+        }
+        let bit_offset = word.trailing_zeros() as usize;
+        self.words[word_idx] &= !(1u64 << bit_offset);
+        self.len = self.len.saturating_sub(1);
+        let symbol_id = (word_idx * 64) + bit_offset;
+        self.next_cursor_symbol = if symbol_id + 1 >= total_bits {
+            0
+        } else {
+            symbol_id + 1
+        };
+        Some(symbol_id as SymbolId)
+    }
+
     pub(super) fn new() -> Self {
         Self::default()
     }
@@ -55,53 +72,42 @@ impl PendingSymbolSet {
         }
         *word |= mask;
         self.len = self.len.saturating_add(1);
-        if word_idx < self.next_hint_word {
-            self.next_hint_word = word_idx;
-        }
     }
 
     pub(super) fn pop_first(&mut self) -> Option<SymbolId> {
         if self.len == 0 {
-            self.next_hint_word = 0;
+            self.next_cursor_symbol = 0;
             return None;
         }
 
-        let start_word = self.next_hint_word.min(self.words.len());
-        for word_idx in start_word..self.words.len() {
-            let word = self.words[word_idx];
-            if word == 0 {
-                continue;
-            }
+        let total_bits = self.words.len().saturating_mul(64);
+        if total_bits == 0 {
+            self.next_cursor_symbol = 0;
+            self.len = 0;
+            return None;
+        }
+        let start_symbol = self.next_cursor_symbol % total_bits;
+        let start_word = start_symbol / 64;
+        let start_offset = start_symbol % 64;
 
-            let bit_offset = word.trailing_zeros() as usize;
-            self.words[word_idx] &= !(1u64 << bit_offset);
-            self.len = self.len.saturating_sub(1);
-            self.next_hint_word = if self.words[word_idx] == 0 {
-                word_idx.saturating_add(1)
-            } else {
-                word_idx
-            };
-            return Some(((word_idx * 64) + bit_offset) as SymbolId);
+        let first_mask = !0u64 << start_offset;
+        if let Some(symbol_id) = self.pop_from_word(start_word, first_mask, total_bits) {
+            return Some(symbol_id);
+        }
+
+        for word_idx in (start_word + 1)..self.words.len() {
+            if let Some(symbol_id) = self.pop_from_word(word_idx, !0u64, total_bits) {
+                return Some(symbol_id);
+            }
         }
 
         for word_idx in 0..start_word {
-            let word = self.words[word_idx];
-            if word == 0 {
-                continue;
+            if let Some(symbol_id) = self.pop_from_word(word_idx, !0u64, total_bits) {
+                return Some(symbol_id);
             }
-
-            let bit_offset = word.trailing_zeros() as usize;
-            self.words[word_idx] &= !(1u64 << bit_offset);
-            self.len = self.len.saturating_sub(1);
-            self.next_hint_word = if self.words[word_idx] == 0 {
-                word_idx.saturating_add(1)
-            } else {
-                word_idx
-            };
-            return Some(((word_idx * 64) + bit_offset) as SymbolId);
         }
 
-        self.next_hint_word = 0;
+        self.next_cursor_symbol = 0;
         self.len = 0;
         None
     }
@@ -821,15 +827,7 @@ mod tests {
     }
 
     fn ticker(symbol: &'static [u8], bid: i64, ask: i64, ts: i64) -> BookTicker {
-        BookTicker::new(
-            Bytes::from_static(symbol),
-            bid,
-            ask,
-            1,
-            1,
-            ts,
-            ts,
-        )
+        BookTicker::new(Bytes::from_static(symbol), bid, ask, 1, 1, ts, ts)
     }
 
     #[test]
@@ -901,6 +899,20 @@ mod tests {
         assert_eq!(pending.pop_first(), None);
         assert!(pending.is_empty());
         assert_eq!(pending.len(), 0);
+    }
+
+    #[test]
+    fn pending_symbol_set_uses_fair_cursor_under_reinserts() {
+        let mut pending = PendingSymbolSet::new();
+        pending.insert(1);
+        pending.insert(100);
+
+        assert_eq!(pending.pop_first(), Some(1));
+        pending.insert(1);
+
+        // Reinserted low id must not starve older higher id.
+        assert_eq!(pending.pop_first(), Some(100));
+        assert_eq!(pending.pop_first(), Some(1));
     }
 
     #[tokio::test]

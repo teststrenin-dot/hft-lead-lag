@@ -6,6 +6,11 @@
 use bytes::Bytes;
 use std::sync::Arc;
 
+const MAX_SYMBOL_CACHE_ENTRIES: usize = 8192;
+const MAX_GATE_CONTRACT_CACHE_ENTRIES: usize = 8192;
+const MAX_SYMBOL_LEN_BYTES: usize = 32;
+const MIN_SYMBOL_LEN_BYTES: usize = 3;
+
 /// Symbol cache for interning
 /// Prevents repeated allocations for the same symbol string
 #[derive(Debug, Default, Clone)]
@@ -41,8 +46,15 @@ impl SymbolCache {
 
     /// Get or create as Bytes (for zero-copy parsing)
     pub fn intern_bytes(&self, symbol: &[u8]) -> Bytes {
+        if !is_cacheable_symbol_bytes(symbol) {
+            return Bytes::copy_from_slice(symbol);
+        }
         if let Some(existing) = self.bytes_cache.get(symbol) {
             return existing.clone();
+        }
+
+        if self.bytes_cache.len() >= MAX_SYMBOL_CACHE_ENTRIES {
+            return Bytes::copy_from_slice(symbol);
         }
 
         let bytes = Bytes::copy_from_slice(symbol);
@@ -52,15 +64,26 @@ impl SymbolCache {
 
     /// Get or create canonical symbol from Gate contract bytes (e.g. BTC_USDT -> BTCUSDT).
     pub fn intern_gate_contract(&self, contract: &[u8]) -> Bytes {
-        if let Some(existing) = self.gate_contract_cache.get(contract) {
-            return existing.clone();
+        if is_cacheable_contract_bytes(contract) {
+            if let Some(existing) = self.gate_contract_cache.get(contract) {
+                return existing.clone();
+            }
         }
 
         let normalized = normalize_gate_contract(contract);
         let symbol = self.intern_bytes(&normalized);
-        self.gate_contract_cache
-            .insert(contract.to_vec(), symbol.clone());
+        if is_cacheable_contract_bytes(contract)
+            && self.gate_contract_cache.len() < MAX_GATE_CONTRACT_CACHE_ENTRIES
+        {
+            self.gate_contract_cache
+                .insert(contract.to_vec(), symbol.clone());
+        }
         symbol
+    }
+
+    #[cfg(test)]
+    fn bytes_cache_len(&self) -> usize {
+        self.bytes_cache.len()
     }
 }
 
@@ -78,6 +101,20 @@ fn normalize_gate_contract(contract: &[u8]) -> Vec<u8> {
         return normalized;
     }
     contract.to_vec()
+}
+
+fn is_cacheable_symbol_bytes(symbol: &[u8]) -> bool {
+    let len = symbol.len();
+    if !(MIN_SYMBOL_LEN_BYTES..=MAX_SYMBOL_LEN_BYTES).contains(&len) {
+        return false;
+    }
+    symbol
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+}
+
+fn is_cacheable_contract_bytes(contract: &[u8]) -> bool {
+    is_cacheable_symbol_bytes(contract)
 }
 
 /// Predefined symbol constants for common pairs.
@@ -131,7 +168,8 @@ mod tests {
 
         assert_eq!(s1.as_ref(), raw);
         assert_eq!(s2.as_ref(), raw);
-        assert_eq!(s1.as_ptr(), s2.as_ptr());
+        assert_ne!(s1.as_ptr(), s2.as_ptr());
+        assert_eq!(cache.bytes_cache_len(), 0);
     }
 
     #[test]
@@ -145,5 +183,16 @@ mod tests {
         assert_eq!(s1.as_ref(), b"BTCUSDT");
         assert_eq!(s2.as_ref(), b"BTCUSDT");
         assert_eq!(s3.as_ref(), b"BTCUSDT");
+    }
+
+    #[test]
+    fn test_symbol_bytes_cache_is_capped() {
+        let cache = SymbolCache::new();
+        let total = MAX_SYMBOL_CACHE_ENTRIES.saturating_add(128);
+        for idx in 0..total {
+            let symbol = format!("SYM{idx:05}USDT");
+            let _ = cache.intern_bytes(symbol.as_bytes());
+        }
+        assert_eq!(cache.bytes_cache_len(), MAX_SYMBOL_CACHE_ENTRIES);
     }
 }
