@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (CP5/CP6 remediation hardening reflected)
+Last sync: 2026-02-28 (stud2 remediation track integrated into active delivery)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -13,6 +13,7 @@ Last sync: 2026-02-28 (CP5/CP6 remediation hardening reflected)
 2. Build deterministic low-jitter runtime path first (CP0-CP4).
 3. Add replay, execution SLA, and operations layers after runtime stabilization (CP5-CP7).
 4. Keep Python/Ray out of runtime data-plane and off the trading host CPU budget (offline only).
+5. Post-CP6 mandatory remediation (`HFT-RM*`): enforce hot-path/control-plane split and host-budget compliance on target hardware.
 
 ## End-to-End Business Process (current stage)
 1. Shadow ingest:
@@ -43,6 +44,14 @@ Last sync: 2026-02-28 (CP5/CP6 remediation hardening reflected)
 | `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw-feed recorder is wired into WS ingest via opt-in env, recorder now advances `seq` only after successful write+flush, connector wiring surfaces recorder errors, replay reader validates invalid JSON/out-of-order sequence, and concurrent monotonic-sequence safety is test-covered. |
 | `HFT-CP6` Execution Fast Path | `Completed` | Order intent queue uses non-blocking `try_send`, queue-depth drift race is fixed, full-queue path keeps latest intent per symbol, stale intents are dropped by max-age guard, timeout kill-switch now auto-recovers via cooldown, and intent->sent SLA telemetry remains formalized (`2026-02-28-cp6-execution-fast-path-evidence.md`). |
 | `HFT-CP7` Production Operations Layer | `Planned` | Watchdog/recovery/alert stack not closed. |
+
+## Remediation Track Status (`HFT-RM*`, derived from `stud2`)
+| Remediation | Status | Notes |
+|---|---|---|
+| `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | Runtime mode wiring starts: hot loop must support execution without per-tick screener ingest path. |
+| `HFT-RM2` Screener decoupling from data-plane | `In progress` | Bounded control-worker handoff is wired; backpressure/telemetry policy still needs hardening. |
+| `HFT-RM3` 2-core host budget guardrails | `Planned` | Runtime defaults/caps for symbol and config fanout must be enforced for trading host profile. |
+| `HFT-RM4` Numeric HFT SLO freeze | `Planned` | Core docs must include numeric p99/backlog fail/pass contracts tied to `/health`. |
 
 ## Rule -> Code -> Test Matrix
 1. Eligibility gate (`age>5`, `closed>5`, `useful_winrate>=0.30`, `avg_pnl>=0`):
@@ -82,6 +91,8 @@ Last sync: 2026-02-28 (CP5/CP6 remediation hardening reflected)
 5. `HFT-CP5` delivered and hardened (deterministic replay for bugs/perf regression + strict recorder semantics).
 6. `HFT-CP6` delivered and hardened (execution fast path, intent->sent SLA, overflow/stale/cooldown safeguards).
 7. Deliver `HFT-CP7` (operations hardening and deterministic recovery).
+8. Deliver `HFT-RM1` and `HFT-RM2` to complete hot-path/control-plane boundary.
+9. Deliver `HFT-RM3` and `HFT-RM4` to harden host-budget and numeric SLO governance.
 
 ## Legacy continuity map
 1. Legacy signal/validation/scoring remains reusable baseline.

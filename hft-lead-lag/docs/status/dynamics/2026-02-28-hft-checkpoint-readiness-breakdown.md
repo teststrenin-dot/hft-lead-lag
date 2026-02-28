@@ -3,6 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
+Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`)
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
@@ -133,3 +134,41 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
    - Component watchdogs (`feed/engine/execution/dbwriter`).
    - Alert contract for drift, drops, backlog, engine stall.
    - Idempotent snapshot/restore runbook and recovery verification.
+
+## `HFT-RM1` Plane mode split (`mixed` vs `hft_core`)
+1. Done and not touched:
+   - Runtime supports explicit plane mode via `RUNTIME_PLANE_MODE` (`mixed` / `hft_core`).
+   - `hft_core` mode disables direct screener ingest in event loop and disables portfolio scheduler tick in runtime loop.
+   - `hft_core` mode uses strategy-only subscriptions and does not start runtime-grid hot reload / NATR refresher / screener DB persistence.
+2. Done but must be reworked:
+   - None.
+3. Missing and required:
+   - Add dedicated startup validation tests for invalid/unsupported mode values and mode transition contract.
+
+## `HFT-RM2` Screener decoupling from data-plane
+1. Done and not touched:
+   - `ScreenerStore` and portfolio runtime logic are functionally complete for paper analytics.
+   - Bounded control-plane queue/worker is wired: ingest path enqueues `ControlUpdate`; worker applies `screener.update` and WS fanout outside strategy hot path.
+2. Done but must be reworked:
+   - Fallback direct ingest path remains available when control-plane worker is not configured (compatibility path).
+3. Missing and required:
+   - Harden backpressure policy from current drop-on-full to explicit documented strategy (latest-wins or drop-oldest by symbol).
+   - Add queue depth/drop telemetry for control-plane handoff.
+
+## `HFT-RM3` 2-core host budget guardrails
+1. Done and not touched:
+   - Runtime has existing env/config knobs for queue capacities and runtime-grid size.
+2. Done but must be reworked:
+   - Default `runtime-grid` / screener fanout remains too high for strict low-latency host profile.
+3. Missing and required:
+   - Explicit host-profile caps (symbols/configs/tasks) enforced at startup.
+   - Guardrail evidence from `/health` under capped mode.
+
+## `HFT-RM4` Numeric HFT SLO freeze
+1. Done and not touched:
+   - `/health` already exposes latency and backlog metrics.
+2. Done but must be reworked:
+   - Core contracts still describe KPI envelope mostly qualitatively.
+3. Missing and required:
+   - Numeric pass/fail SLOs in core docs (`p99`, backlog, degradation criteria).
+   - CI/ops check path that flags non-SLO runtime as non-HFT mode.

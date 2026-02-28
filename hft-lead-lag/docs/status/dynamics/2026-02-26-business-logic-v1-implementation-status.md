@@ -1,7 +1,7 @@
 # Implementation Status — HFT Runtime Migration
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (CP5/CP6 remediation hardening synced)
+Last sync: 2026-02-28 (stud2 remediation track started: RM1 in progress)
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Roadmap anchor: `docs/status/core/2026-02-26-business-logic-roadmap.md`
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
@@ -31,6 +31,14 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 | `HFT-CP5` Deterministic Replay Harness | `Completed` | `src/infrastructure/replay/raw_feed.rs` provides recorder/reader + deterministic signal replay equivalence checks; recorder sequence advances only on successful write+flush, reader rejects invalid JSON and out-of-order sequence, and concurrent monotonic-sequence behavior is test-covered; Binance/Gate ingest is wired to recorder and `main` supports offline replay mode (`REPLAY_RAW_FEED_PATH`) | None |
 | `HFT-CP6` Execution Fast Path | `Completed` | `src/event_loop_execution.rs` provides bounded `OrderIntent` queue (`try_send`), async timeout-enforced send worker, queue-depth drift protection, full-queue latest-by-symbol overflow lane, stale-intent max-age drop guard, kill-switch cooldown auto-recovery, and execution latency/counter telemetry; signal loop enqueue is wired in `src/event_loop_core.rs` | None (`docs/status/dynamics/2026-02-28-cp6-execution-fast-path-evidence.md`) |
 | `HFT-CP7` Production Operations Layer | `Planned` | Health endpoint exists | Watchdog/recovery/alert contracts not complete |
+
+## 3.1) Remediation progress (`HFT-RM*`)
+| Remediation | Status | Evidence | Main gap |
+|---|---|---|---|
+| `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | `src/main.rs` adds `RUNTIME_PLANE_MODE`; `hft_core` startup path disables runtime-grid hot reload, NATR refresher, screener DB persistence, and switches subscriptions to strategy symbols; `src/event_loop_runtime.rs` gates portfolio scheduler by mode | Complete explicit mode runbook and add dedicated mode test coverage |
+| `HFT-RM2` Screener decoupling from data-plane | `In progress` | `src/event_loop_control.rs` adds bounded `ControlUpdate` handoff worker; `src/event_loop_ingest.rs` now enqueues control updates instead of direct screener/ws side-effects when control-plane is present; `src/main.rs` wires worker in `mixed` mode | Harden queue backpressure policy + add control-plane depth/drop telemetry |
+| `HFT-RM3` 2-core host budget guardrails | `Planned` | Runtime mode now allows lighter subscription profile in `hft_core` (`strategy_symbols` only) | Enforce hard startup caps for symbols/config fanout |
+| `HFT-RM4` Numeric HFT SLO freeze | `Planned` | `/health` latency/backlog metrics already present | Add numeric pass/fail SLO contract into core docs and checks |
 
 ## 4) What is kept from legacy track
 1. Existing strategy and screener business logic is reused as functional baseline.

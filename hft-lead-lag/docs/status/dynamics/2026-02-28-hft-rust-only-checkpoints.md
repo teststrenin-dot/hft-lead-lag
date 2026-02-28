@@ -3,6 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+Last sync: 2026-02-28 (stud2 deep-dive remediation track added)
 
 ## 1) Locked Architecture Invariant
 1. Runtime hot path is Rust-only.
@@ -20,6 +21,18 @@ Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-contr
 | `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw feed recorder + replay mode + decision equivalence checks | JSONL recorder + strict reader are wired into WS ingest via opt-in env; recorder sequence advances only after successful write+flush; reader rejects malformed JSON/out-of-order sequence; offline replay determinism runner validates stable signal traces (`2026-02-28-cp5-block1-raw-feed-evidence.md`) |
 | `HFT-CP6` Execution Fast Path | `Completed` | Non-blocking `OrderIntent` queue, async fire-and-track, strict send SLA, kill-switch | Strategy thread uses bounded `try_send` queue; queue-depth accounting is race-safe; full queue keeps latest overflow intent per symbol; stale intent max-age guard and kill-switch cooldown recovery are active; `/health` exposes intent->sent SLA metrics (`2026-02-28-cp6-execution-fast-path-evidence.md`) |
 | `HFT-CP7` Production Operations Layer | `Planned` | Watchdogs, idempotent snapshot/restore, stall/drop/backlog alerting | Operational runbook/alerts are green and recovery is deterministic |
+
+## 2.1) Remediation Track (from `docs/studies/stud2.md`)
+| Remediation | Status | Scope | Exit gate |
+|---|---|---|---|
+| `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | Introduce explicit runtime mode so hot path can run without screener/control-plane fanout in ingest loop | `hft_core` mode runs event loop without per-tick `screener.update` and without screener WS event fanout |
+| `HFT-RM2` Screener decoupling from data-plane | `In progress` | Replace direct screener ingest call from event loop with bounded control-update handoff | Hot strategy/event path no longer blocks on screener/shadow update code |
+| `HFT-RM3` 2-core host budget guardrails | `Planned` | Hard caps for symbol/config fanout on trading host (`runtime-grid`, subscriptions, screener workload) | Host caps are explicit, enforced, and reflected in status + runtime logs |
+| `HFT-RM4` Numeric HFT SLO freeze | `Planned` | Add hard p99/backlog envelope to core contracts (not qualitative-only) | Core docs include numeric fail/pass criteria tied to `/health` metrics |
+
+Notes:
+1. `HFT-RM*` is a mandatory continuation layer after CP6, not a replacement of CP0-CP7.
+2. CP7 closure depends on RM2-RM4 completion.
 
 ## 3) Legacy Mapping (for continuity)
 1. Existing Rust signal/validation portfolio logic remains the functional base.

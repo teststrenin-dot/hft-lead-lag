@@ -1,4 +1,5 @@
 use super::{
+    event_loop_control::ControlPlaneTx,
     event_loop_execution::{ExecutionQueueTx, OrderIntent},
     ingest_exchange_batch, strategy_symbol_updates_from_batch, BatchIngestContext, ConfigManager,
     HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore, SIGNAL_CHECK_BUDGET_PER_TICK,
@@ -243,6 +244,7 @@ impl EventLoopMetrics {
 pub(super) struct EventLoopState {
     pub(super) ticker_count: usize,
     pub(super) signal_count: usize,
+    screener_ingest_enabled: bool,
     last_status_at: Instant,
     pub(super) signal_interval: tokio::time::Interval,
     #[cfg(test)]
@@ -453,6 +455,7 @@ impl EventLoopState {
         Self {
             ticker_count: 0,
             signal_count: 0,
+            screener_ingest_enabled: true,
             last_status_at: Instant::now(),
             signal_interval,
             #[cfg(test)]
@@ -480,6 +483,10 @@ impl EventLoopState {
             .as_nanos() as i64
     }
 
+    pub(super) fn set_screener_ingest_enabled(&mut self, enabled: bool) {
+        self.screener_ingest_enabled = enabled;
+    }
+
     pub(super) fn process_exchange_result(
         &mut self,
         side: ExchangeSide,
@@ -488,16 +495,19 @@ impl EventLoopState {
         strategy_symbol_index: &StrategySymbolIndex,
         screener: &ScreenerStore,
         ws_tx: Option<&tokio::sync::broadcast::Sender<MarketDataEvent>>,
+        control_plane: Option<&ControlPlaneTx>,
     ) -> Result<ProcessExchangeResult, hft_lead_lag::domain::ExchangeError> {
         let parsed_ts_ns = Self::now_ns();
         let ticker = result?;
+        let direct_ingest_enabled = self.screener_ingest_enabled && control_plane.is_none();
         let mut ctx = BatchIngestContext {
             exchange: side.exchange_name(),
             ticker_count: &mut self.ticker_count,
             metrics: &mut self.metrics,
             now_ms: &Self::now_ms,
-            screener,
-            ws_tx,
+            screener: direct_ingest_enabled.then_some(screener),
+            ws_tx: if direct_ingest_enabled { ws_tx } else { None },
+            control_plane,
         };
         ingest_exchange_batch(&ticker, &drained, &mut ctx);
         let (updated_strategy_symbol_ids, strategy_updates) =

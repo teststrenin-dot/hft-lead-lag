@@ -19,6 +19,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+mod event_loop_control;
 mod event_loop_core;
 mod event_loop_execution;
 mod event_loop_ingest;
@@ -31,6 +32,7 @@ mod runtime_symbols;
 mod trial_batch_apply;
 mod trial_batch_protocol;
 mod trial_queue_io;
+use event_loop_control::spawn_control_plane_worker;
 use event_loop_core::{
     resolve_strategy_exchange_routing, EventLoopMetrics, EventLoopState, ExchangeSide,
     StrategyExchangeRouting, StrategySymbolIndex, SymbolId,
@@ -103,8 +105,49 @@ const ENABLE_SCREENER_CHART_PIPELINE: bool = false;
 const REPLAY_RAW_FEED_PATH_ENV: &str = "REPLAY_RAW_FEED_PATH";
 const REPLAY_STRATEGY_SYMBOLS_ENV: &str = "REPLAY_STRATEGY_SYMBOLS";
 const REPLAY_PRIMARY_EXCHANGE_ENV: &str = "REPLAY_PRIMARY_EXCHANGE";
+const RUNTIME_PLANE_MODE_ENV: &str = "RUNTIME_PLANE_MODE";
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePlaneMode {
+    Mixed,
+    HftCore,
+}
+
+impl RuntimePlaneMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mixed => "mixed",
+            Self::HftCore => "hft_core",
+        }
+    }
+
+    fn hft_core(self) -> bool {
+        matches!(self, Self::HftCore)
+    }
+}
+
+fn runtime_plane_mode_from_env() -> RuntimePlaneMode {
+    let Some(raw) = std::env::var(RUNTIME_PLANE_MODE_ENV)
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+    else {
+        return RuntimePlaneMode::Mixed;
+    };
+    match raw.as_str() {
+        "mixed" => RuntimePlaneMode::Mixed,
+        "hft_core" => RuntimePlaneMode::HftCore,
+        other => {
+            warn!(
+                "unknown {}='{}'; falling back to mixed",
+                RUNTIME_PLANE_MODE_ENV, other
+            );
+            RuntimePlaneMode::Mixed
+        }
+    }
+}
 
 #[cfg(test)]
 fn rebuild_latest_map(
@@ -263,9 +306,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Load configuration from environment
     let config_manager = ConfigManager::from_env()?;
+    let runtime_plane_mode = runtime_plane_mode_from_env();
     info!(
         "Runtime execution mode: {}",
         config_manager.trading_mode().as_str()
+    );
+    info!(
+        "Runtime plane mode: {} (env: {})",
+        runtime_plane_mode.as_str(),
+        RUNTIME_PLANE_MODE_ENV
     );
     if let Some(replay_path) = replay_raw_feed_path_from_env() {
         run_replay_mode(&replay_path, &config_manager)?;
@@ -323,33 +372,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             portfolio_ids
         );
     }
-    let runtime_grid_path = Path::new(RUNTIME_GRID_CONFIG_PATH);
-    ensure_runtime_grid_config_file(runtime_grid_path)?;
     let mut runtime_grid_last_modified: Option<FileFingerprint> = None;
     let mut runtime_grid_last_signature: Option<u64> = None;
-    match load_runtime_grid_generation_async(runtime_grid_path.to_path_buf()).await {
-        Ok(generation) => {
-            runtime_grid_last_modified = Some(generation.modified);
-            if generation.config.enabled {
-                let report = screener.replace_fleet_configs(generation.configs);
-                runtime_grid_last_signature = Some(generation.signature);
-                info!(
-                    "runtime-grid: startup apply old={} new={} symbols_reset={} drained_trades={}",
-                    report.old_config_count,
-                    report.new_config_count,
-                    report.symbols_reset,
-                    report.drained_trades
-                );
-            } else {
-                info!("runtime-grid: startup disabled");
+    let runtime_grid_path = Path::new(RUNTIME_GRID_CONFIG_PATH);
+    if !runtime_plane_mode.hft_core() {
+        ensure_runtime_grid_config_file(runtime_grid_path)?;
+        match load_runtime_grid_generation_async(runtime_grid_path.to_path_buf()).await {
+            Ok(generation) => {
+                runtime_grid_last_modified = Some(generation.modified);
+                if generation.config.enabled {
+                    let report = screener.replace_fleet_configs(generation.configs);
+                    runtime_grid_last_signature = Some(generation.signature);
+                    info!(
+                        "runtime-grid: startup apply old={} new={} symbols_reset={} drained_trades={}",
+                        report.old_config_count,
+                        report.new_config_count,
+                        report.symbols_reset,
+                        report.drained_trades
+                    );
+                } else {
+                    info!("runtime-grid: startup disabled");
+                }
             }
+            Err(e) => warn!("runtime-grid: startup config ignored: {e}"),
         }
-        Err(e) => warn!("runtime-grid: startup config ignored: {e}"),
+    } else {
+        info!("runtime-grid: skipped in hft_core plane mode");
     }
 
-    // Initialize fleet persistence (SQLite WAL mode, async batch writes).
     let db_path = std::path::Path::new("data/optimizer.db");
-    init_screener_persistence(&mut screener, db_path)?;
+    if !runtime_plane_mode.hft_core() {
+        // Initialize fleet persistence (SQLite WAL mode, async batch writes).
+        init_screener_persistence(&mut screener, db_path)?;
+    } else {
+        info!("screener persistence: disabled in hft_core plane mode");
+    }
 
     // Seed 24h volume from Gate REST data
     let vol_pairs: Vec<(String, f64)> = common_symbols
@@ -357,19 +414,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(|s| (s.clone(), gate_vol_map.get(s).copied().unwrap_or(0.0)))
         .collect();
     screener.set_volumes(&vol_pairs);
-    spawn_runtime_grid_hot_reload(
-        screener.clone(),
-        db_path.to_path_buf(),
-        health_state.clone(),
-        RuntimeGridHotReloadSpec {
-            config_path: runtime_grid_path.to_path_buf(),
-            trial_batch_path: PathBuf::from("config/trial-batch.json"),
-            trial_control_path: PathBuf::from("config/trial-control.json"),
-            initial_modified: runtime_grid_last_modified,
-            initial_signature: runtime_grid_last_signature,
-        },
-    );
-    spawn_gate_natr_refresher(screener.clone(), common_symbols.clone());
+    if !runtime_plane_mode.hft_core() {
+        spawn_runtime_grid_hot_reload(
+            screener.clone(),
+            db_path.to_path_buf(),
+            health_state.clone(),
+            RuntimeGridHotReloadSpec {
+                config_path: runtime_grid_path.to_path_buf(),
+                trial_batch_path: PathBuf::from("config/trial-batch.json"),
+                trial_control_path: PathBuf::from("config/trial-control.json"),
+                initial_modified: runtime_grid_last_modified,
+                initial_signature: runtime_grid_last_signature,
+            },
+        );
+        spawn_gate_natr_refresher(screener.clone(), common_symbols.clone());
+    } else {
+        info!("control-plane helpers: runtime-grid hot reload and NATR refresher are disabled");
+    }
     let ws_tx = start_api_servers(
         MIN_VOLUME_USD,
         screener.clone(),
@@ -377,26 +438,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ENABLE_SCREENER_CHART_PIPELINE,
     )
     .await?;
+    let control_plane = if runtime_plane_mode.hft_core() {
+        None
+    } else {
+        Some(spawn_control_plane_worker(screener.clone(), ws_tx.clone()))
+    };
+    if control_plane.is_some() {
+        info!("control-plane worker: enabled (bounded handoff from ingest path)");
+    } else {
+        info!("control-plane worker: disabled in hft_core plane mode");
+    }
 
-    // Subscribe to screener symbols for live WS ticks.
+    let subscription_symbols: &Vec<String> = if runtime_plane_mode.hft_core() {
+        &strategy_symbols
+    } else {
+        &screener_symbols
+    };
+    // Subscribe to runtime symbols for live WS ticks.
     let (binance_subscribed, binance_subscribe_errors) = match binance
-        .subscribe_book_tickers_batch(&screener_symbols)
+        .subscribe_book_tickers_batch(subscription_symbols)
         .await
     {
         Ok(count) => (count, 0usize),
         Err(e) => {
             error!("Binance batch subscribe error: {}", e);
-            (0usize, screener_symbols.len())
+            (0usize, subscription_symbols.len())
         }
     };
-    let binance_ws_sockets = screener_symbols.len().div_ceil(2);
+    let binance_ws_sockets = subscription_symbols.len().div_ceil(2);
     info!(
         "Binance subscription summary: ok={} err={} sockets={} symbols_per_ws=2",
         binance_subscribed, binance_subscribe_errors, binance_ws_sockets
     );
 
-    // Subscribe Gate to screener symbols as well.
-    subscribe_gate_symbols(&mut gate, &screener_symbols).await;
+    // Subscribe Gate to runtime symbols as well.
+    subscribe_gate_symbols(&mut gate, subscription_symbols).await;
 
     // Build runtime strategy selected via config.
     let mut strategy = match build_runtime_strategy(&config_manager, strategy_symbols.clone()) {
@@ -427,9 +503,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         EventLoopRuntimeContext {
             strategy_exchange_routing,
             screener: &screener,
+            screener_ingest_enabled: control_plane.is_none() && !runtime_plane_mode.hft_core(),
+            portfolio_scheduler_enabled: !runtime_plane_mode.hft_core(),
             health_state: health_state.as_ref(),
             execution: &execution,
-            ws_tx: ws_tx.as_ref(),
+            ws_tx: if runtime_plane_mode.hft_core() || control_plane.is_some() {
+                None
+            } else {
+                ws_tx.as_ref()
+            },
+            control_plane: control_plane.as_deref(),
         },
     )
     .await

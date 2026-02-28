@@ -1,11 +1,15 @@
 #[cfg(test)]
 use super::rebuild_latest_map;
-use super::{EventLoopMetrics, MarketDataEvent, ScreenerStore, StrategySymbolIndex, SymbolId};
+use super::{
+    event_loop_control::{ControlPlaneTx, ControlUpdate},
+    EventLoopMetrics, MarketDataEvent, ScreenerStore, StrategySymbolIndex, SymbolId,
+};
 #[cfg(test)]
 use bytes::Bytes;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
+use tracing::warn;
 
 #[cfg(test)]
 pub(super) fn strategy_ticks_in_order<'a>(
@@ -145,14 +149,29 @@ pub(super) fn ingest_latest_batch<F: Fn() -> i64>(
             .record_tick_drift((ctx.now_ms)(), ticker.exchange_ts_ns);
         let bid = ticker.bid_price();
         let ask = ticker.ask_price();
-        ctx.screener.update(
-            symbol_str,
-            ctx.exchange,
-            bid,
-            ask,
-            ticker.exchange_ts_ns,
-            ticker.local_ts_ns,
-        );
+        if let Some(control_plane) = ctx.control_plane {
+            if !control_plane.try_enqueue(ControlUpdate {
+                symbol: symbol_str.to_string(),
+                exchange: ctx.exchange,
+                bid,
+                ask,
+                exchange_ts_ns: ticker.exchange_ts_ns,
+                local_ts_ns: ticker.local_ts_ns,
+            }) {
+                warn!("control-plane queue full/closed: dropping update symbol={symbol_str}");
+            }
+            continue;
+        }
+        if let Some(screener) = ctx.screener {
+            screener.update(
+                symbol_str,
+                ctx.exchange,
+                bid,
+                ask,
+                ticker.exchange_ts_ns,
+                ticker.local_ts_ns,
+            );
+        }
         if let Some(ws_tx) = ctx.ws_tx {
             let _ = ws_tx.send(MarketDataEvent {
                 symbol: symbol_str.to_string(),
@@ -170,8 +189,9 @@ pub(super) struct BatchIngestContext<'a, F: Fn() -> i64> {
     pub(super) ticker_count: &'a mut usize,
     pub(super) metrics: &'a mut EventLoopMetrics,
     pub(super) now_ms: &'a F,
-    pub(super) screener: &'a ScreenerStore,
+    pub(super) screener: Option<&'a ScreenerStore>,
     pub(super) ws_tx: Option<&'a tokio::sync::broadcast::Sender<MarketDataEvent>>,
+    pub(super) control_plane: Option<&'a ControlPlaneTx>,
 }
 
 #[cfg(test)]
@@ -199,14 +219,29 @@ fn ingest_ticker<F: Fn() -> i64>(
 
     let bid = ticker.bid_price();
     let ask = ticker.ask_price();
-    ctx.screener.update(
-        symbol_str,
-        ctx.exchange,
-        bid,
-        ask,
-        ticker.exchange_ts_ns,
-        ticker.local_ts_ns,
-    );
+    if let Some(control_plane) = ctx.control_plane {
+        if !control_plane.try_enqueue(ControlUpdate {
+            symbol: symbol_str.to_string(),
+            exchange: ctx.exchange,
+            bid,
+            ask,
+            exchange_ts_ns: ticker.exchange_ts_ns,
+            local_ts_ns: ticker.local_ts_ns,
+        }) {
+            warn!("control-plane queue full/closed: dropping update symbol={symbol_str}");
+        }
+        return;
+    }
+    if let Some(screener) = ctx.screener {
+        screener.update(
+            symbol_str,
+            ctx.exchange,
+            bid,
+            ask,
+            ticker.exchange_ts_ns,
+            ticker.local_ts_ns,
+        );
+    }
     if let Some(ws_tx) = ctx.ws_tx {
         let _ = ws_tx.send(MarketDataEvent {
             symbol: symbol_str.to_string(),

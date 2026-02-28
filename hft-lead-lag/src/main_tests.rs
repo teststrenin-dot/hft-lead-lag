@@ -919,6 +919,7 @@ async fn event_loop_state_process_exchange_result_updates_binance_map() {
             &strategy_symbol_index,
             &screener,
             Some(&ws_tx),
+            None,
         )
         .expect("exchange result should parse");
 
@@ -950,6 +951,7 @@ async fn event_loop_state_exposes_latest_books_by_symbol_id() {
             &strategy_symbol_index,
             &screener,
             None,
+            None,
         )
         .expect("exchange result should parse");
 
@@ -980,6 +982,7 @@ async fn event_loop_state_process_exchange_result_propagates_error() {
         &strategy_symbol_index,
         &screener,
         Some(&ws_tx),
+        None,
     );
 
     assert!(matches!(
@@ -1051,8 +1054,9 @@ fn process_exchange_batch_preserves_cached_symbols_and_ingests_only_updates() {
         ticker_count: &mut ticker_count,
         metrics: &mut metrics,
         now_ms: &now_ms,
-        screener: &screener,
+        screener: Some(&screener),
         ws_tx: Some(&ws_tx),
+        control_plane: None,
     };
 
     process_exchange_batch(
@@ -1253,8 +1257,9 @@ fn ingest_latest_batch_is_noop_for_empty_map() {
         ticker_count: &mut ticker_count,
         metrics: &mut metrics,
         now_ms: &now_ms,
-        screener: &screener,
+        screener: Some(&screener),
         ws_tx: Some(&ws_tx),
+        control_plane: None,
     };
 
     ingest_latest_batch(&latest, &mut ctx);
@@ -1282,8 +1287,9 @@ fn ingest_latest_batch_updates_counter_metrics_screener_and_ws() {
         ticker_count: &mut ticker_count,
         metrics: &mut metrics,
         now_ms: &now_ms,
-        screener: &screener,
+        screener: Some(&screener),
         ws_tx: Some(&ws_tx),
+        control_plane: None,
     };
 
     ingest_latest_batch(&latest, &mut ctx);
@@ -1320,8 +1326,9 @@ fn process_exchange_batch_rebuilds_and_ingests_latest_state() {
         ticker_count: &mut ticker_count,
         metrics: &mut metrics,
         now_ms: &now_ms,
-        screener: &screener,
+        screener: Some(&screener),
         ws_tx: Some(&ws_tx),
+        control_plane: None,
     };
 
     process_exchange_batch(
@@ -1379,8 +1386,9 @@ fn process_exchange_batch_with_single_tick_updates_once() {
         ticker_count: &mut ticker_count,
         metrics: &mut metrics,
         now_ms: &now_ms,
-        screener: &screener,
+        screener: Some(&screener),
         ws_tx: Some(&ws_tx),
+        control_plane: None,
     };
 
     process_exchange_batch(
@@ -1418,8 +1426,9 @@ fn ingest_exchange_batch_deduplicates_symbol_and_keeps_latest_tick() {
         ticker_count: &mut ticker_count,
         metrics: &mut metrics,
         now_ms: &now_ms,
-        screener: &screener,
+        screener: Some(&screener),
         ws_tx: Some(&ws_tx),
+        control_plane: None,
     };
 
     ingest_exchange_batch(&first, &drained, &mut ctx);
@@ -1626,6 +1635,7 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
             &strategy_symbol_index,
             &screener,
             None,
+            None,
         )
         .expect("binance result");
     state
@@ -1635,6 +1645,7 @@ async fn update_strategy_books_routes_by_configured_exchange_roles() {
             Vec::new(),
             &strategy_symbol_index,
             &screener,
+            None,
             None,
         )
         .expect("gate result");
@@ -1682,6 +1693,7 @@ async fn strategy_update_queue_enqueues_and_flushes_updates() {
             &strategy_symbol_index,
             &screener,
             None,
+            None,
         )
         .expect("binance result");
     let gate = state
@@ -1691,6 +1703,7 @@ async fn strategy_update_queue_enqueues_and_flushes_updates() {
             Vec::new(),
             &strategy_symbol_index,
             &screener,
+            None,
             None,
         )
         .expect("gate result");

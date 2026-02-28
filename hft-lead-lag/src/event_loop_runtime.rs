@@ -1,7 +1,7 @@
 use super::{
-    event_loop_execution::ExecutionQueueTx, BinanceMarketData, EventLoopState, ExchangeSide,
-    GateMarketData, HealthState, MarketDataEvent, RuntimeStrategy, ScreenerStore,
-    StrategyExchangeRouting, StrategySymbolIndex,
+    event_loop_control::ControlPlaneTx, event_loop_execution::ExecutionQueueTx, BinanceMarketData,
+    EventLoopState, ExchangeSide, GateMarketData, HealthState, MarketDataEvent, RuntimeStrategy,
+    ScreenerStore, StrategyExchangeRouting, StrategySymbolIndex,
 };
 use hft_lead_lag::MarketDataStream;
 use std::sync::atomic::Ordering;
@@ -24,6 +24,7 @@ async fn handle_exchange_tick(
         context.strategy_symbol_index,
         context.screener,
         context.ws_tx,
+        context.control_plane,
     ) {
         Ok(processed) => {
             side.mark_alive(context.health_state, EventLoopState::now_ms());
@@ -52,14 +53,18 @@ struct ExchangeTickContext<'a> {
     screener: &'a ScreenerStore,
     health_state: &'a HealthState,
     ws_tx: Option<&'a tokio::sync::broadcast::Sender<MarketDataEvent>>,
+    control_plane: Option<&'a ControlPlaneTx>,
 }
 
 pub(super) struct EventLoopRuntimeContext<'a> {
     pub(super) strategy_exchange_routing: StrategyExchangeRouting,
     pub(super) screener: &'a ScreenerStore,
+    pub(super) screener_ingest_enabled: bool,
+    pub(super) portfolio_scheduler_enabled: bool,
     pub(super) health_state: &'a HealthState,
     pub(super) execution: &'a ExecutionQueueTx,
     pub(super) ws_tx: Option<&'a tokio::sync::broadcast::Sender<MarketDataEvent>>,
+    pub(super) control_plane: Option<&'a ControlPlaneTx>,
 }
 
 pub(super) async fn run_event_loop(
@@ -70,6 +75,7 @@ pub(super) async fn run_event_loop(
     runtime_context: EventLoopRuntimeContext<'_>,
 ) -> ! {
     let mut state = EventLoopState::new();
+    state.set_screener_ingest_enabled(runtime_context.screener_ingest_enabled);
     let mut portfolio_rebalance_interval = tokio::time::interval(Duration::from_millis(
         PORTFOLIO_REBALANCE_SCHEDULER_INTERVAL_MS,
     ));
@@ -81,6 +87,7 @@ pub(super) async fn run_event_loop(
         screener: runtime_context.screener,
         health_state: runtime_context.health_state,
         ws_tx: runtime_context.ws_tx,
+        control_plane: runtime_context.control_plane,
     };
 
     loop {
@@ -120,9 +127,11 @@ pub(super) async fn run_event_loop(
             }
 
             _ = portfolio_rebalance_interval.tick() => {
-                runtime_context
-                    .screener
-                    .portfolio_scheduler_tick_v1(EventLoopState::now_ms());
+                if runtime_context.portfolio_scheduler_enabled {
+                    runtime_context
+                        .screener
+                        .portfolio_scheduler_tick_v1(EventLoopState::now_ms());
+                }
             }
         }
     }
