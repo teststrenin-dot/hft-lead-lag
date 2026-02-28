@@ -3,7 +3,7 @@
 Date: 2026-02-27
 Status: Canonical operating model for `HFT-CP*`
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Last sync: 2026-02-28 (formal flow contract + state machine)
+Last sync: 2026-02-28 (formal flow contract + state machine + numeric SLO freeze)
 
 ## 1) Purpose
 Define one executable operating model that binds business flow to implementation checkpoints and enforces Rust-only hot path.
@@ -78,7 +78,25 @@ Define one executable operating model that binds business flow to implementation
 4. Guard transition thresholds are fixed by constants in runtime.
 5. Runtime mode boundaries (`scout`, `forward-only`, `promote`) are explicit and observable.
 
-## 7) Checkpoint boundaries
+## 7) Numeric HFT SLO Contract (`hft_core` mode)
+1. Latency envelope (`/health.runtime_latency_us`):
+   - `end_to_end.p99 <= 2_000`
+   - `ingest.p99 <= 1_500`
+   - `decision.p99 <= 1_500`
+2. Backlog envelope (`/health.runtime_backlog_depth`):
+   - `binance_msg_queue_depth <= 64`
+   - `gate_msg_queue_depth <= 64`
+   - `signal_backlog_depth <= 128`
+   - `execution_intent_queue_depth <= 128`
+   - `control_update_queue_depth <= 256` (when control-plane is enabled)
+3. Drop/timeout envelope:
+   - `/health.execution_dropped_intents = 0` for stable baseline windows
+   - `/health.execution_send_timeouts = 0` for stable baseline windows
+   - `/health.control_dropped_updates = 0` for stable baseline windows
+4. Degradation rule:
+   - If any envelope is breached for `3` consecutive health windows, runtime status is `degraded/non-HFT` and cannot be accepted as HFT-quality run.
+
+## 8) Checkpoint boundaries
 1. `HFT-CP0`: latency and allocation observability.
 2. `HFT-CP1`: `SymbolId` and allocation removal.
 3. `HFT-CP2`: lock-free strategy state.
@@ -88,18 +106,18 @@ Define one executable operating model that binds business flow to implementation
 7. `HFT-CP6`: execution fast path.
 8. `HFT-CP7`: operations and recovery layer.
 
-## 8) Mandatory invariants
+## 9) Mandatory invariants
 1. No Python in target runtime hot path.
 2. Deterministic ranking and state transitions.
 3. Idempotent trade/snapshot application.
 4. Explicit, observable mode boundaries (`scout`, `forward-only`, `promote`).
 
-## 9) Out of scope (current stage)
+## 10) Out of scope (current stage)
 1. Real-money capital rebalance across portfolios.
 2. Live execution allocation policy.
 3. Cross-portfolio capital optimizer.
 
-## 10) Change rule
+## 11) Change rule
 Any behavior change touching this model requires:
 1. Update this file.
 2. Update roadmap and implementation status docs.

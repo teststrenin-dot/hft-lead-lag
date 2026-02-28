@@ -2,7 +2,7 @@
 
 Date: 2026-02-27
 Status: Active strategic anchor (Rust-only migration stage)
-Last sync: 2026-02-28 (business contract formalized with thresholds/state transitions)
+Last sync: 2026-02-28 (business contract formalized with numeric runtime envelopes and fail rule)
 
 ## 1) Locked Business Objective
 Maximize risk-adjusted return under constrained capital by continuously selecting robust alpha contexts (symbols/configs/portfolios) from shadow validation into paper/live execution, while strictly containing drawdown and operational failure risk.
@@ -35,12 +35,24 @@ Control chain:
 7. `HFT-CP6`: execution fast path and intent->sent SLA.
 8. `HFT-CP7`: production operations and deterministic recovery.
 
-## 5) Strategic KPI envelope
-1. Forward throughput and determinism on target host.
-2. Candidate/portfolio quality metrics (`useful_winrate`, expectancy, turnover).
-3. Risk containment metrics (resets/cooldowns/relapse).
-4. State integrity metrics (silent-loss and silent-duplication incidence).
-5. Capital readiness metrics (policy determinism, guard coverage).
+## 5) Strategic KPI envelope (numeric gates)
+1. `HFT core latency` (`hft_core` mode, target host):
+   - `runtime_latency_us.end_to_end.p99 <= 2_000`
+   - `runtime_latency_us.ingest.p99 <= 1_500`
+   - `runtime_latency_us.decision.p99 <= 1_500`
+2. `Backlog envelope` (`hft_core` mode):
+   - `runtime_backlog_depth.binance_msg_queue_depth <= 64`
+   - `runtime_backlog_depth.gate_msg_queue_depth <= 64`
+   - `runtime_backlog_depth.signal_backlog_depth <= 128`
+   - `runtime_backlog_depth.execution_intent_queue_depth <= 128`
+   - `runtime_backlog_depth.control_update_queue_depth <= 256` (if control-plane enabled)
+3. `Drop/timeout envelope`:
+   - `execution_dropped_intents = 0` for stable baseline windows
+   - `execution_send_timeouts = 0` for stable baseline windows
+   - `control_dropped_updates = 0` for stable baseline windows
+4. `Mode fail rule`:
+   - Any envelope breach for 3 consecutive health windows marks run as `degraded/non-HFT`.
+5. Candidate/portfolio quality metrics (`useful_winrate`, expectancy, turnover) remain business KPIs but do not override runtime safety envelopes.
 
 ## 6) Business Process Contract (V1, current implementation)
 1. Shadow-first lifecycle:

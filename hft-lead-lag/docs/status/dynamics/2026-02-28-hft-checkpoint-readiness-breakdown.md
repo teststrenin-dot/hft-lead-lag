@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
-Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`)
+Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM4 contract closed)
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
@@ -173,8 +173,10 @@ Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`)
 ## `HFT-RM4` Numeric HFT SLO freeze
 1. Done and not touched:
    - `/health` already exposes latency and backlog metrics.
+   - Core contracts now freeze numeric HFT envelopes and degradation rule:
+     - `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
+     - `docs/status/core/2026-02-27-operating-model-spec-v1.md`
 2. Done but must be reworked:
-   - Core contracts still describe KPI envelope mostly qualitatively.
+   - None.
 3. Missing and required:
-   - Numeric pass/fail SLOs in core docs (`p99`, backlog, degradation criteria).
-   - CI/ops check path that flags non-SLO runtime as non-HFT mode.
+   - CP7 operational check path that auto-flags `degraded/non-HFT` runs against the frozen RM4 contract.
