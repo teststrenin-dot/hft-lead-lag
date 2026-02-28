@@ -163,6 +163,7 @@ fn apply_control_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[tokio::test]
     async fn control_plane_worker_applies_update_and_emits_ws_event() {
@@ -193,6 +194,64 @@ mod tests {
                 .runtime_control_dropped_updates
                 .load(Ordering::Relaxed),
             0
+        );
+    }
+
+    #[test]
+    fn control_plane_try_enqueue_overflow_lane_keeps_latest_by_symbol_and_counts_replacements() {
+        let health = Arc::new(HealthState::new());
+        let (sender, _receiver) = mpsc::channel::<ControlUpdate>(1);
+        let control = ControlPlaneTx {
+            sender,
+            queue_depth: Arc::new(AtomicU64::new(0)),
+            overflow_latest_by_symbol: Arc::new(Mutex::new(HashMap::new())),
+            health: health.clone(),
+        };
+
+        let accepted_1 = control.try_enqueue(ControlUpdate {
+            symbol: "BTCUSDT".to_string(),
+            exchange: "binance",
+            bid: 100.0,
+            ask: 100.1,
+            exchange_ts_ns: 1,
+            local_ts_ns: 2,
+        });
+        assert!(accepted_1);
+
+        let accepted_2 = control.try_enqueue(ControlUpdate {
+            symbol: "BTCUSDT".to_string(),
+            exchange: "binance",
+            bid: 101.0,
+            ask: 101.1,
+            exchange_ts_ns: 3,
+            local_ts_ns: 4,
+        });
+        assert!(accepted_2);
+
+        let accepted_3 = control.try_enqueue(ControlUpdate {
+            symbol: "BTCUSDT".to_string(),
+            exchange: "binance",
+            bid: 102.0,
+            ask: 102.1,
+            exchange_ts_ns: 5,
+            local_ts_ns: 6,
+        });
+        assert!(accepted_3);
+
+        let overflow = control
+            .overflow_latest_by_symbol
+            .lock()
+            .expect("overflow lock");
+        assert_eq!(overflow.len(), 1);
+        assert_eq!(overflow["BTCUSDT"].bid, 102.0);
+        drop(overflow);
+
+        assert_eq!(
+            health
+                .runtime_control_dropped_updates
+                .load(Ordering::Relaxed),
+            1,
+            "replacement in overflow lane must increment dropped counter once",
         );
     }
 }

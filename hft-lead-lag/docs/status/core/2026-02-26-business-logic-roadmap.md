@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (stud2 remediation track integrated; RM3/RM4 closure synced)
+Last sync: 2026-02-28 (stud2 remediation track integrated; RM2/RM3/RM4 closure synced)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -49,7 +49,7 @@ Last sync: 2026-02-28 (stud2 remediation track integrated; RM3/RM4 closure synce
 | Remediation | Status | Notes |
 |---|---|---|
 | `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | Runtime mode wiring starts: hot loop must support execution without per-tick screener ingest path. |
-| `HFT-RM2` Screener decoupling from data-plane | `In progress` | Bounded control-worker handoff is wired with latest-by-symbol overflow policy and health telemetry; compatibility fallback path still needs hard boundary. |
+| `HFT-RM2` Screener decoupling from data-plane | `Completed` | Runtime ingest now enforces control-plane handoff as the production path; direct ingest fallback is constrained to test builds only, and overflow-lane replacement behavior is regression-tested. |
 | `HFT-RM3` 2-core host budget guardrails | `Completed` | Runtime now enforces frozen 2-core defaults for strategy symbols, screener symbols, and runtime-grid configs; env remains override-only (`docs/status/dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`). |
 | `HFT-RM4` Numeric HFT SLO freeze | `Completed` | Core docs now contain numeric latency/backlog/drop envelopes and explicit `degraded/non-HFT` fail rule tied to `/health` (`business-objective-economic-control-map.md`, `operating-model-spec-v1.md`). |
 

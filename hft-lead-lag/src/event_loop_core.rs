@@ -499,7 +499,9 @@ impl EventLoopState {
     ) -> Result<ProcessExchangeResult, hft_lead_lag::domain::ExchangeError> {
         let parsed_ts_ns = Self::now_ns();
         let ticker = result?;
-        let direct_ingest_enabled = self.screener_ingest_enabled && control_plane.is_none();
+        // Direct ingest fallback is test-only; runtime must use bounded control-plane handoff.
+        let direct_ingest_enabled =
+            cfg!(test) && self.screener_ingest_enabled && control_plane.is_none();
         let mut ctx = BatchIngestContext {
             exchange: side.exchange_name(),
             ticker_count: &mut self.ticker_count,

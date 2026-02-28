@@ -2,7 +2,7 @@
 
 Date: 2026-02-28
 Status: active
-Last sync: 2026-02-28 (RM3/RM4 closures synced in core+dynamics)
+Last sync: 2026-02-28 (RM2/RM3/RM4 closures synced in core+dynamics)
 
 ## Purpose
 Single entry point for project status, checkpoint tracking, and operating constraints.

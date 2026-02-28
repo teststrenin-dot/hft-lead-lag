@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
-Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM3/RM4 contracts closed)
+Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM2/RM3/RM4 contracts closed)
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
@@ -151,11 +151,13 @@ Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM3/RM4 contr
    - Bounded control-plane queue/worker is wired: ingest path enqueues `ControlUpdate`; worker applies `screener.update` and WS fanout outside strategy hot path.
    - Full queue policy is latest-by-symbol overflow lane (not hard drop-all).
    - `/health` exposes control-plane backlog and dropped-update counters.
+   - Overflow-lane replacement behavior is covered by regression test in `src/event_loop_control.rs`.
+   - Runtime direct-ingest compatibility path is constrained to test builds only (`cfg!(test)` guard in `src/event_loop_core.rs`).
 2. Done but must be reworked:
-   - Fallback direct ingest path remains available when control-plane worker is not configured (compatibility path).
+   - None.
 3. Missing and required:
-   - Constrain or remove compatibility fallback direct-ingest path to avoid accidental mixed semantics.
-   - Add dedicated regression tests for overflow-lane behavior and control-plane queue telemetry in health API.
+   - None for RM2 closure.
+   - CP7 may add continuous runtime assertion that production runs always carry non-null control-plane in `mixed` mode.
 
 ## `HFT-RM3` 2-core host budget guardrails
 1. Done and not touched:

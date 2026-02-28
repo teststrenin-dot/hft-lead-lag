@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Last sync: 2026-02-28 (stud2 deep-dive remediation track added; RM3/RM4 contracts closed)
+Last sync: 2026-02-28 (stud2 deep-dive remediation track added; RM2/RM3/RM4 contracts closed)
 
 ## 1) Locked Architecture Invariant
 1. Runtime hot path is Rust-only.
@@ -26,13 +26,13 @@ Last sync: 2026-02-28 (stud2 deep-dive remediation track added; RM3/RM4 contract
 | Remediation | Status | Scope | Exit gate |
 |---|---|---|---|
 | `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | Introduce explicit runtime mode so hot path can run without screener/control-plane fanout in ingest loop | `hft_core` mode runs event loop without per-tick `screener.update` and without screener WS event fanout |
-| `HFT-RM2` Screener decoupling from data-plane | `In progress` | Replace direct screener ingest call from event loop with bounded control-update handoff | Bounded handoff + latest-by-symbol overflow + health telemetry are active; compatibility direct path must be explicitly constrained |
+| `HFT-RM2` Screener decoupling from data-plane | `Completed` | Event loop uses bounded control-update handoff with latest-by-symbol overflow and health telemetry | Compatibility direct-ingest path is constrained to test builds only; production runtime path is control-plane only |
 | `HFT-RM3` 2-core host budget guardrails | `Completed` | Hard caps for symbol/config fanout on trading host (`runtime-grid`, subscriptions, screener workload) are always applied with frozen 2-core defaults and env override path | Production default cap profile is frozen and documented (`2026-02-28-rm3-2core-cap-profile-evidence.md`) |
 | `HFT-RM4` Numeric HFT SLO freeze | `Completed` | Hard p99/backlog/drop envelopes and degradation rule are now frozen in core contracts | Core docs are the single source of numeric fail/pass criteria tied to `/health` metrics |
 
 Notes:
 1. `HFT-RM*` is a mandatory continuation layer after CP6, not a replacement of CP0-CP7.
-2. CP7 closure depends on RM2 completion and operational enforcement of RM4 contract.
+2. CP7 closure depends on RM1 completion and operational enforcement of RM4 contract.
 
 ## 3) Legacy Mapping (for continuity)
 1. Existing Rust signal/validation portfolio logic remains the functional base.
