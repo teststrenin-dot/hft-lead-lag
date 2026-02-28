@@ -38,6 +38,29 @@ fn parse_portfolio_ids_from_env_returns_none_for_empty_input() {
 }
 
 #[test]
+fn runtime_plane_mode_defaults_to_mixed_when_env_missing() {
+    let _lock = env_test_lock();
+    std::env::remove_var(RUNTIME_PLANE_MODE_ENV);
+    assert_eq!(runtime_plane_mode_from_env(), RuntimePlaneMode::Mixed);
+}
+
+#[test]
+fn runtime_plane_mode_parses_hft_core_case_insensitive() {
+    let _lock = env_test_lock();
+    std::env::set_var(RUNTIME_PLANE_MODE_ENV, "HFT_CORE");
+    assert_eq!(runtime_plane_mode_from_env(), RuntimePlaneMode::HftCore);
+    std::env::remove_var(RUNTIME_PLANE_MODE_ENV);
+}
+
+#[test]
+fn runtime_plane_mode_unknown_value_falls_back_to_mixed() {
+    let _lock = env_test_lock();
+    std::env::set_var(RUNTIME_PLANE_MODE_ENV, "unknown-mode");
+    assert_eq!(runtime_plane_mode_from_env(), RuntimePlaneMode::Mixed);
+    std::env::remove_var(RUNTIME_PLANE_MODE_ENV);
+}
+
+#[test]
 fn apply_symbol_cap_respects_env_limit() {
     let _lock = env_test_lock();
     std::env::set_var(MAX_STRATEGY_SYMBOLS_ENV, "2");

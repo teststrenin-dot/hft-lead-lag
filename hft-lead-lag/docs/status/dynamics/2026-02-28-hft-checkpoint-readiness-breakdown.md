@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
-Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM2/RM3/RM4 contracts closed)
+Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM1-RM4 contracts closed)
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
@@ -140,10 +140,12 @@ Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM2/RM3/RM4 c
    - Runtime supports explicit plane mode via `RUNTIME_PLANE_MODE` (`mixed` / `hft_core`).
    - `hft_core` mode disables direct screener ingest in event loop and disables portfolio scheduler tick in runtime loop.
    - `hft_core` mode uses strategy-only subscriptions and does not start runtime-grid hot reload / NATR refresher / screener DB persistence.
+   - Mode parser contract is regression-tested in `src/main_tests.rs` (default/valid/invalid inputs).
+   - Contract evidence is captured in `docs/status/dynamics/2026-02-28-rm1-plane-mode-contract-evidence.md`.
 2. Done but must be reworked:
    - None.
 3. Missing and required:
-   - Add dedicated startup validation tests for invalid/unsupported mode values and mode transition contract.
+   - None for RM1 closure.
 
 ## `HFT-RM2` Screener decoupling from data-plane
 1. Done and not touched:

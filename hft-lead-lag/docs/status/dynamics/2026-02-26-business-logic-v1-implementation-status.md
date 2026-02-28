@@ -1,7 +1,7 @@
 # Implementation Status — HFT Runtime Migration
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (stud2 remediation track: RM2/RM3/RM4 closed; RM1 active)
+Last sync: 2026-02-28 (stud2 remediation track: RM1-RM4 closed)
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Roadmap anchor: `docs/status/core/2026-02-26-business-logic-roadmap.md`
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
@@ -35,7 +35,7 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 ## 3.1) Remediation progress (`HFT-RM*`)
 | Remediation | Status | Evidence | Main gap |
 |---|---|---|---|
-| `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | `src/main.rs` adds `RUNTIME_PLANE_MODE`; `hft_core` startup path disables runtime-grid hot reload, NATR refresher, screener DB persistence, and switches subscriptions to strategy symbols; `src/event_loop_runtime.rs` gates portfolio scheduler by mode | Complete explicit mode runbook and add dedicated mode test coverage |
+| `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `Completed` | `RUNTIME_PLANE_MODE` startup contract is wired and verified: `hft_core` disables runtime-grid helpers/NATR/persistence/scheduler and uses strategy-only subscriptions; `mixed` keeps control-plane path; dedicated mode parser tests are in `src/main_tests.rs` | None (`docs/status/dynamics/2026-02-28-rm1-plane-mode-contract-evidence.md`) |
 | `HFT-RM2` Screener decoupling from data-plane | `Completed` | Bounded `ControlUpdate` handoff worker is runtime-wired; full queue keeps latest update per symbol; `/health` exposes control queue depth + dropped updates; runtime ingest enforces control-plane as production path and constrains direct ingest fallback to test builds only (`src/event_loop_core.rs`); overflow-lane replacement behavior is regression-tested in `src/event_loop_control.rs` | None |
 | `HFT-RM3` 2-core host budget guardrails | `Completed` | Startup now enforces frozen 2-core defaults (`64/128/512`) for `MAX_STRATEGY_SYMBOLS` / `MAX_SCREENER_SYMBOLS` / `MAX_RUNTIME_GRID_CONFIGS`; env overrides still work and cap source is logged on truncation | None (`docs/status/dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`) |
 | `HFT-RM4` Numeric HFT SLO freeze | `Completed` | Core contracts now define numeric latency/backlog/drop envelopes and a `3`-window degradation rule tied to `/health` fields (`docs/status/core/2026-02-27-business-objective-economic-control-map.md`, `docs/status/core/2026-02-27-operating-model-spec-v1.md`) | Keep CP7 ops checks aligned with frozen contract |
