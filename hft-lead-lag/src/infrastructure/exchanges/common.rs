@@ -141,9 +141,7 @@ fn find_json_field_value_start(
     field_bytes: &[u8],
     search_from: usize,
 ) -> Option<usize> {
-    let idx = json[search_from..]
-        .windows(field_bytes.len())
-        .position(|w| w == field_bytes)?;
+    let idx = memmem::find(&json[search_from..], field_bytes)?;
     let mut pos = search_from + idx + field_bytes.len();
     while pos < json.len()
         && (json[pos] == b' ' || json[pos] == b':' || json[pos] == b'\n' || json[pos] == b'\r')
@@ -208,7 +206,20 @@ pub fn extract_json_bool_field_by_pattern(json: &[u8], field_bytes: &[u8]) -> Op
             return Some(false);
         }
         if json[value_pos] == b'-' || json[value_pos].is_ascii_digit() {
-            return extract_json_i64_field_by_pattern(json, field_bytes).map(|v| v != 0);
+            let mut end = value_pos;
+            while end < json.len()
+                && (json[end].is_ascii_digit()
+                    || json[end] == b'-'
+                    || json[end] == b'+'
+                    || json[end] == b'.'
+                    || json[end] == b'e'
+                    || json[end] == b'E')
+            {
+                end += 1;
+            }
+            if let Some(v) = parse_float(&json[value_pos..end]) {
+                return Some(v != 0.0);
+            }
         }
         pos = value_pos.saturating_add(1);
     }
@@ -286,6 +297,14 @@ mod tests {
         let json = br#"{"m":1,"x":0}"#;
         assert_eq!(extract_json_bool_field(json, "m"), Some(true));
         assert_eq!(extract_json_bool_field(json, "x"), Some(false));
+    }
+
+    #[test]
+    fn test_extract_json_bool_numeric_decimal_fallback() {
+        let json = br#"{"m":-0.5,"x":0.0,"y":0.25}"#;
+        assert_eq!(extract_json_bool_field(json, "m"), Some(true));
+        assert_eq!(extract_json_bool_field(json, "x"), Some(false));
+        assert_eq!(extract_json_bool_field(json, "y"), Some(true));
     }
 
     #[test]
