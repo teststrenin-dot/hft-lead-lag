@@ -332,7 +332,11 @@ impl BinanceMarketData {
                                     let recv_ts = now_ns();
                                     let payload = text.into_bytes();
                                     if let Some(recorder) = raw_feed_recorder.as_ref() {
-                                        recorder.record(RawFeedExchange::Binance, recv_ts, &payload);
+                                        if let Err(err) =
+                                            recorder.record(RawFeedExchange::Binance, recv_ts, &payload)
+                                        {
+                                            warn!("Binance raw-feed record error: {err}");
+                                        }
                                     }
                                     if msg_tx.try_send((payload, recv_ts)).is_err() {
                                         let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
@@ -345,7 +349,11 @@ impl BinanceMarketData {
                                     reconnect_delay = Duration::from_secs(1);
                                     let recv_ts = now_ns();
                                     if let Some(recorder) = raw_feed_recorder.as_ref() {
-                                        recorder.record(RawFeedExchange::Binance, recv_ts, &bin);
+                                        if let Err(err) =
+                                            recorder.record(RawFeedExchange::Binance, recv_ts, &bin)
+                                        {
+                                            warn!("Binance raw-feed record error: {err}");
+                                        }
                                     }
                                     if msg_tx.try_send((bin, recv_ts)).is_err() {
                                         let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;

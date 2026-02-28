@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -45,9 +44,13 @@ struct RawFeedFrameLine {
 
 pub const RAW_FEED_RECORD_PATH_ENV: &str = "RAW_FEED_RECORD_PATH";
 
+struct RawFeedRecorderState {
+    next_seq: u64,
+    writer: std::io::BufWriter<std::fs::File>,
+}
+
 pub struct RawFeedRecorder {
-    seq: AtomicU64,
-    writer: Mutex<std::io::BufWriter<std::fs::File>>,
+    state: Mutex<RawFeedRecorderState>,
 }
 
 impl RawFeedRecorder {
@@ -61,27 +64,35 @@ impl RawFeedRecorder {
             .write(true)
             .open(path)?;
         Ok(Self {
-            seq: AtomicU64::new(0),
-            writer: Mutex::new(std::io::BufWriter::new(file)),
+            state: Mutex::new(RawFeedRecorderState {
+                next_seq: 0,
+                writer: std::io::BufWriter::new(file),
+            }),
         })
     }
 
-    pub fn record(&self, exchange: RawFeedExchange, recv_ts_ns: i64, payload: &[u8]) {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+    pub fn record(
+        &self,
+        exchange: RawFeedExchange,
+        recv_ts_ns: i64,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("raw-feed recorder mutex poisoned"))?;
+        let seq = state.next_seq;
         let line = RawFeedFrameLine {
             seq,
             exchange,
             recv_ts_ns,
             payload_b64: STANDARD.encode(payload),
         };
-        let Ok(mut writer) = self.writer.lock() else {
-            return;
-        };
-        if serde_json::to_writer(&mut *writer, &line).is_err() {
-            return;
-        }
-        let _ = writer.write_all(b"\n");
-        let _ = writer.flush();
+        serde_json::to_writer(&mut state.writer, &line)?;
+        state.writer.write_all(b"\n")?;
+        state.writer.flush()?;
+        state.next_seq = state.next_seq.saturating_add(1);
+        Ok(())
     }
 }
 
@@ -327,7 +338,7 @@ mod tests {
     };
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_file(prefix: &str) -> PathBuf {
@@ -349,8 +360,12 @@ mod tests {
     fn record_and_read_round_trip_keeps_order_and_payload() {
         let path = temp_file("raw-feed-roundtrip");
         let recorder = RawFeedRecorder::spawn(&path).expect("spawn recorder");
-        recorder.record(RawFeedExchange::Binance, 1_000, br#"{"e":"bookTicker"}"#);
-        recorder.record(RawFeedExchange::Gate, 1_100, b"\x01\x02\x03\x04");
+        recorder
+            .record(RawFeedExchange::Binance, 1_000, br#"{"e":"bookTicker"}"#)
+            .expect("record binance");
+        recorder
+            .record(RawFeedExchange::Gate, 1_100, b"\x01\x02\x03\x04")
+            .expect("record gate");
         drop(recorder);
 
         let frames = RawFeedReplayReader::read_all(&path).expect("read replay");
@@ -384,6 +399,47 @@ mod tests {
     }
 
     #[test]
+    fn replay_reader_rejects_invalid_json_line() {
+        let path = temp_file("raw-feed-invalid-json");
+        let mut file = std::fs::File::create(&path).expect("create file");
+        writeln!(file, r#"{{"seq":0,"exchange":"binance","recv_ts_ns":123"#).expect("write line");
+        drop(file);
+
+        let err = RawFeedReplayReader::read_all(&path).expect_err("invalid json must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("invalid json"),
+            "error must include json parsing context"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn replay_reader_rejects_out_of_order_sequence() {
+        let path = temp_file("raw-feed-invalid-seq");
+        let mut file = std::fs::File::create(&path).expect("create file");
+        writeln!(
+            file,
+            r#"{{"seq":0,"exchange":"binance","recv_ts_ns":123,"payload_b64":"AA=="}}"#
+        )
+        .expect("write seq0");
+        writeln!(
+            file,
+            r#"{{"seq":2,"exchange":"gate","recv_ts_ns":124,"payload_b64":"AQ=="}}"#
+        )
+        .expect("write seq2");
+        drop(file);
+
+        let err = RawFeedReplayReader::read_all(&path).expect_err("invalid seq must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("invalid seq"),
+            "error must include seq validation context"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn recorder_from_env_returns_none_when_unset() {
         let _lock = env_test_lock();
         std::env::remove_var(RAW_FEED_RECORD_PATH_ENV);
@@ -395,16 +451,20 @@ mod tests {
     fn replay_signal_trace_is_deterministic_for_same_input() {
         let path = temp_file("raw-feed-deterministic");
         let recorder = RawFeedRecorder::spawn(&path).expect("spawn recorder");
-        recorder.record(
-            RawFeedExchange::Binance,
-            1_000_000_000,
-            br#"{"e":"bookTicker","s":"BTCUSDT","b":"110.0","B":"1.0","a":"111.0","A":"1.0","T":1700000000000}"#,
-        );
-        recorder.record(
-            RawFeedExchange::Gate,
-            1_000_000_100,
-            br#"{"channel":"futures.book_ticker","event":"update","contract":"BTC_USDT","b":"100.0","B":"1.0","a":"101.0","A":"1.0","t":1700000000000}"#,
-        );
+        recorder
+            .record(
+                RawFeedExchange::Binance,
+                1_000_000_000,
+                br#"{"e":"bookTicker","s":"BTCUSDT","b":"110.0","B":"1.0","a":"111.0","A":"1.0","T":1700000000000}"#,
+            )
+            .expect("record binance");
+        recorder
+            .record(
+                RawFeedExchange::Gate,
+                1_000_000_100,
+                br#"{"channel":"futures.book_ticker","event":"update","contract":"BTC_USDT","b":"100.0","B":"1.0","a":"101.0","A":"1.0","t":1700000000000}"#,
+            )
+            .expect("record gate");
         drop(recorder);
 
         let frames = RawFeedReplayReader::read_all(&path).expect("read replay");
@@ -421,6 +481,42 @@ mod tests {
         assert!(report.signal_count >= 1);
         assert_eq!(report.mismatch_index, None);
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_recording_keeps_monotonic_sequence() {
+        let path = temp_file("raw-feed-concurrent");
+        let recorder = Arc::new(RawFeedRecorder::spawn(&path).expect("spawn recorder"));
+        let mut joins = Vec::new();
+        for thread_id in 0..6usize {
+            let recorder = recorder.clone();
+            joins.push(std::thread::spawn(move || {
+                for idx in 0..120usize {
+                    let payload = format!(r#"{{"tid":{thread_id},"idx":{idx}}}"#).into_bytes();
+                    recorder
+                        .record(
+                            if thread_id % 2 == 0 {
+                                RawFeedExchange::Binance
+                            } else {
+                                RawFeedExchange::Gate
+                            },
+                            1_000_000 + idx as i64,
+                            &payload,
+                        )
+                        .expect("concurrent record");
+                }
+            }));
+        }
+        for join in joins {
+            join.join().expect("thread join");
+        }
+        drop(recorder);
+
+        let frames = RawFeedReplayReader::read_all(&path).expect("read replay");
+        assert_eq!(frames.len(), 6 * 120);
+        assert_eq!(frames.first().map(|f| f.seq), Some(0));
+        assert_eq!(frames.last().map(|f| f.seq), Some((6 * 120 - 1) as u64));
         let _ = std::fs::remove_file(path);
     }
 
