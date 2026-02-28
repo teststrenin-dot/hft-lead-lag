@@ -85,6 +85,9 @@ pub(crate) struct HealthResponse {
     runtime_stage_timestamps: RuntimeStageTimestamps,
     runtime_latency_us: RuntimeLatencySnapshot,
     runtime_backlog_depth: RuntimeBacklogDepth,
+    hft_mode_status: &'static str,
+    rm4_breach_streak: u64,
+    rm4_window_threshold: u64,
     issues: Vec<&'static str>,
     warnings: Vec<&'static str>,
 }

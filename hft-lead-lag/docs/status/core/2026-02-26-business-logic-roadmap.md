@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (stud2 remediation track integrated; RM1-RM4 closure synced)
+Last sync: 2026-02-28 (RM1-RM4 closed; CP7 block1 enforcement started)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -43,7 +43,7 @@ Last sync: 2026-02-28 (stud2 remediation track integrated; RM1-RM4 closure synce
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | Fast parsing exists; symbol cache interns raw bytes directly; runtime parse paths use pattern-based extractors with early `strategy_symbol_id` assignment in Binance/Gate; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse avoids redundant re-interning; profile baselines and parser-priority regression proof are captured in CP4 evidence doc. |
 | `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw-feed recorder is wired into WS ingest via opt-in env, recorder now advances `seq` only after successful write+flush, connector wiring surfaces recorder errors, replay reader validates invalid JSON/out-of-order sequence, and concurrent monotonic-sequence safety is test-covered. |
 | `HFT-CP6` Execution Fast Path | `Completed` | Order intent queue uses non-blocking `try_send`, queue-depth drift race is fixed, full-queue path keeps latest intent per symbol, stale intents are dropped by max-age guard, timeout kill-switch now auto-recovers via cooldown, and intent->sent SLA telemetry remains formalized (`2026-02-28-cp6-execution-fast-path-evidence.md`). |
-| `HFT-CP7` Production Operations Layer | `Planned` | Watchdog/recovery/alert stack not closed. |
+| `HFT-CP7` Production Operations Layer | `In progress` | RM4 health-window enforcement is now runtime-active (`2026-02-28-cp7-block1-rm4-health-enforcement.md`); watchdog/recovery stack remains open. |
 
 ## Remediation Track Status (`HFT-RM*`, derived from `stud2`)
 | Remediation | Status | Notes |

@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Last sync: 2026-02-28 (stud2 deep-dive remediation track added; RM1-RM4 contracts closed)
+Last sync: 2026-02-28 (stud2 remediation closed; CP7 block1 started)
 
 ## 1) Locked Architecture Invariant
 1. Runtime hot path is Rust-only.
@@ -20,7 +20,7 @@ Last sync: 2026-02-28 (stud2 deep-dive remediation track added; RM1-RM4 contract
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | Parse only required fields, map symbol to id early, avoid symbol copying in hot path | Symbol cache interns raw bytes; Binance/Gate parse paths assign `strategy_symbol_id` during parse; drain dedupe is `SymbolId`-first; profile baselines + parse-order regression proof in `2026-02-28-cp4-parse-path-evidence.md` |
 | `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw feed recorder + replay mode + decision equivalence checks | JSONL recorder + strict reader are wired into WS ingest via opt-in env; recorder sequence advances only after successful write+flush; reader rejects malformed JSON/out-of-order sequence; offline replay determinism runner validates stable signal traces (`2026-02-28-cp5-block1-raw-feed-evidence.md`) |
 | `HFT-CP6` Execution Fast Path | `Completed` | Non-blocking `OrderIntent` queue, async fire-and-track, strict send SLA, kill-switch | Strategy thread uses bounded `try_send` queue; queue-depth accounting is race-safe; full queue keeps latest overflow intent per symbol; stale intent max-age guard and kill-switch cooldown recovery are active; `/health` exposes intent->sent SLA metrics (`2026-02-28-cp6-execution-fast-path-evidence.md`) |
-| `HFT-CP7` Production Operations Layer | `Planned` | Watchdogs, idempotent snapshot/restore, stall/drop/backlog alerting | Operational runbook/alerts are green and recovery is deterministic |
+| `HFT-CP7` Production Operations Layer | `In progress` | RM4 SLO contract is runtime-enforced in `/health` windows with breach-streak escalation | Watchdogs + idempotent snapshot/restore runbook + full alert contracts are green |
 
 ## 2.1) Remediation Track (from `docs/studies/stud2.md`)
 | Remediation | Status | Scope | Exit gate |

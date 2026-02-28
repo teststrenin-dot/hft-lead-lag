@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
-Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM1-RM4 contracts closed)
+Last sync: 2026-02-28 (stud2 deltas closed; CP7 block1 RM4 enforcement landed)
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
@@ -128,8 +128,13 @@ Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM1-RM4 contr
 ## `HFT-CP7` Production Operations Layer
 1. Done and not touched:
    - Base health endpoint and saturation counters.
+   - RM4 health-window enforcement is now runtime-active:
+     - per-window SLO breach evaluation in `/health`
+     - consecutive breach streak tracking
+     - `degraded_non_hft` escalation after 3 consecutive breached windows
+   - Evidence captured in `docs/status/dynamics/2026-02-28-cp7-block1-rm4-health-enforcement.md`.
 2. Done but must be reworked:
-   - Ops coverage is incomplete for production deterministic recovery.
+   - Ops coverage is still incomplete for production deterministic recovery.
 3. Missing and required:
    - Component watchdogs (`feed/engine/execution/dbwriter`).
    - Alert contract for drift, drops, backlog, engine stall.

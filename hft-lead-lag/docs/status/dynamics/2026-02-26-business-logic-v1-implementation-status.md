@@ -1,7 +1,7 @@
 # Implementation Status — HFT Runtime Migration
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (stud2 remediation track: RM1-RM4 closed)
+Last sync: 2026-02-28 (stud2 remediation track closed; CP7 block1 started)
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Roadmap anchor: `docs/status/core/2026-02-26-business-logic-roadmap.md`
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
@@ -30,7 +30,7 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | ticks and fast parse are in place; symbol cache interns raw bytes directly; runtime parse uses pattern-based extractors with early `strategy_symbol_id`; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse removes redundant re-interning; parser profile baselines and contract-priority regression test are captured in CP4 evidence doc | None |
 | `HFT-CP5` Deterministic Replay Harness | `Completed` | `src/infrastructure/replay/raw_feed.rs` provides recorder/reader + deterministic signal replay equivalence checks; recorder sequence advances only on successful write+flush, reader rejects invalid JSON and out-of-order sequence, and concurrent monotonic-sequence behavior is test-covered; Binance/Gate ingest is wired to recorder and `main` supports offline replay mode (`REPLAY_RAW_FEED_PATH`) | None |
 | `HFT-CP6` Execution Fast Path | `Completed` | `src/event_loop_execution.rs` provides bounded `OrderIntent` queue (`try_send`), async timeout-enforced send worker, queue-depth drift protection, full-queue latest-by-symbol overflow lane, stale-intent max-age drop guard, kill-switch cooldown auto-recovery, and execution latency/counter telemetry; signal loop enqueue is wired in `src/event_loop_core.rs` | None (`docs/status/dynamics/2026-02-28-cp6-execution-fast-path-evidence.md`) |
-| `HFT-CP7` Production Operations Layer | `Planned` | Health endpoint exists | Watchdog/recovery/alert contracts not complete |
+| `HFT-CP7` Production Operations Layer | `In progress` | `/health` now enforces RM4 windows with breach streak and `degraded_non_hft` escalation after 3 consecutive breaches; response includes `hft_mode_status` and streak telemetry (`docs/status/dynamics/2026-02-28-cp7-block1-rm4-health-enforcement.md`) | Watchdogs and idempotent recovery runbook/contracts not complete |
 
 ## 3.1) Remediation progress (`HFT-RM*`)
 | Remediation | Status | Evidence | Main gap |

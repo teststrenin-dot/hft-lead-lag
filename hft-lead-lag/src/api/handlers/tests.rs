@@ -292,6 +292,54 @@ async fn health_reports_execution_fast_path_telemetry_and_kill_switch_issue() {
 }
 
 #[tokio::test]
+async fn health_marks_hft_mode_degraded_after_three_consecutive_rm4_breaches() {
+    let health_state = Arc::new(HealthState::new());
+    let now_ms = crate::domain::screener::utils::now_ms();
+    health_state
+        .binance_connected
+        .store(true, Ordering::Relaxed);
+    health_state.gate_connected.store(true, Ordering::Relaxed);
+    health_state
+        .binance_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .gate_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .runtime_end_to_end_samples
+        .store(10, Ordering::Relaxed);
+    health_state
+        .runtime_end_to_end_p99_us
+        .store(3_000, Ordering::Relaxed);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let (_code_1, Json(resp_1)) = health(State(state.clone())).await;
+    assert!(!resp_1.issues.contains(&"hft_slo_degraded_non_hft"));
+    assert!(resp_1.warnings.contains(&"hft_slo_window_breach"));
+
+    let (_code_2, Json(resp_2)) = health(State(state.clone())).await;
+    assert!(!resp_2.issues.contains(&"hft_slo_degraded_non_hft"));
+    assert!(resp_2.warnings.contains(&"hft_slo_window_breach"));
+
+    let (code_3, Json(resp_3)) = health(State(state)).await;
+    assert_eq!(code_3, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(resp_3.issues.contains(&"hft_slo_degraded_non_hft"));
+}
+
+#[tokio::test]
 async fn fleet_policy_endpoint_returns_empty_for_unknown_symbol() {
     let health_state = Arc::new(HealthState::new());
     let state = Arc::new(HttpState {
