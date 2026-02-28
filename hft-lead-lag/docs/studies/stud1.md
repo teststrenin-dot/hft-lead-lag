@@ -1,628 +1,288 @@
-Ок. Ниже — **“как под PR”**: чёткий контракт ответа `/api/v1/portfolio/active`, план **snapshot V1→V2**, и **детерминированный no‑overlap allocator** + набор тестов Given/When/Then, привязанный к твоей текущей математике (useful_winrate / pm_raw / eligibility gate / cooldown).
+Да — **для HFT‑рантайма на сервере с 2 ядрами Python (и любые “вторые процессы”) надо выносить из прод‑контура**, иначе ты сам себе создаёшь джиттер/хвосты/конкуренцию за CPU.
+Но важная оговорка: **“убить питон” само по себе не сделает систему HFT**, потому что основная “тормозящая масса” у тебя сейчас *уже внутри Rust* (строки/локи/HashMap/BTreeSet/SQLite в tokio‑потоке).
+
+Я распаковал твой zip и посмотрел hot‑path места. Прямые источники “не‑HFT” поведения:
+
+* `src/event_loop_core.rs`: `HashMap<String, BookTicker>`, `BTreeSet<String>`, `.cloned().collect()` на каждый батч.
+* `src/event_loop_ingest.rs`: `updated_symbols_from_batch()` делает `String::from_utf8_lossy(...).to_string()` + `sort_unstable()` + `dedup()` **на каждый батч**.
+* `src/application/services/lead_lag.rs`: `RwLock<HashMap<String, BookTicker>>` + `Mutex` + `now_utc()` в `check_signal()`.
+* `src/domain/screener/quote_ingest.rs`: `store.symbols.entry(symbol.to_string())` — **аллоцирует `String` на каждый тик**.
+* `src/infrastructure/exchanges/common.rs`: `extract_json_*` делает `format!()` для паттерна поля **каждый раз**, а `Bytes::copy_from_slice` — копию поля (это не zero‑copy).
+* `src/infrastructure/db.rs`: SQLite flush в `tokio::spawn` (блокирующие операции внутри tokio‑воркера) → хвосты p99 на 2 ядрах гарантированы.
+
+Ниже — **конкретный план “вывести в HFT forward‑product” под ограничение 2 CPU**, с тем, какие файлы и подход менять, и какой результат принимать.
 
 ---
 
-# 1) API контракт: `/api/v1/portfolio/active` (V2 payload)
+## 1) Ответ на “надо ли убивать питон?”
 
-### Цели контракта (CP1.1–CP1.3)
+**Да, в прод‑рантайме.** На 2 ядрах:
 
-* UI рендерит **произвольное N портфелей** без хардкода `A/B`.
-* На каждый портфель отдаём:
+* **Ray/Python‑оркестратор (папка `ray_driver`) не должен жить на том же боксе**, где крутится engine.
+* Python оставь как **офлайн‑инструмент** (локально / отдельный сервер): генерит конфиги → ты копируешь `runtime-grid.toml` / `trial-batch.json` на прод (или вообще фиксируешь конфиг руками).
 
-  * `shortlist` (с метриками и eligibility)
-  * `active` (уникальные символы без пересечений)
-  * `guards` (хотя бы cooldown окна/статус)
-  * `runtime` (last_rebalance, tick cadence — чтобы дебажить)
-* **Детерминизм**: порядок портфелей и shortlist уже отсортированы.
+Если ты сейчас реально запускаешь рядом `ray_driver`/Ray — это почти гарантированно и есть “почему всё каша”.
 
 ---
 
-## 1.1 JSON Schema (Draft 2020-12, упрощённый)
+## 2) Минимальная целевая архитектура под 2 ядра
 
-> Это “жёсткое” описание. Поля можно сузить, но лучше не расширять без version bump.
+Один процесс **Rust**, но внутри 2 “домена” по CPU (2 потока/2 рантайма):
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "portfolio_active_v2.schema.json",
-  "title": "ActivePortfoliosResponseV2",
-  "type": "object",
-  "required": ["schema_version", "ts_ms", "portfolios"],
-  "properties": {
-    "schema_version": {
-      "type": "string",
-      "const": "portfolio_active.v2"
-    },
-    "ts_ms": { "type": "integer", "minimum": 0 },
+### Вариант A (самый практичный): два токио‑рантайма, два потока
 
-    "runtime": {
-      "type": "object",
-      "required": ["event_loop_tick_every_ms", "rebalance_min_interval_ms"],
-      "properties": {
-        "event_loop_tick_every_ms": { "type": "integer", "minimum": 1 },
-        "rebalance_min_interval_ms": { "type": "integer", "minimum": 1 }
-      },
-      "additionalProperties": false
-    },
+* **Thread 0 (Engine / Hot):** WS ingest + market state + signal + order intent
+  *Никаких SQLite, никаких API, никаких file-watch.*
+* **Thread 1 (Control / Warm):** API/UI + DB writer + hot reload + telemetry + всё “раз в секунды/минуты”.
 
-    "portfolios": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/PortfolioView" }
-    }
-  },
-  "additionalProperties": false,
+Коммуникация: каналы (`crossbeam`/`flume`/tokio mpsc), но главное — **hot поток не ждёт warm**.
 
-  "$defs": {
-    "PortfolioView": {
-      "type": "object",
-      "required": [
-        "id",
-        "updated_ts_ms",
-        "last_rebalance_ts_ms",
-        "shortlist",
-        "active"
-      ],
-      "properties": {
-        "id": { "type": "string", "minLength": 1 },
+### Вариант B (проще внедрить, хуже по хвостам): один токио runtime на 2 worker threads
 
-        "updated_ts_ms": { "type": "integer", "minimum": 0 },
-        "last_rebalance_ts_ms": { "type": "integer", "minimum": 0 },
+Тогда ОБЯЗАТЕЛЬНО:
 
-        "shortlist_limit": { "type": "integer", "minimum": 0 },
-        "active_limit": { "type": "integer", "minimum": 0 },
+* весь SQLite (rusqlite) — только через `spawn_blocking` или отдельный std::thread
+* API/templating/logging — не должны лить нагрузку в те же воркеры, где engine
 
-        "active": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/ActiveSymbolView" }
-        },
-
-        "shortlist": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/CandidateView" }
-        },
-
-        "guards": {
-          "type": "object",
-          "properties": {
-            "cooldown_active": { "type": "boolean" },
-            "cooldown_until_ts_ms": { "type": ["integer", "null"], "minimum": 0 },
-            "notes": { "type": "string" }
-          },
-          "additionalProperties": false
-        }
-      },
-      "additionalProperties": false
-    },
-
-    "ActiveSymbolView": {
-      "type": "object",
-      "required": ["symbol"],
-      "properties": {
-        "symbol": { "type": "string", "minLength": 1 },
-
-        "cooldown_until_ts_ms": { "type": ["integer", "null"], "minimum": 0 },
-
-        "useful_winrate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
-        "pm_raw": { "type": ["integer", "null"] },
-        "avg_pnl_pct": { "type": ["number", "null"] },
-        "closed_trades": { "type": ["integer", "null"], "minimum": 0 }
-      },
-      "additionalProperties": false
-    },
-
-    "CandidateView": {
-      "type": "object",
-      "required": [
-        "symbol",
-        "eligibility",
-        "useful_winrate",
-        "pm_raw",
-        "avg_pnl_pct",
-        "closed_trades",
-        "age_minutes"
-      ],
-      "properties": {
-        "symbol": { "type": "string", "minLength": 1 },
-
-        "eligibility": {
-          "type": "object",
-          "required": ["passed", "reasons"],
-          "properties": {
-            "passed": { "type": "boolean" },
-            "reasons": { "type": "array", "items": { "type": "string" } }
-          },
-          "additionalProperties": false
-        },
-
-        "useful_winrate": { "type": "number", "minimum": 0, "maximum": 1 },
-        "pm_raw": { "type": "integer" },
-        "avg_pnl_pct": { "type": "number" },
-        "closed_trades": { "type": "integer", "minimum": 0 },
-        "profitable_trades": { "type": ["integer", "null"], "minimum": 0 },
-        "losing_trades": { "type": ["integer", "null"], "minimum": 0 },
-
-        "first_ts_ms": { "type": ["integer", "null"], "minimum": 0 },
-        "age_minutes": { "type": "number", "minimum": 0 },
-
-        "cooldown_until_ts_ms": { "type": ["integer", "null"], "minimum": 0 },
-        "stop_loss_streak": { "type": ["integer", "null"], "minimum": 0 }
-      },
-      "additionalProperties": false
-    }
-  }
-}
-```
-
-**Почему так:**
-
-* `schema_version` позволяет спокойно эволюционировать контракт.
-* `active` возвращаем не просто символами, а объектами: UI сможет показать quick‑метрики без поиска в shortlist.
-* `eligibility.reasons` — это “debuggable бизнес‑логика”: почему кандидат вылетел (возраст, трейды, winrate, avg_pnl).
+Я бы для “HFT‑форвард” выбирал **Вариант A**.
 
 ---
 
-## 1.2 Пример payload (для 3 портфелей)
+## 3) Roadmap по рефактору: 6 PR’ов с максимальным ROI
 
-```json
-{
-  "schema_version": "portfolio_active.v2",
-  "ts_ms": 1760000000000,
-  "runtime": {
-    "event_loop_tick_every_ms": 120000,
-    "rebalance_min_interval_ms": 120000
-  },
-  "portfolios": [
-    {
-      "id": "A",
-      "updated_ts_ms": 1760000000000,
-      "last_rebalance_ts_ms": 1759999880000,
-      "shortlist_limit": 10,
-      "active_limit": 2,
-      "active": [
-        {
-          "symbol": "BTCUSDT",
-          "cooldown_until_ts_ms": null,
-          "useful_winrate": 0.46,
-          "pm_raw": 7,
-          "avg_pnl_pct": 0.031,
-          "closed_trades": 52
-        },
-        {
-          "symbol": "SOLUSDT",
-          "cooldown_until_ts_ms": null,
-          "useful_winrate": 0.41,
-          "pm_raw": 3,
-          "avg_pnl_pct": 0.012,
-          "closed_trades": 33
-        }
-      ],
-      "shortlist": [
-        {
-          "symbol": "BTCUSDT",
-          "eligibility": { "passed": true, "reasons": [] },
-          "useful_winrate": 0.46,
-          "pm_raw": 7,
-          "avg_pnl_pct": 0.031,
-          "closed_trades": 52,
-          "profitable_trades": 29,
-          "losing_trades": 22,
-          "first_ts_ms": 1759996000000,
-          "age_minutes": 66.7,
-          "cooldown_until_ts_ms": null,
-          "stop_loss_streak": 0
-        },
-        {
-          "symbol": "ETHUSDT",
-          "eligibility": { "passed": true, "reasons": [] },
-          "useful_winrate": 0.44,
-          "pm_raw": 5,
-          "avg_pnl_pct": 0.019,
-          "closed_trades": 41,
-          "profitable_trades": 23,
-          "losing_trades": 18,
-          "first_ts_ms": 1759996100000,
-          "age_minutes": 65.0,
-          "cooldown_until_ts_ms": 1760000100000,
-          "stop_loss_streak": 6
-        }
-      ],
-      "guards": {
-        "cooldown_active": false,
-        "cooldown_until_ts_ms": null,
-        "notes": ""
-      }
-    },
-
-    {
-      "id": "B",
-      "updated_ts_ms": 1760000000000,
-      "last_rebalance_ts_ms": 1759999880000,
-      "shortlist_limit": 10,
-      "active_limit": 2,
-      "active": [
-        {
-          "symbol": "ETHUSDT",
-          "cooldown_until_ts_ms": null,
-          "useful_winrate": 0.40,
-          "pm_raw": 2,
-          "avg_pnl_pct": 0.010,
-          "closed_trades": 28
-        }
-      ],
-      "shortlist": [
-        {
-          "symbol": "ETHUSDT",
-          "eligibility": { "passed": true, "reasons": [] },
-          "useful_winrate": 0.40,
-          "pm_raw": 2,
-          "avg_pnl_pct": 0.010,
-          "closed_trades": 28,
-          "profitable_trades": 15,
-          "losing_trades": 13,
-          "first_ts_ms": 1759996400000,
-          "age_minutes": 60.0,
-          "cooldown_until_ts_ms": null,
-          "stop_loss_streak": 1
-        },
-        {
-          "symbol": "BTCUSDT",
-          "eligibility": { "passed": true, "reasons": [] },
-          "useful_winrate": 0.39,
-          "pm_raw": 1,
-          "avg_pnl_pct": 0.007,
-          "closed_trades": 31,
-          "profitable_trades": 16,
-          "losing_trades": 15,
-          "first_ts_ms": 1759995000000,
-          "age_minutes": 83.3,
-          "cooldown_until_ts_ms": null,
-          "stop_loss_streak": 0
-        }
-      ],
-      "guards": { "cooldown_active": false, "cooldown_until_ts_ms": null, "notes": "" }
-    },
-
-    {
-      "id": "C",
-      "updated_ts_ms": 1760000000000,
-      "last_rebalance_ts_ms": 1759999880000,
-      "shortlist_limit": 10,
-      "active_limit": 2,
-      "active": [],
-      "shortlist": [
-        {
-          "symbol": "BTCUSDT",
-          "eligibility": { "passed": false, "reasons": ["avg_pnl_pct < 0", "closed_trades <= 5"] },
-          "useful_winrate": 0.20,
-          "pm_raw": -3,
-          "avg_pnl_pct": -0.021,
-          "closed_trades": 5,
-          "profitable_trades": 1,
-          "losing_trades": 4,
-          "first_ts_ms": 1759999900000,
-          "age_minutes": 1.6,
-          "cooldown_until_ts_ms": null,
-          "stop_loss_streak": 0
-        }
-      ],
-      "guards": { "cooldown_active": false, "cooldown_until_ts_ms": null, "notes": "no eligible candidates" }
-    }
-  ]
-}
-```
+Сделаю в твоём стиле: checkpoint’ы с acceptance. Это можно реально “тащить” без ресурсов на отдельный сервер.
 
 ---
 
-# 2) Snapshot V1 → V2: формат и миграция
+### HFT‑CP0 — Метрики задержки и джиттера (чтобы перестать гадать)
 
-## 2.1 Почему вообще нужна версионизация
+**Цель:** видеть p50/p95/p99 internal latency.
 
-CP1.1 требует:
+**Сделать:**
 
-* N портфелей вместо A/B
-* совместимость restore после рестарта
+* добавить в event loop измерения:
 
-Самый дешёвый и надёжный путь: **в snapshot всегда писать `version`**, а при загрузке — мигрировать в память до V2.
+  * `ws_recv_ts_ns` (у тебя уже есть `now_ns()` в reader)
+  * `parsed_ts_ns`
+  * `state_update_ts_ns`
+  * `signal_ts_ns`
+* вывести гистограмму/percentiles в `/health` или в лог раз в 5с.
 
----
+**Acceptance:**
 
-## 2.2 Пример Snapshot V1 (как было “A/B hardcoded”)
-
-*(упрощённо — структура иллюстративная)*
-
-```json
-{
-  "version": 1,
-  "saved_ts_ms": 1760000000000,
-  "A": { "last_rebalance_ts_ms": 1759999880000, "active": ["BTCUSDT"], "cooldowns": { "ETHUSDT": 1760000100000 } },
-  "B": { "last_rebalance_ts_ms": 1759999880000, "active": ["ETHUSDT"], "cooldowns": {} }
-}
-```
-
-## 2.3 Snapshot V2 (динамический)
-
-```json
-{
-  "version": 2,
-  "saved_ts_ms": 1760000000000,
-  "portfolios": [
-    {
-      "id": "A",
-      "last_rebalance_ts_ms": 1759999880000,
-      "active": ["BTCUSDT"],
-      "cooldowns": { "ETHUSDT": 1760000100000 }
-    },
-    {
-      "id": "B",
-      "last_rebalance_ts_ms": 1759999880000,
-      "active": ["ETHUSDT"],
-      "cooldowns": {}
-    }
-  ]
-}
-```
+* ты видишь `p50/p99 internal (recv→signal)` и `max`, плюс drop counts.
 
 ---
 
-## 2.4 Миграция V1 → V2 (детерминированно, без сюрпризов)
+### HFT‑CP1 — Убрать `String` из hot‑path вообще (самый большой выигрыш)
 
-### Правила миграции
+Сейчас у тебя на каждом тике/батче создаются строки (`from_utf8_lossy → to_string`) и гоняются по HashMap/BTreeSet.
 
-1. Если `version` отсутствует → трактуем как V1 (или “legacy”).
-2. V1 содержит ключи `A`, `B` → конвертируем в массив `portfolios` с `id="A"`, `id="B"`.
-3. При **увеличении** числа портфелей в конфиге:
+**Решение:** ввести `SymbolId` и работать по ID.
 
-   * добавляем новые `PortfolioState` с дефолтами (empty shortlist/active, пустые cooldowns).
-4. При **уменьшении** числа портфелей:
+**Что добавить:**
 
-   * грузим только те `id`, которые есть в конфиге (остальные игнорируем).
-   * (если хочешь сохранить — можно оставить “orphaned” в snapshot, но это усложнение; для CP1 лучше выкинуть)
+* `type SymbolId = u16;` (у тебя максимум ~2000 символов — хватит)
+* `Universe`:
 
-### Псевдокод миграции
+  * `id_to_symbol: Vec<Arc<str>>`
+  * `symbol_key_to_id: HashMap<SymbolKey, SymbolId>`
+* `SymbolKey`: без аллокаций, например `u128` (упаковать bytes + длину)
 
-```text
-fn load_snapshot(config_ids: [PortfolioId]) -> SnapshotV2 {
-  raw = read_json()
+**Какие файлы менять сначала:**
 
-  if raw.version == 2:
-     s2 = parse_v2(raw)
-  else:
-     s1 = parse_v1_legacy(raw)
-     s2 = migrate_v1_to_v2(s1)
+* `src/domain/messages.rs`: добавить `BookTickerLite { symbol_id, bid_ticks, ask_ticks, exchange_ts_ns, local_ts_ns }`
+* `src/infrastructure/exchanges/binance/mod.rs` и `gate/mod.rs`: парсить и возвращать `BookTickerLite`, а не `BookTicker(Bytes)`
+* `src/event_loop_core.rs`: убрать `HashMap<String, BookTicker>` и `BTreeSet<String>`, заменить на массивы/битсеты (см. CP2)
 
-  // reconcile with config:
-  map = by_id(s2.portfolios)
-  out = []
-  for id in stable_order(config_ids):
-     if map.contains(id):
-        out.push(map[id])
-     else:
-        out.push(default_state(id))
-  return SnapshotV2 { version:2, portfolios: out }
-}
-```
+**Acceptance:**
 
-**Обязательная деталь для детерминизма:** `stable_order(config_ids)` — это либо порядок в конфиге, либо `sort()` по id. Не HashMap iteration.
+* в `perf`/логах исчезают массовые аллокации `String`, `sort_unstable`, `dedup`
+* internal latency p99 падает/стабилизируется
 
 ---
 
-# 3) Deterministic no-overlap allocator (CP1.2)
+### HFT‑CP2 — Переписать `EventLoopState` на массивы + bitset (вместо HashMap/BTreeSet)
 
-## 3.1 Входы/выходы
+Текущее:
 
-**Вход:**
+* `latest_bn: HashMap<String, BookTicker>`
+* `pending_signal_symbols: BTreeSet<String>`
+* `strategy_ticks_in_order().cloned().collect()`
 
-* для каждого портфеля `p`: `shortlist[p]` уже отсортирован по ranking tuple
-* `active_limit` (сколько символов активировать в портфеле)
-* `cooldown` информация (пер‑символ, пер‑портфель)
+**Должно стать:**
 
-**Выход:**
+* `latest_bn: Vec<Option<BookTickerLite>>` (индекс = symbol_id)
+* `latest_gt: Vec<Option<BookTickerLite>>`
+* `pending: Vec<u64>` bitset (или `fixedbitset`)
+* `updated: SmallVec<[SymbolId; 64]>` или просто “установить бит и всё”
 
-* `active[p]` так, что `active[p_i] ∩ active[p_j] = ∅`.
+**Точки изменения:**
 
----
+* `src/event_loop_core.rs::EventLoopState`
 
-## 3.2 Ranking и eligibility (как в твоей математике)
+  * `process_exchange_result()` возвращает не `Vec<String>`, а `Vec<SymbolId>` или bitset‑дельту
+  * `mark_pending_signal_symbols()` становится `pending.set(id)`
+  * `handle_signal_tick()` итерирует по битсету (и сбрасывает)
+* `src/event_loop_ingest.rs`:
 
-### Производные метрики кандидата
+  * убрать `updated_symbols_from_batch()` со строками и сортировкой
+  * `strategy_ticks_in_order` больше не нужен (или становится прямым индекс‑доступом)
 
-* `useful_winrate = profitable_trades / closed_trades`
-  (если `closed_trades==0` → 0)
-* `pm_raw = profitable_trades - losing_trades`
-* `avg_pnl_pct = pnl_sum_pct / closed_trades`
-  (если `closed_trades==0` → 0)
+**Acceptance:**
 
-### Eligibility gate
-
-Кандидат допускается только если:
-
-* `age_minutes > 5`
-* `closed_trades > 5`
-* `useful_winrate >= 0.30`
-* `avg_pnl_pct >= 0`
-
-### Ranking tuple (descending)
-
-1. `useful_winrate` (desc)
-2. `pm_raw` (desc)
-3. `avg_pnl_pct` (desc)
-4. `closed_trades` (desc)
-5. `symbol` (lexicographic ASC как tie-break)
-
-> Важно: tie-break по `symbol` делает порядок **полным** → даже unstable sort даст детерминизм.
+* обработка батча = O(k) где k — реально обновлённые символы, без сортировок/клонов
+* p99 стабилен, CPU падает
 
 ---
 
-## 3.3 Алгоритм no-overlap (greedy, воспроизводимый)
+### HFT‑CP3 — `LeadLagStrategy` превратить в sync “engine” без локов и без `now_utc()`
 
-### Инварианты детерминизма
+Сейчас `LeadLagStrategy`:
 
-* портфели обходятся в **стабильном порядке**: либо порядок в конфиге, либо сортировка по `id`.
-* shortlist каждого портфеля отсортирован по tuple выше.
-* символы уникальны внутри shortlist (один symbol — один candidate).
+* хранит `RwLock<HashMap<String, BookTicker>>` и `Mutex`
+* `check_signal()` дергает системное время через `time::OffsetDateTime::now_utc()`
 
-### Псевдокод
+**Нужно:**
 
-```text
-fn allocate_active(portfolios_in_stable_order):
-    taken = HashSet<Symbol>()
+* `LeadLagEngine`:
 
-    for p in portfolios_in_stable_order:
-        active = []
-        for cand in p.shortlist:
-            if active.len == p.active_limit:
-                break
+  * поля: `primary: Vec<Option<BookTickerLite>>`, `hedge: Vec<Option<BookTickerLite>>`
+  * `clock_offset_primary`, `clock_offset_hedge` (без Mutex, потому что один поток‑владелец)
+* `on_primary_book(tick)` и `on_hedge_book(tick)` — **обычные функции**, без async
+* `check_signal(symbol_id, now_ns)` — pure function без аллокаций
 
-            if cand.eligibility.passed == false:
-                continue
+**Файлы:**
 
-            if cand.cooldown_until_ts_ms != null and cand.cooldown_until_ts_ms > now_ms:
-                continue
+* переписать `src/application/services/lead_lag.rs` (или сделать новый модуль `application/engine/lead_lag_engine.rs`, а старый оставить для совместимости)
 
-            if taken.contains(cand.symbol):
-                continue
+**Acceptance:**
 
-            active.push(cand.symbol)
-            taken.insert(cand.symbol)
-
-        p.active = active
-```
-
-**Сложность:** `O(P * K)`, где `P` — число портфелей, `K` — размер shortlist. Для CP1 это идеально: просто, быстро, тестируемо.
+* в hot path нет `RwLock::read/write().await`, нет `Mutex::lock()`
+* no `String::to_string()` при формировании сигнала (в лог берёшь `&id_to_symbol[id]`)
 
 ---
 
-## 3.4 Почему этого достаточно для CP1
+### HFT‑CP4 — Парсер WS: убрать `format!()` и `Bytes::copy_from_slice` в hot parse
 
-CP1 не требует “оптимального” распределения символов между портфелями, требует:
+Сейчас в `common.rs`:
 
-* независимый race per portfolio
-* disjoint active sets
-* воспроизводимость
+* `format!("\"{}\"", field)` на каждый вызов
+* `Bytes::copy_from_slice` для каждого найденного поля
 
-Greedy покрывает 100% acceptance CP1.2.
+Это прямой источник джиттера.
 
----
+**Как проще всего:**
 
-# 4) Тесты (Given/When/Then), которые закрывают CP1.1–CP1.2
+* Для bookTicker и gate book_ticker сделать **специализированный парсер**, который:
 
-Ниже — минимальный, но “убойный” набор, который реально предотвращает регрессии и экономит дни.
+  * ищет `b"\"s\":\""` / `b"\"b\":\""` / `b"\"a\":\""` и т.д. (константы)
+  * возвращает **срез** `&[u8]` (не копию) внутри текущего `Vec<u8>`
+  * сразу парсит `bid/ask` в ticks
+  * `symbol` сразу превращает в `SymbolId` через `SymbolKey`
 
----
+**Файлы:**
 
-## 4.1 CP1.1 — Dynamic portfolio count / API / snapshot
+* `src/infrastructure/exchanges/common.rs` (добавить “fast path парсеры”)
+* `binance/mod.rs`, `gate/mod.rs` (использовать их)
 
-### Test: config changes without rebuild
+**Acceptance:**
 
-**Given:** config portfolios = `[A,B,C]`
-**When:** runtime start
-**Then:** `/api/v1/portfolio/active.portfolios.len == 3`
-**And:** ids == `["A","B","C"]` (стабильный порядок)
-
----
-
-### Test: snapshot V1 migrates to V2
-
-**Given:** snapshot json (version 1) с ключами `A,B`
-**And:** config portfolios = `[A,B,C]`
-**When:** load_snapshot()
-**Then:** state содержит `A,B` восстановленными
-**And:** `C` существует и равен `default_state("C")`
-**And:** сериализация в файл пишет `version:2`
+* “нулевые” копии строк/bytes на тик
+* падение CPU в коннекторах и меньше хвостов
 
 ---
 
-### Test: snapshot V2 reconciles with config
+### HFT‑CP5 — SQLite/DB writer: вынести из tokio worker threads
 
-**Given:** snapshot V2 содержит `[A,B,C,D]`
-**And:** config portfolios = `[A,B]`
-**When:** load_snapshot()
-**Then:** runtime имеет ровно `A,B`
-**And:** никаких паник/ошибок
+Сейчас `spawn_writer()` в `infrastructure/db.rs` делает rusqlite операции внутри `tokio::spawn`, т.е. **блокирует воркер**.
 
----
+На 2 ядрах это почти гарантированно даёт пиковые задержки в engine.
 
-## 4.2 CP1.2 — eligibility/ranking/allocator
+**Правильно:**
 
-### Test: eligibility gate boundaries
+* DB writer должен жить в отдельном `std::thread::spawn` (или хотя бы `spawn_blocking`)
+* каналы остаются, но flush/transactions — только на DB‑потоке
 
-**Given:** candidate with
+**Acceptance:**
 
-* age_minutes = 5.0, closed_trades = 6, useful_winrate = 0.31, avg_pnl_pct = 0.0
-  **When:** evaluate eligibility
-  **Then:** `passed == false` (потому что age_minutes должно быть **> 5**, не >=)
-
-**Given:** age_minutes = 5.01 (и остальные проходят)
-**Then:** `passed == true`
+* при интенсивной записи trades p99 engine не деградирует
 
 ---
 
-### Test: ranking tuple correctness
+## 4) Что делать со Screener/Portfolio (твоя бизнес‑логика) в контексте HFT
 
-**Given:** candidates (в одном портфеле)
+Тут ключевое: **сейчас Screener обновляется на каждом тике и при этом аллоцирует `String`** (`symbol.to_string()`), плюс DashMap и прочее.
 
-1. X: useful_winrate=0.40 pm_raw=1 avg_pnl=0.01 closed=10
-2. Y: useful_winrate=0.40 pm_raw=2 avg_pnl=0.00 closed=100
-3. Z: useful_winrate=0.39 pm_raw=100 avg_pnl=1.00 closed=1000
+Если ты хочешь HFT‑ядро — тебе надо решить:
 
-**When:** sort by tuple
-**Then:** порядок `Y, X, Z` (потому что winrate доминирует, потом pm_raw)
+### Путь 1 (быстро в HFT): отделить Screener от hot path
 
----
+* Hot engine торгует выбранные символы (например, top‑N заранее)
+* Screener либо:
 
-### Test: no-overlap allocation (simple)
+  * получает **семплированные** данные (например, раз в 50–100мс на символ),
+  * либо вообще живёт офлайн/replay
 
-**Given:** portfolios A и B, active_limit=1
-A.shortlist = [BTC, ETH]
-B.shortlist = [BTC, SOL]
-(все eligible и не на cooldown)
+Это самый дешёвый путь к реальному “форвард‑HFT”.
 
-**When:** allocate_active in stable order [A,B]
-**Then:** A.active = [BTC]
-**And:** B.active = [SOL]
-**And:** intersection пустой
+### Путь 2 (правильный системный): Screener тоже переводить на `SymbolId` и массивы
 
----
+То есть:
 
-### Test: cooldown skips candidates
+* `ScreenerStore` перестаёт быть `DashMap<String, SymbolState>`
+* становится `Vec<SymbolState>` (индекс = SymbolId)
+* API read‑model уже сам маппит `SymbolId -> String` только на отдаче
 
-**Given:** portfolio A, active_limit=1
-A.shortlist = [BTC(cooldown_until > now), ETH(no cooldown)]
-**When:** allocate_active
-**Then:** A.active = [ETH]
+Это много работы, но это “протянуть весь бизнес‑процесс” без деградации.
+
+**Компромисс (я бы так сделал на 2 ядрах):**
+
+* сначала внедрить SymbolId+arrays только в hot engine (CP1–CP3),
+* затем Screener перевести в warm‑режим: обновлять не каждый тик, а “последний тик за интервал” (например, 20–50мс) → и уже потом оптимизировать его структуры.
 
 ---
 
-### Test: determinism across runs (важно!)
+## 5) Режимы запуска на твоём сервере (2 ядра) — чтобы реально стало лучше уже сейчас
 
-**Given:** фиксированный input shortlists, now_ms, config order
-**When:** allocate_active вызывается 100 раз
-**Then:** результат идентичен каждый раз (байт-в-байт)
+Даже до рефактора можно “не убить себя”:
 
-*(Особенно полезно, если где-то случайно HashMap iteration протекла в порядок портфелей.)*
+1. **Не запускай Ray/Python на этом же боксе.**
+2. Уменьши `*_MSG_CHANNEL_CAPACITY` (Binance/Gate) до 2–8k, потому что:
 
----
+   * для bookTicker тебе важен latest, а не очередь на 25k (это только увеличивает задержку “старых” сообщений).
+3. Логи:
 
-### Property test: “никогда нет overlap”
+   * перестань логировать каждый сигнал на `info!` в проде (это I/O + форматирование).
+   * логируй агрегаты раз в 1–5 секунд.
+4. DB:
 
-(если используешь proptest/quickcheck)
-
-**Given:** случайно сгенерированные shortlists для P портфелей
-**When:** allocate_active
-**Then:** для всех i≠j, `active[i] ∩ active[j] == ∅`
-
----
-
-# 5) Маленькие практичные “грабли”, которые стоит зафиксировать прямо сейчас
-
-1. **Не итерироваться по HashMap** при формировании ответа API и аллокации — всегда сортируй ids.
-2. Comparator для ranking должен задавать **полный порядок** (иначе unstable sort даст дрожание). Tie-break по `symbol` это решает.
-3. В ответе API лучше отдавать shortlist уже отсортированным — UI тогда тупой и стабильный.
-4. Деление на `closed_trades` — всегда safe‑guard (0 → 0), иначе краш/NaN поломает сортировку.
+   * увеличить flush interval или batch size
+   * и/или временно отключить запись “всё подряд” (пока не вынесешь в отдельный поток)
 
 ---
 
-Если хочешь, следующим сообщением я могу:
+## 6) Если хочешь — я дам тебе прямо “каркас целевых модулей” под твой код
 
-* сделать **супер‑конкретный “PR plan” по файлам** (что именно меняется в runtime/API/tests/snapshot),
-* или набросать **Rust‑структуры DTO + сериализацию** под этот schema (serde), включая миграцию snapshot через enum `Snapshot { V1, V2 }`.
+Вот минимальная структура, которая прямо ложится на твой репо:
+
+* `src/hot/universe.rs` — SymbolId/SymbolKey/Universe
+* `src/hot/tick.rs` — BookTickerLite / Side enum
+* `src/hot/engine.rs` — LeadLagEngine (sync)
+* `src/hot/event_loop.rs` — EventLoopState на Vec/bitset
+* `src/control/` — API/DB/hotreload (как есть, но вынесено на другой поток)
+* коннекторы (`infrastructure/exchanges/*`) возвращают `BookTickerLite`
+
+---
+
+### Главное резюме
+
+**Да, на 2 ядрах ты должен “сжать” прод‑контур до одного Rust процесса и убрать Python/Ray из runtime.**
+Но чтобы это стало HFT, тебе важнее сделать три вещи:
+
+1. **SymbolId вместо String везде в hot path**
+2. **Vec/bitset вместо HashMap/BTreeSet/сортировок**
+3. **SQLite и API на другом потоке (warm), не на воркере engine**
+
+Если хочешь, следующим сообщением я напишу **очень конкретный “порядок правок по файлам” (как чек‑лист PR’ов)** с тем, какие типы вводить и какие функции переписать в твоих:
+`event_loop_core.rs`, `event_loop_ingest.rs`, `lead_lag.rs`, `binance/mod.rs`, `gate/mod.rs`, `common.rs`, `db.rs`.

@@ -1,593 +1,362 @@
-Ок — ниже я “прогоняю” **твій delivery‑процесс (контракты → изолированные вехи → тесты)** строго по твоей **Business Logic v1 roadmap** и по фактической **математике runtime (HFT lead‑lag)**.
+Ок, понял задачу: **не “улучшить текущий прототип”, а довести до HFT‑формата, где есть настоящий hot‑path, понятные latency budgets, детерминированный replay и отделение control plane от data plane.**
 
-Я сделаю это в двух слоях:
+Я посмотрел твой репо (внутри реально Rust‑runtime, но есть Python `ray_driver` для оркестрации/ASHA). Самое важное: **ощущение “всё медленно и каша” у тебя сейчас рождается не из того, что “Rust плохой”, а из того, что в горячем пути всё ещё есть:**
 
-1. **Как реально должен течь процессинг данных/решений end‑to‑end** (с привязкой к формулам и тем, что публикуется в UI).
-2. **Как этот поток “разрезается” на вехи CP1 → CP2 → CP3**, что именно менять в коде/контрактах/DB, и какие тесты = критерии выхода.
+* `String` аллокации на каждом тике,
+* `RwLock/Mutex` вокруг book state,
+* клонирование тиков пачками (`collect().cloned()`),
+* и работа со `HashMap<String, ...>` в местах, которые должны быть “array by symbol_id”.
 
----
+Это убивает как latency, так и стабильность p99.
 
-# 1) End-to-end процессинг CP0 (то, что уже “зафиксировано”)
-
-Твой CP0 по факту означает: есть **устойчивый pipeline**, и математика “заморожена” как источник истины. Тогда “идеальная” схема процессинга выглядит так (сверху вниз):
-
-## 1.1 Ingress → Time normalization → Clock offset
-
-**Вход:** raw события бирж (ws), с exchange ts в разных единицах (sec/ms/us/ns) + локальный ingress ts.
-
-**Нормализация времени (ms):**
-
-* sec → `*1000`
-* ms → как есть
-* us → `/1000`
-* ns → `/1_000_000`
-
-**Оценка offset по бирже:**
-
-* `offset_sample = ingress_ts - exchange_ts`
-* `offset = median(last N offset_sample)`
-* `corrected_exchange_ts = exchange_ts + offset`
-
-Guard: выбросы (|sample| > 6h) игнорируются, медиана пересчитывается периодически.
-
-**Публикуемые/контрольные метрики:**
-
-* `drift_ms = local_ts_ms - exchange_ts_ms`
-* outlier: если `|drift_ms| > 30_000` → `None` (не используем)
-
-**Почему это критично бизнес‑логически:** весь lead‑lag, “кто лидер”, lag_ms, циклы — развалятся без стабильной коррекции времени.
+Ниже — **план вывода в HFT forward‑product** (без философии, с конкретикой “что менять” и “как принять”).
 
 ---
 
-## 1.2 Screener state: lag + лидер + циклы
+# 0) Реалистичная рамка “HFT” для крипты
 
-На обновлениях по обоим эксчейнджам (условно Binance/Gate):
+В крипте (WS + публичный интернет) “настоящий HFT” в микросекундах редко имеет смысл: **внешняя задержка** (exchange → ты → exchange) обычно миллисекунды и доминирует.
 
-* **Instant lag:**
-  `instant_lag_ms = |binance.ts_ms - gate.ts_ms|`
-* **Публикуемый lag:** `lag_ms = p50(samples_window)`
-* **Кто лидер:**
-  `leader = argmax(corrected_exchange_ts_ms)`
+Поэтому правильная цель для forward‑HFT продукта:
 
-**Циклы divergence/convergence** через `leader_mid`:
+**A. Внутренняя задержка (ingest → decision → enqueue order intent)**
 
-* `leader_mid = mid(fresher exchange)`
+* p50: десятки–сотни микросекунд
+* p99: < 1–2 мс (и главное — без хвостов 10–100мс из-за аллокаций/локов)
 
-Дальше считаются бпс‑метрики дивергенции/конвергенции (как в доке), и **CycleTracker** строит:
+**B. Отсутствие джиттера**
 
-* `p90_divergence`
-* `p50_convergence`
-* **half_life_ms**: вход в “зону” при divergence ≥ p90 и выход при convergence ≤ p50.
+* никаких случайных spikes из-за GC/lock contention/alloc/sorting
 
-**Это твой “market microstructure telemetry”**, который потом должен стать частью safety‑guards (особенно в live).
+**C. Детерминированность**
 
----
+* одинаковый input stream → одинаковые решения
 
-## 1.3 Lead‑Lag signal (service level)
-
-Основной расчёт:
-
-**Спред:**
-`spread_bps = ((leader_price - lagger_price) / lagger_price) * 10_000`
-
-Проверяем 2 направления:
-
-* `bid_ask_bps = spread(primary.bid, hedge.ask)`
-* `ask_bid_bps = spread(hedge.bid, primary.ask)`
-* `spread_bps = max(bid_ask_bps, ask_bid_bps)`
-
-**Направление:**
-
-* LONG lagger, если `bid_ask_bps >= ask_bid_bps`
-* иначе SHORT lagger
-
-**Гейт по лидерству (после offset‑коррекции):**
-сигнал допустим только если
-`primary_corrected_ts >= hedge_corrected_ts`
-
-**Entry condition:**
-`spread_bps >= min_entry_spread_bps`
+И это достижимо.
 
 ---
 
-## 1.4 ShadowTrader: вход/выход, pnl, причины
+# 1) Архитектура: разнести проект на 3 “плоскости”
 
-Это важно, потому что *вся гонка и портфели питаются именно shadow‑сделками*.
+Это главный шаг, который превращает “массу” в продукт.
 
-### Entry (baseline gap model)
+## 1.1 Hot Path (Data Plane)
 
-**Baseline по окну:**
+Только:
 
-* `baseline_ask_gap_bps = mean((binance_ask - gate_ask)/gate_ask * 10_000)`
-* `baseline_bid_gap_bps = mean((gate_bid - binance_bid)/gate_bid * 10_000)`
+* приём WS кадров,
+* парсинг минимально нужных полей,
+* обновление in‑memory market state,
+* расчёт signal/risk gates,
+* генерация order intent,
+* отправка в execution pipe.
 
-**Текущий сигнал (отклонение от baseline):**
+**Правило:** в hot path не должно быть:
 
-* `long_signal_bps = current_ask_gap_bps - baseline_ask_gap_bps`
-* `short_signal_bps = current_bid_gap_bps - baseline_bid_gap_bps`
+* SQLite
+* Axum/UI
+* JSON pretty / serde больших структур
+* аллокаций строк
+* локов между потоками
 
-**Entry trigger:**
-`signal_bps >= spike_threshold_bps`
+## 1.2 Warm Path (Control Plane)
 
-**Spread filter:**
-`gate_spread_bps <= max_spread_bps`
+* агрегаты статистики (твои candidate metrics, portfolio race),
+* 2‑минутные ребалансы портфелей,
+* API/UI read‑model,
+* snapshot/restore,
+* логирование/метрики.
 
-### Exit
+Warm path может быть async, может писать в DB, может быть “удобным”.
 
-Unrealized bps:
+## 1.3 Cold Path (Research / Orchestration)
 
-* long: `((gate.bid - entry)/entry)*10_000`
-* short: `((entry - gate.ask)/entry)*10_000`
+* Ray/ASHA, grid search, офлайн аналитика,
+* тяжёлые вычисления, “вектора”, таблички.
 
-Breakeven activation:
-
-* `breakeven_threshold_bps = spike_bps * target_ratio`
-* активировать если `unrealized >= threshold`
-
-После breakeven:
-
-* exit breakeven если `unrealized <= 0`
-* trailing_take если `unrealized <= peak_unrealized * trailing_decay_ratio`
-* timeout если `hold_ms > max_hold_ms`
-
-До breakeven:
-
-* stop_loss если `unrealized <= -stop_loss_bps`
-* timeout иначе
-
-**Closed pnl (важно: pnl_pct в процентах):**
-
-* `raw_return = (exit-entry)/entry` (со знаком направления)
-* `fees = 2 * taker_fee`
-* `pnl_pct = (raw_return - fees) * 100`
+Python тут **уместен**. Но он **не должен участвовать** в runtime.
 
 ---
 
-## 1.5 ShadowFleet: окна + score + gate + prune
+# 2) HFT‑пайплайн (checkpoints), который реально выведет в forward‑product
 
-Окна: 1h / 6h / 24h, экспоненциальное затухание:
-
-`decay = exp(-dt_ms / horizon_ms)`
-`state *= decay`
-
-Метрики окна:
-
-* `avg_pnl_pct = pnl_sum_pct / trades`
-* `win_rate_pct = wins / trades * 100`
-* `stop_loss_share_pct = stop_loss_trades / trades * 100`
-
-**Score (frozen phase‑0):**
-
-```
-score =
-  1.0 * (avg_pnl_6h / 100)
-  + 0.20 * (win_rate_6h / 100)
-  - 0.50 * (stop_loss_share_6h / 100)
-```
-
-**Gate:**
-
-* `trades_6h >= 5`
-* `avg_pnl_6h > 0`
-* `stop_loss_share_6h <= 55%`
-
-**Prune:**
-
-* если `session_trades >= 30` и `avg_pnl_pct < -0.05` → disable
-* если `session_trades == 0` и прошло ≥ 10 минут → disable
+Я дам “чекпоинты” в твоём стиле: каждый — измеримый, тестируемый.
 
 ---
 
-## 1.6 Portfolio runtime: кандидаты → shortlist → ranking → active + cooldown
+## HFT‑CP0: Latency & Allocation Observatory
 
-**Кандидатная история** агрегируется из trades:
+**Цель:** перестать “чувствовать”, начать измерять.
 
-* `closed_trades = COUNT(*)`
-* `profitable_trades = SUM(pnl_pct > 0)`
-* `losing_trades = SUM(pnl_pct < 0)`
-* `pnl_sum_pct = SUM(pnl_pct)`
-* `first_trade_ts_ms = MIN(entry_ts_ms)`
+### Что сделать
 
-**Производные:**
+1. Поставить таймстампы на этапах:
 
-* `useful_winrate = profitable_trades / closed_trades`
-* `pm_raw = profitable_trades - losing_trades`
-* `avg_pnl_pct = pnl_sum_pct / closed_trades`
+* `recv_ws_frame_ts`
+* `parsed_ts`
+* `state_updated_ts`
+* `signal_decided_ts`
+* `order_intent_enqueued_ts`
 
-**Eligibility gate:**
+2. Добавить гистограммы (p50/p95/p99/max) **внутренней** задержки:
 
-* возраст > 5 минут
-* `closed_trades > 5`
-* `useful_winrate >= 0.30`
-* `avg_pnl_pct >= 0`
+* ingest latency
+* decision latency
+* end‑to‑end internal
 
-**Ranking tuple (desc):**
+3. Добавить счётчики:
 
-1. `useful_winrate`
-2. `pm_raw`
-3. `avg_pnl_pct`
-4. `closed_trades`
-5. `symbol` (tie‑break)
+* dropped WS messages (у тебя уже есть на коннекторе)
+* dropped batches DB
+* backlog depth каналов
 
-**Cooldown/reset:**
+### Acceptance
 
-* fast trigger: `stop_loss_streak >= 5 within 120_000 ms`
-* persistent: `stop_loss_streak >= 6`
-* `cooldown_until = ts_ms + 300_000`
-
-**Scheduler cadence:**
-
-* tick every 120_000 ms
-* rebalance allowed если `now - last_rebalance >= 120_000`
+* ты можешь открыть одну страницу/эндпойнт и увидеть **p99 internal** + drop rates
+* ты можешь сравнить “до/после” каждого следующих CP
 
 ---
 
-## 1.7 API/UI read-model
+## HFT‑CP1: Убить `String`/аллоцирование символов в hot path
 
-* `/health` ok, feeds alive
-* `/api/v1/portfolio/active` — отдаёт состояния (сейчас A/B, надо сделать динамически)
-* UI читает портфели и их метрики
+Сейчас у тебя в нескольких местах в горячем цикле идёт:
 
----
+* `String::from_utf8_lossy(...).to_string()`
+* `Vec<String>` + `sort_unstable()` + `dedup()`
+* `HashMap<String, BookTicker>`
 
-# 2) Теперь “прогоняем” delivery‑подход по твоему Roadmap
+**Это HFT‑убийца №1.**
 
-Твой Roadmap уже хорошо сформулирован как milestone‑план. Я добавлю то, чего обычно не хватает, чтобы резко сократить время:
-**контракты + инварианты из математики + тест‑матрица.**
+### Точка атаки (по твоему коду)
 
----
+* `src/application/services/lead_lag.rs`
 
-# Checkpoint 1 — Race‑Ready Portfolios (major)
+  * `update_primary_book/update_hedge_book`: сейчас конвертит символ в `String` и пишет в `RwLock<HashMap<String,...>>`
+* `src/event_loop_ingest.rs`
 
-Цель CP1 в терминах процессинга:
+  * `updated_symbols_from_batch`: собирает `Vec<String>`, сортит, дедупит
+* `src/event_loop_core.rs`
 
-> Мы хотим, чтобы стадия **1.6 Portfolio runtime** стала **N‑портфельной**, где каждый портфель строит свой shortlist/ranking, но стадия “выбор active” соблюдает глобальный constraint **no‑overlap** между портфелями.
+  * собираешь `ticks: Vec<_> = ... .cloned().collect()` по всем `strategy_symbols`
 
-И при этом **ничего не меняем** в математике сигналов/пнл/скоринга (CP0 baseline lock).
+### Как правильно (минимальная архитектурная версия)
 
----
+Ввести **SymbolId** (u16/u32) и universe mapping.
 
-## CP1.1 — Dynamic Portfolio Count (backend contract)
+**Universe (cold/warm):**
 
-### Что реально нужно сделать (по слоям)
+* `Vec<Arc<str>> id_to_symbol`
+* `HashMap<Arc<str>, SymbolId>` или лучше `hashbrown`/`fxhash` (cold path ok)
 
-#### A) Контракт конфигурации (источник истины)
+**Hot path:** таскает только `SymbolId`.
 
-Сделай явную структуру:
+**Market state:** `Vec<BookState>` по `SymbolId`, а не HashMap.
 
-* `portfolios: [ { id, params… } ]`
+### Acceptance
 
-Даже если сейчас у портфелей одинаковые параметры, это важно, потому что:
-
-* количество портфелей меняется без перекомпиляции;
-* появляется “ключ” для сегментации данных и состояния.
-
-#### B) Модель состояния runtime
-
-Заменить A/B на:
-
-* `HashMap<PortfolioId, PortfolioState>` или `Vec<PortfolioState>` с явным `id`.
-
-**Состав PortfolioState минимально:**
-
-* `id`
-* `shortlist: Vec<Candidate>`
-* `active: Vec<ActiveSymbol>` (или `Option<ActiveSymbol>`)
-* `guards/cooldown`
-* `last_rebalance_ts`
-* `metrics snapshot`
-
-#### C) API контракт
-
-`/api/v1/portfolio/active` должен возвращать список, а не фиксированные поля.
-
-**Хороший признак “контракт‑фёрст”:**
-если фронт может отрендерить 1/2/7 портфелей **без правок**, значит контракт норм.
-
-#### D) Persistence snapshot compatibility
-
-Тебе нужен **версионированный snapshot**:
-
-* `SnapshotV1 { A:…, B:… }`
-* `SnapshotV2 { portfolios: [...] }`
-
-С миграцией V1 → V2:
-
-* A → portfolios[0], B → portfolios[1]
-* остальные пустые/дефолт
-
-### Exit criteria (как у тебя) + инженерные инварианты
-
-* меняем число портфелей в конфиге → без перекомпиляции → runtime поднимается
-* `/api/v1/portfolio/active` возвращает **ровно N** портфелей
-
-**Инварианты (тестируемые):**
-
-* `portfolio_id` уникален
-* snapshot restore не теряет cooldown/active/last_rebalance_ts
-
-### Тест‑набор
-
-1. **Config test:** 1,2,5 портфелей → корректный парсинг, уникальность id.
-2. **API contract test:** ответ — массив портфелей, schema стабильна.
-3. **Snapshot migration test:** V1 → V2 сохраняет эквивалентность A/B.
+* в профиле на hot path исчезают `alloc::string::String`, `from_utf8_lossy`, `sort_unstable`
+* количество аллокаций на тик ≈ 0
 
 ---
 
-## CP1.2 — Independent Coin Race per Portfolio + no-overlap active
+## HFT‑CP2: Убрать `RwLock/Mutex` из стратегии и книги
 
-Это самый “математически насыщенный” кусок CP1, потому что тут важно **не разломать ranking/gates/cooldown**, и сделать алгоритм активов строго воспроизводимым.
+Сейчас `LeadLagStrategy` держит books и clock offsets в `Arc<RwLock<...>>` и `Arc<Mutex<...>>`. Даже если contention маленький — это **джиттер**.
 
-### Ключевой вопрос: “откуда берётся независимость?”
+### Правильная модель для HFT
 
-Независимость shortlist/ranking по портфелям означает:
+**Один thread = один владелец market state.**
+Feed‑таски только пушат события в lock‑free очередь.
 
-> Метрики кандидата `(useful_winrate, pm_raw, avg_pnl_pct, closed_trades, age)` должны считаться **в разрезе портфеля**, а не глобально.
+Схема:
 
-То есть агрегатор из п.1.6 должен стать:
+* Thread A (Binance feed) → `SPSC ringbuffer`
+* Thread B (Gate feed) → `SPSC ringbuffer`
+* Thread C (Strategy engine) читает из обоих ringbuffers, обновляет state, решает сигналы
 
-* было: `GROUP BY symbol`
-* стало: `GROUP BY (portfolio_id, symbol)`
-  (или эквивалентно через mapping config→portfolio)
+Execution может быть:
 
-### Практический способ сегментации (без усложнения)
+* в том же thread (если не блокирует),
+* или отдельный thread D через SPSC.
 
-Нужно обеспечить одно из двух (любой вариант ок, выбирай по реальности кода):
+### Acceptance
 
-**Вариант 1 (чище):**
-в момент записи trade добавляешь `portfolio_id` в trade record.
-Тогда DB‑агрегация простая: `GROUP BY portfolio_id, symbol`.
-
-**Вариант 2 (минимально инвазивный):**
-если trade уже содержит `config_id`, и есть таблица/маппинг `config_id → portfolio_id`, то агрегацию можно делать join’ом.
-
-> Важно: для CP1 тебе не нужно идеальное хранилище — тебе нужно, чтобы **ranking per portfolio** реально считался отдельно.
-
-### Как формируется shortlist per portfolio (по твоей математике)
-
-Для каждого портфеля `p`:
-
-1. берём кандидатов `(symbol)` с агрегированной историей портфеля
-2. считаем:
-
-   * `useful_winrate = profitable/closed`
-   * `pm_raw = profitable - losing`
-   * `avg_pnl_pct = pnl_sum/closed`
-   * `age_minutes = (now - first_trade_ts)/60_000`
-3. применяем eligibility gate:
-
-   * age > 5
-   * closed > 5
-   * useful_winrate ≥ 0.30
-   * avg_pnl_pct ≥ 0
-4. сортируем по ranking tuple (desc)
-
-Shortlist = top‑K (K из конфига), **но** shortlist может содержать пересечения по символам между портфелями — это не запрещено твоими acceptance.
-
-### Как выбрать active без overlap (детерминированно)
-
-В CP1 лучше не изобретать оптимизационные алгоритмы, а сделать **простой, воспроизводимый allocator**, который:
-
-* гарантирует disjoint active sets,
-* стабильный по результатам (important для дебага),
-* легко тестируется.
-
-**Детерминированный greedy allocator:**
-
-1. задаём порядок портфелей (например, `sort by portfolio_id` — стабильный)
-2. идём по портфелям, каждому выдаём первые N символов из shortlist, которые:
-
-   * не на cooldown у этого портфеля
-   * ещё не заняты другим портфелем в этом rebalance‑цикле
-
-Псевдологика:
-
-* `taken_symbols = {}`
-* для каждого `p`:
-
-  * `active[p] = []`
-  * for cand in shortlist[p]:
-
-    * если `cand.symbol ∉ taken_symbols` и `cand` не на cooldown → берем
-    * добавляем в `taken_symbols`
-    * пока не набрали лимит слотов
-
-**Пограничные случаи (обязательно прописать заранее):**
-
-* если портфель не может набрать ни одного уникального символа → `active пуст` (и это ок)
-* если N портфелей > уникальных символов → неизбежны пустые портфели, это ожидаемо
-* tie‑break уже есть (`symbol` lexicographic), плюс порядок портфелей фиксирован → воспроизводимость полная
-
-### Exit criteria CP1.2
-
-* каждый портфель формирует **свой** shortlist (на своих данных)
-* active symbols не пересекаются между портфелями
-
-### Тест‑матрица (сильная, но недорогая)
-
-1. **Unit test ranking tuple:** на заранее заданных метриках сортировка совпадает с правилами.
-2. **Eligibility gate tests:** границы age/closed/winrate/avg_pnl.
-3. **Allocator property test:**
-
-   * вход: случайные shortlists
-   * утверждение: `intersection(active[p_i], active[p_j]) == ∅` для любых i≠j
-4. **Determinism test:** одинаковые входы → одинаковые active.
+* в hot path нет `RwLock::write().await` и `Mutex::lock()`
+* p99 internal резко стабилизируется (обычно именно locks дают хвосты)
 
 ---
 
-## CP1.3 — UI & Endpoint Adaptation
+## HFT‑CP3: Перестать “каждый тик прогонять весь universe”
 
-Ты уже правильно обозначил: UI должен “просто отрисовать список”.
+Сейчас ты местами делаешь:
 
-### Контракт, который реально удобен UI
+* собрал список `strategy_symbols`
+* по нему прошёлся
+* `collect().cloned()`
+* и по каждому вызвал async обработку
 
-Отдавай на портфель:
+Это не HFT. HFT — это **event‑driven**: пришёл апдейт по символу → обработай только его.
 
-* `id`
-* `shortlist: [{symbol, useful_winrate, pm_raw, avg_pnl_pct, closed_trades, cooldown_until?}]`
-* `active: [symbol...]`
-* `guards: {cooldown, stop_loss_streak, ...}`
-* `last_rebalance_ts`
-* плюс “KPI set” из текущего runtime (как у тебя в 11)
+### Как сделать
 
-### Exit criteria
+1. На ingest выставляй флаг “symbol updated”:
 
-* UI отображает все портфели из ответа
-* ничего не надо фиксить руками при смене N
+* `updated_bitset[symbol_id] = 1`
 
----
+2. В strategy tick ты берёшь **только** updated ids (и сбрасываешь)
+3. Обрабатываешь их
 
-## CP1.4 — Stabilization & Regression Sweep
+Bitset можно реализовать как:
 
-Тут важно покрыть именно то, что чаще всего ломается при переходе A/B → N:
+* `Vec<u64>` (супер быстро),
+* или готовый `fixedbitset`.
 
-**Регрессионные зоны:**
+### Acceptance
 
-* scheduler cadence (120s) не деградировал
-* cooldown/reset логика не “переехала” случайно на общий уровень
-* restore после рестарта возвращает N портфелей с корректными active/shortlist/cooldown
-* perf-smoke: сортировки/агрегации на N портфелей не съели цикл
-
-**Exit criteria:** как у тебя.
+* CPU загрузка ≈ пропорциональна реальному числу апдейтов, а не размеру вселенной
+* уменьшается tail latency при больших universes
 
 ---
 
-# Checkpoint 2 — Promotion & Bot Runtime (операционный режим без денег)
+## HFT‑CP4: Парсинг WS: “минимум полей, минимум копий”
 
-Теперь мы используем твою математику так, чтобы “гонка” стала источником правды для запуска execution loops.
+Ты уже используешь быстрые экстракторы и `fast-float`. Это хорошо.
+Но сейчас местами ты копируешь строки (`Bytes::copy_from_slice`) и гоняешь лишнее.
 
-## CP2.0 Ключевая формализация: что такое “winner”
+### Принцип
 
-Требование: “формально и воспроизводимо”.
+* В hot path парсишь только то, что нужно: bid/ask/ts/symbol
+* Symbol не копируешь → маппишь в `SymbolId` и забываешь строку
+* Цены сразу в ticks (у тебя уже)
 
-Я бы зафиксировал так (в рамках твоих текущих формул):
+### Acceptance
 
-### Winner per portfolio = (symbol, config_id)
-
-1. `symbol` выбирается из `active[p]` (результат CP1, уже no‑overlap)
-2. `config_id` выбирается по ShadowFleet внутри этого портфеля/символа:
-
-   * кандидатные конфиги: те, что проходят gate:
-
-     * trades_6h ≥ 5
-     * avg_pnl_6h > 0
-     * stop_loss_share ≤ 55%
-   * выбираем max `score` (твой frozen score)
-   * tie‑break: стабильный (например, `config_id`)
-
-Это полностью соответствует твоему математическому стеку и не добавляет новую “философию”.
-
-## CP2.1 Portfolio → Bot runtime (1:1 loop)
-
-* на каждый портфель создаётся отдельный execution loop
-* режим пока paper (или shadow→paper), но с реальными order intents и обработкой ошибок/рестартов
-
-## CP2.2 Winner switch без поломки ingestion/метрик
-
-Требование “переключение winner не ломает shadow ingestion и метрики” = строго:
-
-* shadow ingestion продолжает писать trades/metrics в те же структуры
-* execution loop “подписан” на winner state и меняет активный (symbol, config) атомарно
-
-**Тесты:**
-
-* переключение winner во время работы цикла не приводит к панике, не ломает API
-* метрики до/после переключения остаются консистентны
-
-## CP2.3 Health/restart policy per bot
-
-В API:
-
-* `/api/v1/portfolio/{id}/health` (или в общем списке)
-* состояние loop: last_tick, last_feed_event, errors, reconnects
-
-**Инварианты:**
-
-* падение одного портфельного loop не роняет остальные
-* restart не сбрасывает глобальные состояния shadow fleet
+* на профиле парсинг не доминирует
+* нет “копируем символ bytes” в горячем пути
 
 ---
 
-# Checkpoint 3 — Capital Rebalance + Live (финал)
+## HFT‑CP5: Детеминированный Replay Harness
 
-Здесь “математика + бизнес‑логика” становится про деньги и безопасность. Ты уже правильно ставишь “live поверх проверенного paper/shadow”.
+Это *must*, иначе ты будешь бесконечно “эволюционно дебажить”.
 
-## CP3.1 Allocation/reallocation policy (минимально жизнеспособная, но строгая)
+### Что сделать
 
-Тебе нужна политика, которая:
+1. Пишешь “raw feed recorder”: сохраняешь входные WS кадры + recv_ts
+2. Делаешь офлайн “replay mode”:
 
-* использует уже имеющиеся метрики (не требует новой науки)
-* сглаживает шум (иначе будет churn)
-* имеет hard limits
+* читает лог
+* прогоняет через тот же engine
+* сравнивает решения/сделки
 
-### Простой вариант (под твои метрики)
+### Acceptance
 
-Для каждого портфеля считаем **portfolio_score** на основе его текущего winner/config:
-
-Например:
-
-* берём тот же `score` ShadowFleet (6h) победителя
-* если gate не пройден → score=0
-
-Дальше:
-
-* `w_i = max(0, score_i)`
-* если `sum(w)=0` → всё в cash/или равномерно минимумами
-* иначе `alloc_i_target = w_i / sum(w)`
-
-Сглаживание (чтобы не дергаться):
-
-* `alloc_i_new = (1-α)*alloc_i_old + α*alloc_i_target`
-  где α маленький (0.05–0.2)
-
-Hard bounds:
-
-* `alloc_i_min`, `alloc_i_max`
-* turnover limit per rebalance
-
-## CP3.2 Live safety-guards (встроенные в твой pipeline)
-
-У тебя уже есть сильные зачатки safety:
-
-* drift outlier guard
-* leadership gate
-* stop_loss_streak triggers + cooldown
-* max_hold_ms/timeouts
-
-Для live их надо поднять на уровень “kill conditions”:
-
-**Примеры условий стопа, напрямую из твоих метрик:**
-
-* если `lag_ms` (p50) выше порога → выключить входы
-* если offset/drift часто None/outlier → пауза
-* если `stop_loss_streak` триггерит fast/persistent → disable symbol/portfolio
-* если `early_stop_churn` слишком высок → disable config
-
-## CP3.3 Runbook rollback/disable
-
-Требование “до уровня портфеля и символа” означает:
-
-* флаг disable portfolio
-* флаг disable symbol per portfolio
-* флаг disable config_id (у тебя уже есть prune/disable configs)
-
-И это должно работать без redeploy (через конфиг/DB‑флаг/админ‑endpoint).
+* любой баг воспроизводим локально
+* любой performance regression ловится на replay бенчмарке
 
 ---
 
-# 3) Суперкоротко: “идеальный” порядок реализации по твоему CP1 (чтобы не жрало время)
+## HFT‑CP6: Execution fast path (forward product)
 
-1. **CP1.1:** вводишь `PortfolioId` как первоклассную сущность в runtime/API/snapshot
-2. **CP1.2:** сегментируешь candidate history по `portfolio_id` + вводишь allocator no-overlap
-3. **CP1.3:** UI читает список портфелей, фронт становится “data-driven”
-4. **CP1.4:** регрессия: scheduler/cooldown/restore/perf-smoke
+Если ты реально хочешь “HFT‑форвард”, execution тоже должен быть отдельным контуром:
 
-И только потом CP2/CP3.
+* очередь `OrderIntent` из стратегии
+* минимальная сериализация/подпись
+* connection reuse
+* строгие таймауты
+* kill‑switch
+
+**Важно:** даже если order placement через REST, ты можешь:
+
+* держать keep‑alive,
+* убрать лишние JSON roundtrips,
+* делать “fire-and-track” асинхронно,
+* не блокировать strategy thread.
+
+### Acceptance
+
+* генерация intent не блокируется сетевыми вызовами
+* есть чёткие SLA по “intent enqueue → sent” (внутренние)
 
 ---
 
-Если хочешь, я могу на следующем шаге сделать максимально прикладно и “как для PR”:
+## HFT‑CP7: Продуктовая эксплуатация (что делает это “системой”)
 
-* выписать **точные контракты JSON** для `/api/v1/portfolio/active` (schema + пример payload),
-* описать **миграцию snapshot V1→V2**,
-* и дать **детерминированный алгоритм no-overlap** в виде псевдокода + набор тестов (Given/When/Then) под твои gate/ranking/cooldown.
+Это то, что превращает твой CP6 в “forward product”, а не в игрушку:
+
+* watchdog per component (feed/engine/execution/dbwriter)
+* snapshot/restore **идемпотентный** (без double count и без silent loss)
+* алерты на:
+
+  * drift spikes
+  * message drop rate
+  * stalled engine loop
+  * backlog depth
+* runbook: “что делать, если …”
+
+---
+
+# 3) Самые сильные “быстрые победы” прямо по твоему текущему коду
+
+Если делать приоритетами, то вот тройка, которая даст максимальный эффект:
+
+## (1) Убрать `String` из `LeadLagStrategy`
+
+В `lead_lag.rs`:
+
+* сейчас: `HashMap<String, BookTicker>` + `String::from_utf8_lossy`
+* должно стать: `Vec<BookTicker>` или `Vec<Option<BookTicker>>` по `SymbolId`
+
+## (2) Убрать `collect().cloned()` на каждом tick
+
+В `event_loop_core.rs` ты собираешь `Vec` тиков пачкой и клонируешь.
+HFT‑версия: обработка только `updated_symbol_ids`.
+
+## (3) Убрать сортировки `Vec<String>` в ingest
+
+`updated_symbols_from_batch` — это заметная нагрузка и джиттер.
+Замена: `SmallVec<SymbolId>` + линейный дедуп (или bitset).
+
+---
+
+# 4) Про “питон и вектора”: как правильно, чтобы не мешал HFT
+
+Ты хочешь скорость — но **не надо убивать Python везде**.
+
+Правильная схема:
+
+* **Python/Ray** остаётся как “офлайн тренажёр/оркестратор”
+  → генерит конфиги/пороговые значения/портфельные правила
+  → пишет артефакты (json/toml)
+* **Rust runtime** читает эти артефакты и торгует
+  (без участия Python процесса)
+
+“Вектора” (numpy/polars) нужны:
+
+* для бектеста/пересчётов/аналитики
+* для построения гиперпараметров
+* для исследований
+
+Но HFT‑online чаще всего **event-driven**, не vectorized.
+
+---
+
+# 5) Что бы я сделал “первым PR”, чтобы ты сразу почувствовал, что это становится HFT
+
+Не переписывать всё. Один “сквозной” PR:
+
+1. Ввести `SymbolId` и `Universe`
+2. Перевести market books в `Vec` по `SymbolId`
+3. Перевести updated symbols на bitset/vec ids
+4. Убрать `RwLock/Mutex` из `LeadLagStrategy`: сделать один owner thread
+5. Добавить latency histograms (CP0)
+
+**Эффект:** ты сразу увидишь, что “масса” превращается в engine.
+
+---
+
+Если хочешь — я могу прямо следующим сообщением:
+
+* накидать **конкретную целевую структуру модулей/крейтов** (hft-core / connectors / engine / control-plane),
+* и выписать **точный список замен по файлам** (типа: `lead_lag.rs` -> убрать locks, `event_loop_*` -> перейти на ids, `symbols.rs` -> новая модель),
+* плюс предложить формат “replay log” и как его встроить так, чтобы потом это стало твоим главным тестовым стендом.
