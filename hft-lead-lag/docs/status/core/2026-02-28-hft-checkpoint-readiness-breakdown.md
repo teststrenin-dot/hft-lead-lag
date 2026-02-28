@@ -68,13 +68,14 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 1. Done and not touched:
    - Fast float parsing and tick conversion.
    - Symbol cache now interns raw byte keys/values directly (`Vec<u8> -> Bytes`) without UTF-8 fallback conversion.
-   - Dynamic extractor wrappers with `format!` (`extract_json_*_field(field: &str)`) are now test-only (`#[cfg(test)]`), keeping runtime on pattern-based extractors.
+   - Runtime parse paths are pattern-based; dynamic wrapper APIs remain for compatibility but are not used on hot path.
+   - Binance/Gate `parse_book_ticker_static` now assign `strategy_symbol_id` directly during parse (no post-parse attach step).
 2. Done but must be reworked:
-   - Generic extractors using repeated `format!`.
-   - Remaining byte-copy points in parse path still require profiling and targeted elimination.
+   - Generic extractors using repeated `format!` still exist as compatibility helpers.
+   - Remaining byte-copy points in parse path still require profiling-backed elimination.
 3. Missing and required:
-   - Symbol mapping to `SymbolId` with minimal copy overhead.
-   - Specialized hot parse path for required fields only.
+   - Profile evidence for dominant remaining parse/copy hotspots.
+   - Final targeted cleanup to reach CP4 exit gate.
 
 ## `HFT-CP5` Deterministic Replay Harness
 1. Done and not touched:

@@ -13,7 +13,7 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 
 use crate::domain::{
-    build_strategy_symbol_id_map, symbols::SymbolCache, BookTicker, ExchangeError, ExchangeId,
+    build_strategy_symbol_id_pairs, symbols::SymbolCache, BookTicker, ExchangeError, ExchangeId,
     ExchangeResult, MarketDataStream, StrategySymbolIdCapacityError, SubscriptionId, SymbolId,
     Trade,
 };
@@ -97,7 +97,7 @@ pub struct BinanceMarketData {
     /// Receiver for incoming messages
     msg_rx: Option<mpsc::Receiver<StampedBytes>>,
     symbol_cache: SymbolCache,
-    strategy_symbol_ids: std::collections::HashMap<bytes::Bytes, SymbolId>,
+    strategy_symbol_ids: std::collections::HashMap<Vec<u8>, SymbolId>,
     next_subscription_id: SubscriptionId,
 }
 
@@ -117,20 +117,12 @@ impl BinanceMarketData {
         &mut self,
         strategy_symbols: &[String],
     ) -> Result<(), StrategySymbolIdCapacityError> {
-        self.strategy_symbol_ids = build_strategy_symbol_id_map(strategy_symbols)?;
+        let pairs = build_strategy_symbol_id_pairs(strategy_symbols)?;
+        self.strategy_symbol_ids = pairs
+            .into_iter()
+            .map(|(symbol, symbol_id)| (symbol.to_vec(), symbol_id))
+            .collect();
         Ok(())
-    }
-
-    fn attach_strategy_symbol_id(&self, ticker: BookTicker) -> BookTicker {
-        Self::attach_strategy_symbol_id_with_map(ticker, &self.strategy_symbol_ids)
-    }
-
-    fn attach_strategy_symbol_id_with_map(
-        ticker: BookTicker,
-        strategy_symbol_ids: &std::collections::HashMap<bytes::Bytes, SymbolId>,
-    ) -> BookTicker {
-        let symbol_id = strategy_symbol_ids.get(&ticker.symbol).copied();
-        ticker.with_strategy_symbol_id(symbol_id)
     }
 
     /// Drain all pending book ticker messages, returning only the latest per symbol.
@@ -139,16 +131,16 @@ impl BinanceMarketData {
             Some(rx) => rx,
             None => return Vec::new(),
         };
-        let strategy_symbol_ids = &self.strategy_symbol_ids;
         let mut latest: std::collections::HashMap<bytes::Bytes, BookTicker> =
             std::collections::HashMap::new();
         while let Ok((data, recv_ts_ns)) = rx.try_recv() {
             if contains_bytes(&data, EVENT_BOOK_TICKER) {
-                if let Some(ticker) =
-                    Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns)
-                {
-                    let ticker =
-                        Self::attach_strategy_symbol_id_with_map(ticker, strategy_symbol_ids);
+                if let Some(ticker) = Self::parse_book_ticker_static(
+                    &data,
+                    &self.symbol_cache,
+                    &self.strategy_symbol_ids,
+                    recv_ts_ns,
+                ) {
                     latest.insert(ticker.symbol.clone(), ticker);
                 }
             }
@@ -200,9 +192,11 @@ impl BinanceMarketData {
     fn parse_book_ticker_static(
         data: &[u8],
         symbol_cache: &SymbolCache,
+        strategy_symbol_ids: &std::collections::HashMap<Vec<u8>, SymbolId>,
         local_ts_ns: i64,
     ) -> Option<BookTicker> {
         let symbol = extract_json_string_field_ref_by_pattern(data, FIELD_S)?;
+        let symbol_id = strategy_symbol_ids.get(symbol).copied();
         let bid_price = extract_json_string_field_ref_by_pattern(data, FIELD_BID_PRICE)
             .and_then(price_to_ticks)?;
         let bid_qty =
@@ -215,15 +209,18 @@ impl BinanceMarketData {
             .or_else(|| extract_json_i64_field_by_pattern(data, FIELD_EVENT_TS))
             .unwrap_or(0);
 
-        Some(BookTicker::new(
-            symbol_cache.intern_bytes(&symbol),
-            bid_price,
-            ask_price,
-            bid_qty,
-            ask_qty,
-            exchange_ts_ms.saturating_mul(1_000_000),
-            local_ts_ns,
-        ))
+        Some(
+            BookTicker::new(
+                symbol_cache.intern_bytes(symbol),
+                bid_price,
+                ask_price,
+                bid_qty,
+                ask_qty,
+                exchange_ts_ms.saturating_mul(1_000_000),
+                local_ts_ns,
+            )
+            .with_strategy_symbol_id(symbol_id),
+        )
     }
 
     fn parse_trade_static(
@@ -533,10 +530,13 @@ impl MarketDataStream for BinanceMarketData {
                 .ok_or_else(|| ExchangeError::ConnectionClosed("Channel closed".into()))?;
 
             if contains_bytes(&data, EVENT_BOOK_TICKER) {
-                if let Some(ticker) =
-                    Self::parse_book_ticker_static(&data, &self.symbol_cache, recv_ts_ns)
-                {
-                    return Ok(self.attach_strategy_symbol_id(ticker));
+                if let Some(ticker) = Self::parse_book_ticker_static(
+                    &data,
+                    &self.symbol_cache,
+                    &self.strategy_symbol_ids,
+                    recv_ts_ns,
+                ) {
+                    return Ok(ticker);
                 }
             }
         }
@@ -604,23 +604,39 @@ mod tests {
             "T":1700000000000
         }"#;
 
-        let ticker = BinanceMarketData::parse_book_ticker_static(payload, &cache, 99)
-            .expect("ticker parses");
+        let strategy_symbol_ids = std::collections::HashMap::new();
+        let ticker =
+            BinanceMarketData::parse_book_ticker_static(payload, &cache, &strategy_symbol_ids, 99)
+                .expect("ticker parses");
         assert_eq!(ticker.symbol.as_ref(), b"BTCUSDT");
         assert_eq!(ticker.bid_qty_ticks, 150_000_000);
         assert_eq!(ticker.ask_qty_ticks, 200_000_000);
     }
 
     #[test]
-    fn attach_strategy_symbol_id_sets_preconfigured_mapping() {
+    fn parse_book_ticker_sets_preconfigured_strategy_symbol_id() {
         let mut market = BinanceMarketData::new();
         market
             .set_strategy_symbol_ids(&["BTCUSDT".to_string(), "ETHUSDT".to_string()])
             .expect("symbol-id map");
-        let ticker = BookTicker::new(bytes::Bytes::from_static(b"ETHUSDT"), 1, 2, 3, 4, 5, 6);
+        let payload = br#"{
+            "e":"bookTicker",
+            "s":"ETHUSDT",
+            "b":"2500.1",
+            "B":"1.0",
+            "a":"2500.2",
+            "A":"1.1",
+            "T":1700000000000
+        }"#;
 
-        let mapped = market.attach_strategy_symbol_id(ticker);
-        assert_eq!(mapped.strategy_symbol_id, Some(1));
+        let ticker = BinanceMarketData::parse_book_ticker_static(
+            payload,
+            &market.symbol_cache,
+            &market.strategy_symbol_ids,
+            7,
+        )
+        .expect("ticker parses");
+        assert_eq!(ticker.strategy_symbol_id, Some(1));
     }
 
     #[test]
@@ -633,10 +649,10 @@ mod tests {
                 "BTCUSDT".to_string(),
             ])
             .expect("symbol-id map");
-        let ticker = BookTicker::new(bytes::Bytes::from_static(b"BTCUSDT"), 1, 2, 3, 4, 5, 6);
-
-        let mapped = market.attach_strategy_symbol_id(ticker);
-        assert_eq!(mapped.strategy_symbol_id, Some(0));
+        assert_eq!(
+            market.strategy_symbol_ids.get(b"BTCUSDT".as_slice()),
+            Some(&0)
+        );
     }
 
     #[test]
