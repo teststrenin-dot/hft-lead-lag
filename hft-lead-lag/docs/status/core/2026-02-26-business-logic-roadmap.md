@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (core business process formalized with rule traceability)
+Last sync: 2026-02-28 (CP5/CP6 remediation hardening reflected)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -40,8 +40,8 @@ Last sync: 2026-02-28 (core business process formalized with rule traceability)
 | `HFT-CP2` Lock-Free Strategy State | `Completed` | Lead-lag strategy moved to single-owner state and sync `&mut self` runtime path; explicit event-loop queue boundary added for strategy updates; p99 evidence captured (`2026-02-28-cp2-lock-free-p99-evidence.md`). |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated flow is `Bytes`-based with no string-sort path; pending signal store migrated to `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue applies tickers directly without runtime cache-lookup clone; proof stored in `2026-02-28-cp3-updated-only-proof.md`. |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | Fast parsing exists; symbol cache interns raw bytes directly; runtime parse paths use pattern-based extractors with early `strategy_symbol_id` assignment in Binance/Gate; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse avoids redundant re-interning; profile baselines and parser-priority regression proof are captured in CP4 evidence doc. |
-| `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw-feed recorder is wired into WS ingest via opt-in env, offline replay determinism check is available via `REPLAY_RAW_FEED_PATH`, and replay profile harness is in evidence docs. |
-| `HFT-CP6` Execution Fast Path | `Completed` | Order intent queue, non-blocking `try_send` path, timeout/kill-switch contract, and intent->sent SLA telemetry are formalized (`2026-02-28-cp6-execution-fast-path-evidence.md`). |
+| `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw-feed recorder is wired into WS ingest via opt-in env, recorder now advances `seq` only after successful write+flush, connector wiring surfaces recorder errors, replay reader validates invalid JSON/out-of-order sequence, and concurrent monotonic-sequence safety is test-covered. |
+| `HFT-CP6` Execution Fast Path | `Completed` | Order intent queue uses non-blocking `try_send`, queue-depth drift race is fixed, full-queue path keeps latest intent per symbol, stale intents are dropped by max-age guard, timeout kill-switch now auto-recovers via cooldown, and intent->sent SLA telemetry remains formalized (`2026-02-28-cp6-execution-fast-path-evidence.md`). |
 | `HFT-CP7` Production Operations Layer | `Planned` | Watchdog/recovery/alert stack not closed. |
 
 ## Rule -> Code -> Test Matrix
@@ -72,15 +72,15 @@ Last sync: 2026-02-28 (core business process formalized with rule traceability)
 2. Active symbols per portfolio never exceed four and can be zero.
 3. Cooldown/guard behavior is deterministic and survives snapshot/restore.
 4. UI endpoints show paper race status without requiring live capital rebalance.
-5. Checkpoint evidence for CP0-CP4 is complete; CP5 has at least recorder/reader baseline.
+5. Checkpoint evidence for CP0-CP4 is complete; CP5/CP6 include post-review remediation evidence.
 
 ## Delivery sequence to production
 1. `HFT-CP0` delivered; optional baseline snapshot automation remains as non-blocking enhancement.
 2. `HFT-CP1` and `HFT-CP2` delivered (allocation and lock-jitter elimination).
 3. `HFT-CP3` delivered (updated-only execution path).
 4. `HFT-CP4` delivered (minimal-copy parse path).
-5. `HFT-CP5` delivered (deterministic replay for bugs and perf regression).
-6. `HFT-CP6` delivered (execution fast path and intent->sent SLA).
+5. `HFT-CP5` delivered and hardened (deterministic replay for bugs/perf regression + strict recorder semantics).
+6. `HFT-CP6` delivered and hardened (execution fast path, intent->sent SLA, overflow/stale/cooldown safeguards).
 7. Deliver `HFT-CP7` (operations hardening and deterministic recovery).
 
 ## Legacy continuity map

@@ -2,14 +2,14 @@
 
 Date: 2026-02-28
 Status: active
-Last sync: 2026-02-28 (CP6 execution fast path closed)
+Last sync: 2026-02-28 (CP5/CP6 remediation synced after review hardening)
 
 ## Purpose
 Single entry point for project status, checkpoint tracking, and operating constraints.
 
 ## Folder layout
 1. `core/` — only canonical strategy docs (exactly 3 files).
-2. `dynamics/` — checkpoints, implementation status, evidence, workflow, math model.
+2. `dynamics/` — checkpoints, implementation status, evidence, workflow, and evolving math model.
 
 ## Read order (canonical)
 1. `core/2026-02-27-business-objective-economic-control-map.md`
@@ -41,3 +41,4 @@ Single entry point for project status, checkpoint tracking, and operating constr
 1. Rust-only hot path is mandatory target architecture.
 2. Python/Ray is allowed only for offline/cold tasks and must not load the trading host CPU budget.
 3. Any status update must reference concrete `HFT-CP*` and code/test evidence.
+4. `project-math-model` stays in `dynamics` while thresholds/formulas are checkpoint-driven and still evolving; it moves to `core` only after final model freeze.

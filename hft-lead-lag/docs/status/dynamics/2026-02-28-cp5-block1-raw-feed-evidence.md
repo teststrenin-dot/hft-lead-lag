@@ -3,6 +3,7 @@
 Date: 2026-02-28
 Checkpoint: `HFT-CP5`
 Status: `Completed`
+Last remediation sync: 2026-02-28 (`fix(cp5-cp6): harden replay recorder and execution queue semantics`)
 
 ## Scope delivered
 1. Added `src/infrastructure/replay/raw_feed.rs`.
@@ -23,6 +24,12 @@ Status: `Completed`
    - deterministic round-trip preserves order and payload bytes.
    - invalid payload encoding is rejected as `InvalidData`.
    - deterministic replay yields stable signal trace for same input.
+8. Post-review hardening:
+   - recorder state switched to single mutex-guarded `{next_seq, writer}` critical section.
+   - `seq` now advances only after successful `to_writer + newline + flush` (no "phantom seq" on failed write).
+   - `record(...)` now returns `io::Result<()>` so connector wiring can surface write failures.
+   - replay reader now rejects invalid JSON lines and out-of-order sequence with contextual errors.
+   - concurrent recorder test validates monotonic `seq` under multithreaded writes.
 
 ## TDD evidence
 1. `RED`:
@@ -49,7 +56,15 @@ cargo test -q parse_book_ticker_for_replay_ignores_non_book_ticker_payload --man
 ```
 Result: `2 passed, 0 failed` (Binance + Gate).
 
-5. Replay benchmark harness (profiling only):
+5. Replay reader hardening tests:
+```bash
+cargo test -q replay_reader_rejects_invalid_json_line --manifest-path /root/turbo/hft-lead-lag/Cargo.toml
+cargo test -q replay_reader_rejects_out_of_order_sequence --manifest-path /root/turbo/hft-lead-lag/Cargo.toml
+cargo test -q concurrent_recording_keeps_monotonic_sequence --manifest-path /root/turbo/hft-lead-lag/Cargo.toml
+```
+Result: passed.
+
+6. Replay benchmark harness (profiling only):
 ```bash
 cargo test --release -q bench_replay_signal_trace_profile \
   --manifest-path /root/turbo/hft-lead-lag/Cargo.toml -- --ignored --nocapture --test-threads=1
@@ -84,6 +99,8 @@ cargo run
 
 ## CP5 exit assessment
 1. Recorder exists and is wired into live ingest path (opt-in).
-2. Replay mode exists and verifies deterministic signal trace equivalence.
-3. Benchmark harness exists for replay regression monitoring.
-4. CP5 is closed; CP6 execution fast path is now delivered.
+2. Recorder semantics are hardened: sequence monotonicity and write/flush success are coupled.
+3. Replay mode exists and verifies deterministic signal trace equivalence.
+4. Reader hard-fails malformed JSON and sequence-order violations with contextual errors.
+5. Benchmark harness exists for replay regression monitoring.
+6. CP5 is closed and hardened; CP6 execution fast path is delivered.

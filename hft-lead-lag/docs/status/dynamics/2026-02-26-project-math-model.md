@@ -1,10 +1,11 @@
 # Project Math Model — HFT Lead-Lag
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (CP4 parse-path and early symbol-id assignment updates)
+Last sync: 2026-02-28 (CP6 intent-age and queue/kill-switch remediation reflected)
 Scope: математика и формулы, реально используемые в runtime.
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
+Placement rationale: документ находится в `dynamics`, потому что формулы/пороги здесь привязаны к checkpoint-этапам и могут меняться до финального freeze; после freeze переносится в `core`.
 
 ## Strategic Math Targets (Control Plane)
 These targets align math with business objective (risk-adjusted return under constrained capital).

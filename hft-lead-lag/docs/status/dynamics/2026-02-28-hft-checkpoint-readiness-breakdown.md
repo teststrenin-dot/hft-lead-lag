@@ -96,8 +96,13 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
      - `main` enables recording via `RAW_FEED_RECORD_PATH`.
    - Offline replay mode:
      - `main` runs deterministic replay check when `REPLAY_RAW_FEED_PATH` is set.
+   - Post-review hardening:
+     - recorder now updates `seq` only after successful write+flush inside one mutex-protected recorder state.
+     - connector record path now handles and logs recorder IO errors (`io::Result<()>`) instead of silent drop.
+     - replay reader rejects malformed JSON lines and out-of-order sequence with contextual `InvalidData`.
+     - concurrent monotonic-sequence stress test is added for recorder safety.
 2. Done but must be reworked:
-   - Recorder currently flushes per frame for reliability-first baseline; batching can be optimized later if needed.
+   - None.
 3. Missing and required:
    - None.
    - Optional: add richer replay diff report for first divergence context.
@@ -109,6 +114,11 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
    - Async execution worker with strict timeout and kill-switch timeout-streak contract.
    - `/health` exposes execution queue depth, sent/dropped/timeout counters, kill-switch state, and intent->sent latency snapshot.
    - Evidence is captured in `docs/status/dynamics/2026-02-28-cp6-execution-fast-path-evidence.md`.
+   - Post-review hardening:
+     - queue-depth accounting now reserves before send and decrements on consume/failure, removing producer-consumer drift.
+     - full queue now stores latest overflow intent per symbol and drains overflow lane in worker.
+     - stale-intent max-age guard drops outdated intents before send path.
+     - kill-switch recovers automatically after cooldown timer.
 2. Done but must be reworked:
    - None.
 3. Missing and required:
