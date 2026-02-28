@@ -4,6 +4,7 @@
 //! Reference: https://www.gate.io/docs/developers/futures/ws/en/
 
 use bytes::Bytes;
+use memchr::memmem;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,8 +22,8 @@ use crate::domain::{
 };
 use crate::infrastructure::exchanges::common::{
     contains_bytes, extract_json_bool_field_by_pattern, extract_json_i64_field_by_pattern,
-    extract_json_string_field_ref_by_pattern, now_ns, price_to_ticks, qty_to_ticks, timestamp_ms,
-    timestamp_sec, HmacSha512, StampedBytes,
+    extract_json_string_field_ref_by_pattern, now_ns, parse_i64, price_to_ticks, qty_to_ticks,
+    timestamp_ms, timestamp_sec, HmacSha512, StampedBytes,
 };
 
 /// Gate.io Futures WebSocket endpoint
@@ -218,10 +219,7 @@ impl GateMarketData {
         parent_pattern: &[u8],
         field_pattern: &[u8],
     ) -> Option<i64> {
-        if let Some(parent_pos) = data
-            .windows(parent_pattern.len())
-            .position(|w| w == parent_pattern)
-        {
+        if let Some(parent_pos) = memmem::find(data, parent_pattern) {
             let start = parent_pos + parent_pattern.len();
             if let Some(brace_pos) = data[start..].iter().position(|&b| b == b'{') {
                 let obj_start = start + brace_pos;
@@ -231,10 +229,7 @@ impl GateMarketData {
                     .unwrap_or(data.len() - obj_start);
                 let obj_data = &data[obj_start..obj_start + search_end];
 
-                if let Some(field_pos) = obj_data
-                    .windows(field_pattern.len())
-                    .position(|w| w == field_pattern)
-                {
+                if let Some(field_pos) = memmem::find(obj_data, field_pattern) {
                     let mut num_start = obj_start + field_pos + field_pattern.len();
                     for &b in &data[num_start..] {
                         if b == b':' || b == b' ' || b == b'"' {
@@ -243,7 +238,14 @@ impl GateMarketData {
                         }
                         let num_end = data[num_start..]
                             .iter()
-                            .position(|&b| !b.is_ascii_digit() && b != b'.' && b != b'-')
+                            .position(|&b| {
+                                !b.is_ascii_digit()
+                                    && b != b'.'
+                                    && b != b'-'
+                                    && b != b'+'
+                                    && b != b'e'
+                                    && b != b'E'
+                            })
                             .unwrap_or(data.len() - num_start);
                         return price_to_ticks(&data[num_start..num_start + num_end]);
                     }
@@ -279,10 +281,7 @@ impl GateMarketData {
         parent_pattern: &[u8],
         field_pattern: &[u8],
     ) -> Option<i64> {
-        if let Some(parent_pos) = data
-            .windows(parent_pattern.len())
-            .position(|w| w == parent_pattern)
-        {
+        if let Some(parent_pos) = memmem::find(data, parent_pattern) {
             let start = parent_pos + parent_pattern.len();
             if let Some(brace_pos) = data[start..].iter().position(|&b| b == b'{') {
                 let obj_start = start + brace_pos;
@@ -292,10 +291,7 @@ impl GateMarketData {
                     .unwrap_or(data.len() - obj_start);
                 let obj_data = &data[obj_start..obj_start + search_end];
 
-                if let Some(field_pos) = obj_data
-                    .windows(field_pattern.len())
-                    .position(|w| w == field_pattern)
-                {
+                if let Some(field_pos) = memmem::find(obj_data, field_pattern) {
                     let mut num_start = obj_start + field_pos + field_pattern.len();
                     for &b in &data[num_start..] {
                         if b == b':' || b == b' ' || b == b'"' {
@@ -304,11 +300,16 @@ impl GateMarketData {
                         }
                         let num_end = data[num_start..]
                             .iter()
-                            .position(|&b| !b.is_ascii_digit() && b != b'-')
+                            .position(|&b| {
+                                !b.is_ascii_digit()
+                                    && b != b'-'
+                                    && b != b'+'
+                                    && b != b'.'
+                                    && b != b'e'
+                                    && b != b'E'
+                            })
                             .unwrap_or(data.len() - num_start);
-                        let raw =
-                            std::str::from_utf8(&data[num_start..num_start + num_end]).ok()?;
-                        return raw.parse::<i64>().ok();
+                        return parse_i64(&data[num_start..num_start + num_end]);
                     }
                 }
             }
@@ -758,6 +759,14 @@ mod tests {
         let price_ticks = GateMarketData::extract_nested_price(payload, "data", "p")
             .expect("nested price parsed");
         assert_eq!(price_ticks, 12_345_000_000);
+    }
+
+    #[test]
+    fn test_extract_nested_price_supports_scientific_notation() {
+        let payload = br#"{"data":{"p":"1e-2","s":"-2"}}"#;
+        let price_ticks = GateMarketData::extract_nested_price(payload, "data", "p")
+            .expect("nested scientific price parsed");
+        assert_eq!(price_ticks, 1_000_000);
     }
 
     #[test]
