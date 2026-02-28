@@ -14,12 +14,13 @@ Single entry point for project status, checkpoint tracking, and operating constr
 ## Read order (canonical)
 1. `core/2026-02-27-business-objective-economic-control-map.md`
 2. `core/2026-02-28-hft-rust-only-checkpoints.md`
-3. `core/2026-02-26-business-logic-roadmap.md`
-4. `core/2026-02-26-business-logic-v1-implementation-status.md`
-5. `core/2026-02-27-operating-model-spec-v1.md`
-6. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
-7. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
-8. `dynamics/2026-02-26-project-math-model.md`
+3. `core/2026-02-28-cp4-parse-path-evidence.md`
+4. `core/2026-02-26-business-logic-roadmap.md`
+5. `core/2026-02-26-business-logic-v1-implementation-status.md`
+6. `core/2026-02-27-operating-model-spec-v1.md`
+7. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
+8. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
+9. `dynamics/2026-02-26-project-math-model.md`
 
 ## Checkpoint system (`HFT-CP*`)
 1. `HFT-CP0` Latency and Allocation Observatory
