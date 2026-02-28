@@ -141,13 +141,27 @@ impl GateMarketData {
         Ok(())
     }
 
+    fn upsert_latest_ticker_for_drain(
+        ticker: BookTicker,
+        latest_by_id: &mut std::collections::HashMap<SymbolId, BookTicker>,
+        latest_by_symbol: &mut std::collections::HashMap<Bytes, BookTicker>,
+    ) {
+        if let Some(symbol_id) = ticker.strategy_symbol_id {
+            latest_by_id.insert(symbol_id, ticker);
+            return;
+        }
+        latest_by_symbol.insert(ticker.symbol.clone(), ticker);
+    }
+
     /// Drain all pending book ticker messages, returning only the latest per symbol.
     pub fn drain_book_tickers(&mut self) -> Vec<BookTicker> {
         let rx = match self.msg_rx.as_mut() {
             Some(rx) => rx,
             None => return Vec::new(),
         };
-        let mut latest: std::collections::HashMap<Bytes, BookTicker> =
+        let mut latest_by_id: std::collections::HashMap<SymbolId, BookTicker> =
+            std::collections::HashMap::new();
+        let mut latest_by_symbol: std::collections::HashMap<Bytes, BookTicker> =
             std::collections::HashMap::new();
         while let Ok((data, recv_ts_ns)) = rx.try_recv() {
             if contains_bytes(&data, EVENT_BOOK_TICKER) {
@@ -157,11 +171,19 @@ impl GateMarketData {
                     &self.strategy_symbol_ids,
                     recv_ts_ns,
                 ) {
-                    latest.insert(ticker.symbol.clone(), ticker);
+                    Self::upsert_latest_ticker_for_drain(
+                        ticker,
+                        &mut latest_by_id,
+                        &mut latest_by_symbol,
+                    );
                 }
             }
         }
-        latest.into_values().collect()
+        let mut latest =
+            Vec::with_capacity(latest_by_id.len().saturating_add(latest_by_symbol.len()));
+        latest.extend(latest_by_id.into_values());
+        latest.extend(latest_by_symbol.into_values());
+        latest
     }
 
     /// Current bounded WS message backlog depth.
@@ -719,7 +741,7 @@ impl GateMarketData {
             .unwrap_or(0);
 
         Some(Trade::new(
-            symbol_cache.intern_bytes(&symbol),
+            symbol,
             trade_id,
             price,
             qty,
@@ -831,6 +853,37 @@ mod tests {
         assert_eq!(
             market.strategy_symbol_ids.get(b"BTCUSDT".as_slice()),
             Some(&0)
+        );
+    }
+
+    #[test]
+    fn drain_dedupe_falls_back_to_symbol_when_strategy_symbol_id_missing() {
+        let mut latest_by_id: std::collections::HashMap<SymbolId, BookTicker> =
+            std::collections::HashMap::new();
+        let mut latest_by_symbol: std::collections::HashMap<Bytes, BookTicker> =
+            std::collections::HashMap::new();
+
+        let first = BookTicker::new(Bytes::from_static(b"UNKNOWN"), 1, 2, 3, 4, 5, 6);
+        let newer = BookTicker::new(Bytes::from_static(b"UNKNOWN"), 9, 10, 3, 4, 7, 8);
+
+        GateMarketData::upsert_latest_ticker_for_drain(
+            first,
+            &mut latest_by_id,
+            &mut latest_by_symbol,
+        );
+        GateMarketData::upsert_latest_ticker_for_drain(
+            newer,
+            &mut latest_by_id,
+            &mut latest_by_symbol,
+        );
+
+        assert!(latest_by_id.is_empty());
+        assert_eq!(latest_by_symbol.len(), 1);
+        assert_eq!(
+            latest_by_symbol
+                .get(Bytes::from_static(b"UNKNOWN").as_ref())
+                .map(|ticker| ticker.bid_price_ticks),
+            Some(9)
         );
     }
 

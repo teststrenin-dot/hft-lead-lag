@@ -71,6 +71,8 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - Runtime parse paths are pattern-based; dynamic wrapper APIs remain for compatibility but are not used on hot path.
    - Binance/Gate `parse_book_ticker_static` now assign `strategy_symbol_id` directly during parse (no post-parse attach step).
    - Fast numeric extractors now handle scientific notation (`e/E`) in numeric token paths.
+   - Connector drain dedupe now keys by `strategy_symbol_id` when present, reducing symbol-byte hashing/cloning on the hot receive drain path.
+   - Gate trade parse now reuses normalized symbol bytes directly (removed redundant `intern_bytes` pass on already-normalized symbol).
 2. Done but must be reworked:
    - Generic extractors using repeated `format!` still exist as compatibility helpers.
    - Remaining byte-copy points in parse path still require profiling-backed elimination.

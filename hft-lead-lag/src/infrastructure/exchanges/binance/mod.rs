@@ -125,13 +125,27 @@ impl BinanceMarketData {
         Ok(())
     }
 
+    fn upsert_latest_ticker_for_drain(
+        ticker: BookTicker,
+        latest_by_id: &mut std::collections::HashMap<SymbolId, BookTicker>,
+        latest_by_symbol: &mut std::collections::HashMap<bytes::Bytes, BookTicker>,
+    ) {
+        if let Some(symbol_id) = ticker.strategy_symbol_id {
+            latest_by_id.insert(symbol_id, ticker);
+            return;
+        }
+        latest_by_symbol.insert(ticker.symbol.clone(), ticker);
+    }
+
     /// Drain all pending book ticker messages, returning only the latest per symbol.
     pub fn drain_book_tickers(&mut self) -> Vec<BookTicker> {
         let rx = match self.msg_rx.as_mut() {
             Some(rx) => rx,
             None => return Vec::new(),
         };
-        let mut latest: std::collections::HashMap<bytes::Bytes, BookTicker> =
+        let mut latest_by_id: std::collections::HashMap<SymbolId, BookTicker> =
+            std::collections::HashMap::new();
+        let mut latest_by_symbol: std::collections::HashMap<bytes::Bytes, BookTicker> =
             std::collections::HashMap::new();
         while let Ok((data, recv_ts_ns)) = rx.try_recv() {
             if contains_bytes(&data, EVENT_BOOK_TICKER) {
@@ -141,11 +155,19 @@ impl BinanceMarketData {
                     &self.strategy_symbol_ids,
                     recv_ts_ns,
                 ) {
-                    latest.insert(ticker.symbol.clone(), ticker);
+                    Self::upsert_latest_ticker_for_drain(
+                        ticker,
+                        &mut latest_by_id,
+                        &mut latest_by_symbol,
+                    );
                 }
             }
         }
-        latest.into_values().collect()
+        let mut latest =
+            Vec::with_capacity(latest_by_id.len().saturating_add(latest_by_symbol.len()));
+        latest.extend(latest_by_id.into_values());
+        latest.extend(latest_by_symbol.into_values());
+        latest
     }
 
     /// Current bounded WS message backlog depth.
@@ -652,6 +674,37 @@ mod tests {
         assert_eq!(
             market.strategy_symbol_ids.get(b"BTCUSDT".as_slice()),
             Some(&0)
+        );
+    }
+
+    #[test]
+    fn drain_dedupe_uses_strategy_symbol_id_when_present() {
+        let mut latest_by_id: std::collections::HashMap<SymbolId, BookTicker> =
+            std::collections::HashMap::new();
+        let mut latest_by_symbol: std::collections::HashMap<bytes::Bytes, BookTicker> =
+            std::collections::HashMap::new();
+
+        let first = BookTicker::new(bytes::Bytes::from_static(b"BTCUSDT"), 1, 2, 3, 4, 5, 6)
+            .with_strategy_symbol_id(Some(0));
+        let newer = BookTicker::new(bytes::Bytes::from_static(b"BTCUSDT"), 7, 8, 3, 4, 9, 10)
+            .with_strategy_symbol_id(Some(0));
+
+        BinanceMarketData::upsert_latest_ticker_for_drain(
+            first,
+            &mut latest_by_id,
+            &mut latest_by_symbol,
+        );
+        BinanceMarketData::upsert_latest_ticker_for_drain(
+            newer,
+            &mut latest_by_id,
+            &mut latest_by_symbol,
+        );
+
+        assert_eq!(latest_by_id.len(), 1);
+        assert!(latest_by_symbol.is_empty());
+        assert_eq!(
+            latest_by_id.get(&0).map(|ticker| ticker.bid_price_ticks),
+            Some(7)
         );
     }
 
