@@ -85,17 +85,22 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 ## `HFT-CP5` Deterministic Replay Harness
 1. Done and not touched:
    - General tests and reliability fixes from legacy track.
-   - CP5 block 1: `src/infrastructure/replay/raw_feed.rs` adds:
+   - CP5 replay core: `src/infrastructure/replay/raw_feed.rs` adds:
      - JSONL raw-feed recorder (`seq`, `exchange`, `recv_ts_ns`, `payload_b64`).
      - Strict replay reader with sequence-order validation and payload decode validation.
-     - Contract tests for deterministic round-trip and invalid payload rejection.
+     - Deterministic signal replay trace + equivalence report.
+     - Contract tests for deterministic round-trip, invalid payload rejection, and replay determinism.
    - Evidence captured in `docs/status/dynamics/2026-02-28-cp5-block1-raw-feed-evidence.md`.
+   - Runtime capture wiring:
+     - `BinanceMarketData` and `GateMarketData` record incoming raw WS frames when recorder is configured.
+     - `main` enables recording via `RAW_FEED_RECORD_PATH`.
+   - Offline replay mode:
+     - `main` runs deterministic replay check when `REPLAY_RAW_FEED_PATH` is set.
 2. Done but must be reworked:
-   - Recorder currently flushes per frame for reliability-first baseline; batching can be optimized after runtime wiring.
+   - Recorder currently flushes per frame for reliability-first baseline; batching can be optimized later if needed.
 3. Missing and required:
-   - Runtime capture wiring from connector ingest (`recv_ts + raw frame`) into recorder.
-   - Replay engine with deterministic decision/trade equivalence checks.
-   - Replay benchmark for regression detection.
+   - None.
+   - Optional: add richer replay diff report for first divergence context.
 
 ## `HFT-CP6` Execution Fast Path
 1. Done and not touched:

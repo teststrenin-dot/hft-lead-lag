@@ -25,6 +25,7 @@ use crate::infrastructure::exchanges::common::{
     extract_json_string_field_ref_by_pattern, now_ns, parse_i64, price_to_ticks, qty_to_ticks,
     timestamp_ms, timestamp_sec, HmacSha512, StampedBytes,
 };
+use crate::infrastructure::replay::raw_feed::{RawFeedExchange, RawFeedRecorder};
 
 /// Gate.io Futures WebSocket endpoint
 const GATE_WS_ENDPOINT: &str = "wss://fx-ws.gateio.ws/v4/ws/usdt";
@@ -114,6 +115,7 @@ pub struct GateMarketData {
     /// API credentials
     api_key: Option<String>,
     api_secret: Option<String>,
+    raw_feed_recorder: Option<std::sync::Arc<RawFeedRecorder>>,
 }
 
 impl GateMarketData {
@@ -126,7 +128,12 @@ impl GateMarketData {
             next_subscription_id: 1,
             api_key: None,
             api_secret: None,
+            raw_feed_recorder: None,
         }
+    }
+
+    pub fn set_raw_feed_recorder(&mut self, recorder: Option<std::sync::Arc<RawFeedRecorder>>) {
+        self.raw_feed_recorder = recorder;
     }
 
     pub fn set_strategy_symbol_ids(
@@ -347,6 +354,20 @@ impl GateMarketData {
     pub fn dropped_messages() -> u64 {
         DROPPED_MESSAGES.load(Ordering::Relaxed)
     }
+
+    pub fn parse_book_ticker_for_replay(&self, data: &[u8], recv_ts_ns: i64) -> Option<BookTicker> {
+        let is_book_ticker = contains_bytes(data, EVENT_BOOK_TICKER_CHANNEL)
+            || contains_bytes(data, EVENT_BOOK_TICKER);
+        if !is_book_ticker {
+            return None;
+        }
+        Self::parse_book_ticker_static(
+            data,
+            &self.symbol_cache,
+            &self.strategy_symbol_ids,
+            recv_ts_ns,
+        )
+    }
 }
 
 impl Default for GateMarketData {
@@ -389,6 +410,7 @@ impl MarketDataStream for GateMarketData {
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let auth_for_task = auth_payload.clone();
+        let raw_feed_recorder = self.raw_feed_recorder.clone();
 
         // Single unified task: owns both read and write halves.
         // On reconnect, both halves are replaced atomically.
@@ -399,6 +421,7 @@ impl MarketDataStream for GateMarketData {
             let mut ws_rx = ws_rx;
             let mut reconnect_delay = Duration::from_secs(1);
             let auth_payload = auth_for_task;
+            let raw_feed_recorder = raw_feed_recorder;
 
             'outer: loop {
                 loop {
@@ -410,7 +433,11 @@ impl MarketDataStream for GateMarketData {
                                     Message::Text(text) => {
                                         reconnect_delay = Duration::from_secs(1);
                                         let recv_ts = now_ns();
-                                        if msg_tx.try_send((text.into_bytes(), recv_ts)).is_err() {
+                                        let payload = text.into_bytes();
+                                        if let Some(recorder) = raw_feed_recorder.as_ref() {
+                                            recorder.record(RawFeedExchange::Gate, recv_ts, &payload);
+                                        }
+                                        if msg_tx.try_send((payload, recv_ts)).is_err() {
                                             let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
                                             if n.is_power_of_two() || n.is_multiple_of(1000) {
                                                 warn!("Gate msg channel full, dropped total: {n}");
@@ -420,6 +447,9 @@ impl MarketDataStream for GateMarketData {
                                     Message::Binary(bin) => {
                                         reconnect_delay = Duration::from_secs(1);
                                         let recv_ts = now_ns();
+                                        if let Some(recorder) = raw_feed_recorder.as_ref() {
+                                            recorder.record(RawFeedExchange::Gate, recv_ts, &bin);
+                                        }
                                         if msg_tx.try_send((bin, recv_ts)).is_err() {
                                             let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
                                             if n.is_power_of_two() || n.is_multiple_of(1000) {
@@ -842,6 +872,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_book_ticker_for_replay_ignores_non_book_ticker_payload() {
+        let market = GateMarketData::new();
+        let payload = br#"{"channel":"futures.trades","event":"update"}"#;
+        assert!(market.parse_book_ticker_for_replay(payload, 123).is_none());
+    }
+
+    #[test]
     fn test_parse_book_ticker_prefers_contract_over_s_when_both_present() {
         let mut market = GateMarketData::new();
         market
@@ -1020,13 +1057,9 @@ mod tests {
         let start = Instant::now();
         let mut guard = 0i64;
         for _ in 0..iterations {
-            let ticker = GateMarketData::parse_book_ticker_static(
-                payload,
-                &cache,
-                &strategy_symbol_ids,
-                99,
-            )
-            .expect("ticker");
+            let ticker =
+                GateMarketData::parse_book_ticker_static(payload, &cache, &strategy_symbol_ids, 99)
+                    .expect("ticker");
             guard = guard
                 .wrapping_add(ticker.bid_price_ticks)
                 .wrapping_add(ticker.ask_price_ticks)

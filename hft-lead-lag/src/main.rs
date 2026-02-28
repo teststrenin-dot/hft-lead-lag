@@ -7,6 +7,10 @@ use hft_lead_lag::api::{HealthState, MarketDataEvent, ScreenerStore};
 use hft_lead_lag::domain::screener::fleet_patch::{FleetPatchMode, FleetPatchPlan};
 use hft_lead_lag::domain::screener::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
 use hft_lead_lag::infrastructure::logging::init_centralized_logging;
+use hft_lead_lag::infrastructure::replay::raw_feed::{
+    raw_feed_recorder_from_env, verify_signal_replay_determinism_from_file, RawFeedExchange,
+    RawFeedReplayRouting, RAW_FEED_RECORD_PATH_ENV,
+};
 use hft_lead_lag::{
     build_runtime_strategy, BinanceMarketData, ConfigManager, GateMarketData, RuntimeStrategy,
 };
@@ -94,6 +98,9 @@ const STRATEGY_BLACKLIST: &[&str] = &[
 const SIGNAL_CHECK_BUDGET_PER_TICK: usize = 256;
 const PORTFOLIO_IDS_ENV: &str = "PORTFOLIO_IDS";
 const ENABLE_SCREENER_CHART_PIPELINE: bool = false;
+const REPLAY_RAW_FEED_PATH_ENV: &str = "REPLAY_RAW_FEED_PATH";
+const REPLAY_STRATEGY_SYMBOLS_ENV: &str = "REPLAY_STRATEGY_SYMBOLS";
+const REPLAY_PRIMARY_EXCHANGE_ENV: &str = "REPLAY_PRIMARY_EXCHANGE";
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
 
@@ -144,6 +151,105 @@ fn portfolio_ids_from_env() -> Option<Vec<String>> {
     }
 }
 
+fn replay_raw_feed_path_from_env() -> Option<String> {
+    std::env::var(REPLAY_RAW_FEED_PATH_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn parse_csv_symbols(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in raw.split(',') {
+        let symbol = token.trim();
+        if symbol.is_empty() {
+            continue;
+        }
+        if out.iter().any(|s| s == symbol) {
+            continue;
+        }
+        out.push(symbol.to_string());
+    }
+    out
+}
+
+fn replay_symbols_from_env_or_config(config_manager: &ConfigManager) -> Vec<String> {
+    if let Some(env_symbols) = std::env::var(REPLAY_STRATEGY_SYMBOLS_ENV)
+        .ok()
+        .map(|raw| parse_csv_symbols(&raw))
+        .filter(|symbols| !symbols.is_empty())
+    {
+        return env_symbols;
+    }
+    if let Some(cfg) = config_manager.lead_lag_config() {
+        if !cfg.symbols.is_empty() {
+            return cfg.symbols.clone();
+        }
+    }
+    vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]
+}
+
+fn parse_replay_exchange(raw: &str) -> Option<RawFeedExchange> {
+    if raw.eq_ignore_ascii_case("binance") {
+        Some(RawFeedExchange::Binance)
+    } else if raw.eq_ignore_ascii_case("gate") || raw.eq_ignore_ascii_case("gateio") {
+        Some(RawFeedExchange::Gate)
+    } else {
+        None
+    }
+}
+
+fn replay_primary_exchange_from_env_or_config(config_manager: &ConfigManager) -> RawFeedExchange {
+    if let Some(exchange) = std::env::var(REPLAY_PRIMARY_EXCHANGE_ENV)
+        .ok()
+        .and_then(|raw| parse_replay_exchange(raw.trim()))
+    {
+        return exchange;
+    }
+    if let Some(cfg) = config_manager.lead_lag_config() {
+        return match cfg.primary_exchange {
+            hft_lead_lag::config::ExchangeId::Binance => RawFeedExchange::Binance,
+            hft_lead_lag::config::ExchangeId::Gate => RawFeedExchange::Gate,
+        };
+    }
+    RawFeedExchange::Binance
+}
+
+fn run_replay_mode(path: &str, config_manager: &ConfigManager) -> Result<(), std::io::Error> {
+    let symbols = replay_symbols_from_env_or_config(config_manager);
+    let primary = replay_primary_exchange_from_env_or_config(config_manager);
+    let hedge = match primary {
+        RawFeedExchange::Binance => RawFeedExchange::Gate,
+        RawFeedExchange::Gate => RawFeedExchange::Binance,
+    };
+    let routing = RawFeedReplayRouting { primary, hedge };
+    info!(
+        "Replay mode: path={} symbols={} primary={:?}",
+        path,
+        symbols.len(),
+        primary
+    );
+
+    let report = verify_signal_replay_determinism_from_file(path, &symbols, routing)?;
+    info!(
+        "Replay determinism: deterministic={} parsed_tickers={} signals={} mismatch_index={:?}",
+        report.deterministic,
+        report.parsed_ticker_count,
+        report.signal_count,
+        report.mismatch_index
+    );
+    if !report.deterministic {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "replay determinism check failed (mismatch_index={:?})",
+                report.mismatch_index
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_centralized_logging("logs", "runtime.log")?;
@@ -159,6 +265,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "Runtime execution mode: {}",
         config_manager.trading_mode().as_str()
     );
+    if let Some(replay_path) = replay_raw_feed_path_from_env() {
+        run_replay_mode(&replay_path, &config_manager)?;
+        return Ok(());
+    }
 
     let (binance_tickers, gate_tickers) = fetch_volume_tickers(MIN_VOLUME_USD).await;
     let universe = build_runtime_universe(
@@ -177,6 +287,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize exchange connectors
     let mut binance = BinanceMarketData::new();
     let mut gate = GateMarketData::new();
+    match raw_feed_recorder_from_env() {
+        Ok(Some(recorder)) => {
+            info!(
+                "Raw feed recorder enabled (env: {}, file path resolved)",
+                RAW_FEED_RECORD_PATH_ENV
+            );
+            binance.set_raw_feed_recorder(Some(recorder.clone()));
+            gate.set_raw_feed_recorder(Some(recorder));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!("Raw feed recorder init failed; continuing without recording: {e}");
+        }
+    }
     let health_state = Arc::new(HealthState::new());
     configure_and_connect_exchanges(
         &config_manager,

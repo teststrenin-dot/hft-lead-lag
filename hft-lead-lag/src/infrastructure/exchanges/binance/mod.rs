@@ -22,6 +22,7 @@ use crate::infrastructure::exchanges::common::{
     extract_json_string_field_ref_by_pattern, now_ns, price_to_ticks, qty_to_ticks, timestamp_ms,
     StampedBytes,
 };
+use crate::infrastructure::replay::raw_feed::{RawFeedExchange, RawFeedRecorder};
 
 const BINANCE_WS_ENDPOINT: &str = "wss://fstream.binance.com/ws";
 /// Bounded fan-in channel capacity (protects against OOM on 3.8 GiB server)
@@ -99,6 +100,7 @@ pub struct BinanceMarketData {
     symbol_cache: SymbolCache,
     strategy_symbol_ids: std::collections::HashMap<Vec<u8>, SymbolId>,
     next_subscription_id: SubscriptionId,
+    raw_feed_recorder: Option<std::sync::Arc<RawFeedRecorder>>,
 }
 
 impl BinanceMarketData {
@@ -110,7 +112,12 @@ impl BinanceMarketData {
             symbol_cache: SymbolCache::new(),
             strategy_symbol_ids: std::collections::HashMap::new(),
             next_subscription_id: 1,
+            raw_feed_recorder: None,
         }
+    }
+
+    pub fn set_raw_feed_recorder(&mut self, recorder: Option<std::sync::Arc<RawFeedRecorder>>) {
+        self.raw_feed_recorder = recorder;
     }
 
     pub fn set_strategy_symbol_ids(
@@ -245,6 +252,18 @@ impl BinanceMarketData {
         )
     }
 
+    pub fn parse_book_ticker_for_replay(&self, data: &[u8], recv_ts_ns: i64) -> Option<BookTicker> {
+        if !contains_bytes(data, EVENT_BOOK_TICKER) {
+            return None;
+        }
+        Self::parse_book_ticker_static(
+            data,
+            &self.symbol_cache,
+            &self.strategy_symbol_ids,
+            recv_ts_ns,
+        )
+    }
+
     fn parse_trade_static(
         data: &[u8],
         symbol_cache: &SymbolCache,
@@ -274,6 +293,7 @@ impl BinanceMarketData {
 
     async fn spawn_ws_worker(
         msg_tx: mpsc::Sender<StampedBytes>,
+        raw_feed_recorder: Option<std::sync::Arc<RawFeedRecorder>>,
     ) -> ExchangeResult<mpsc::UnboundedSender<Message>> {
         let request = BINANCE_WS_ENDPOINT
             .into_client_request()
@@ -310,7 +330,11 @@ impl BinanceMarketData {
                                 Some(Ok(Message::Text(text))) => {
                                     reconnect_delay = Duration::from_secs(1);
                                     let recv_ts = now_ns();
-                                    if msg_tx.try_send((text.into_bytes(), recv_ts)).is_err() {
+                                    let payload = text.into_bytes();
+                                    if let Some(recorder) = raw_feed_recorder.as_ref() {
+                                        recorder.record(RawFeedExchange::Binance, recv_ts, &payload);
+                                    }
+                                    if msg_tx.try_send((payload, recv_ts)).is_err() {
                                         let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
                                         if n.is_power_of_two() || n.is_multiple_of(1000) {
                                             warn!("Binance msg channel full, dropped total: {n}");
@@ -320,6 +344,9 @@ impl BinanceMarketData {
                                 Some(Ok(Message::Binary(bin))) => {
                                     reconnect_delay = Duration::from_secs(1);
                                     let recv_ts = now_ns();
+                                    if let Some(recorder) = raw_feed_recorder.as_ref() {
+                                        recorder.record(RawFeedExchange::Binance, recv_ts, &bin);
+                                    }
                                     if msg_tx.try_send((bin, recv_ts)).is_err() {
                                         let n = DROPPED_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
                                         if n.is_power_of_two() || n.is_multiple_of(1000) {
@@ -425,7 +452,8 @@ impl BinanceMarketData {
             .max(1);
         let required_ws_count = symbols.len().div_ceil(symbols_per_ws);
         while self.ws_txs.len() < required_ws_count {
-            let ws = Self::spawn_ws_worker(shared_msg_tx.clone()).await?;
+            let ws = Self::spawn_ws_worker(shared_msg_tx.clone(), self.raw_feed_recorder.clone())
+                .await?;
             self.ws_txs.push(ws);
             tokio::time::sleep(tokio::time::Duration::from_millis(120)).await;
         }
@@ -438,7 +466,9 @@ impl BinanceMarketData {
                 .send(Message::Text(msg.clone()))
                 .is_err()
             {
-                let replacement = Self::spawn_ws_worker(shared_msg_tx.clone()).await?;
+                let replacement =
+                    Self::spawn_ws_worker(shared_msg_tx.clone(), self.raw_feed_recorder.clone())
+                        .await?;
                 self.ws_txs[socket_idx] = replacement;
                 self.ws_txs[socket_idx]
                     .send(Message::Text(msg))
@@ -474,7 +504,8 @@ impl MarketDataStream for BinanceMarketData {
     async fn connect(&mut self) -> ExchangeResult<()> {
         let msg_channel_capacity = configured_msg_channel_capacity();
         let (msg_tx, msg_rx) = mpsc::channel::<StampedBytes>(msg_channel_capacity);
-        let primary_ws = Self::spawn_ws_worker(msg_tx.clone()).await?;
+        let primary_ws =
+            Self::spawn_ws_worker(msg_tx.clone(), self.raw_feed_recorder.clone()).await?;
         self.ws_txs.clear();
         self.ws_txs.push(primary_ws);
         self.msg_tx = Some(msg_tx);
@@ -660,6 +691,13 @@ mod tests {
         )
         .expect("ticker parses");
         assert_eq!(ticker.strategy_symbol_id, Some(1));
+    }
+
+    #[test]
+    fn parse_book_ticker_for_replay_ignores_non_book_ticker_payload() {
+        let market = BinanceMarketData::new();
+        let payload = br#"{"e":"aggTrade","s":"BTCUSDT"}"#;
+        assert!(market.parse_book_ticker_for_replay(payload, 123).is_none());
     }
 
     #[test]

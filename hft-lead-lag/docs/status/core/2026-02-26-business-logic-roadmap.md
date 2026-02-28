@@ -40,7 +40,7 @@ Last sync: 2026-02-28 (core business process formalized with rule traceability)
 | `HFT-CP2` Lock-Free Strategy State | `Completed` | Lead-lag strategy moved to single-owner state and sync `&mut self` runtime path; explicit event-loop queue boundary added for strategy updates; p99 evidence captured (`2026-02-28-cp2-lock-free-p99-evidence.md`). |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated flow is `Bytes`-based with no string-sort path; pending signal store migrated to `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue applies tickers directly without runtime cache-lookup clone; proof stored in `2026-02-28-cp3-updated-only-proof.md`. |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | Fast parsing exists; symbol cache interns raw bytes directly; runtime parse paths use pattern-based extractors with early `strategy_symbol_id` assignment in Binance/Gate; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse avoids redundant re-interning; profile baselines and parser-priority regression proof are captured in CP4 evidence doc. |
-| `HFT-CP5` Deterministic Replay Harness | `In Progress` | Block 1 delivered: raw-feed JSONL recorder + strict replay reader with contract tests; runtime capture wiring and equivalence runner pending. |
+| `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw-feed recorder is wired into WS ingest via opt-in env, offline replay determinism check is available via `REPLAY_RAW_FEED_PATH`, and replay profile harness is in evidence docs. |
 | `HFT-CP6` Execution Fast Path | `Planned` | Order intent queue + non-blocking send SLA are not formalized. |
 | `HFT-CP7` Production Operations Layer | `Planned` | Watchdog/recovery/alert stack not closed. |
 
@@ -79,7 +79,7 @@ Last sync: 2026-02-28 (core business process formalized with rule traceability)
 2. `HFT-CP1` and `HFT-CP2` delivered (allocation and lock-jitter elimination).
 3. `HFT-CP3` delivered (updated-only execution path).
 4. `HFT-CP4` delivered (minimal-copy parse path).
-5. Deliver `HFT-CP5` (deterministic replay for bugs and perf regression).
+5. `HFT-CP5` delivered (deterministic replay for bugs and perf regression).
 6. Deliver `HFT-CP6` (execution fast path and intent->sent SLA).
 7. Deliver `HFT-CP7` (operations hardening and deterministic recovery).
 

@@ -2,7 +2,7 @@
 
 Date: 2026-02-28
 Status: active
-Last sync: 2026-02-28 (core trimmed to 3 canonical docs; operational artifacts moved to dynamics)
+Last sync: 2026-02-28 (CP5 deterministic replay harness closed)
 
 ## Purpose
 Single entry point for project status, checkpoint tracking, and operating constraints.
