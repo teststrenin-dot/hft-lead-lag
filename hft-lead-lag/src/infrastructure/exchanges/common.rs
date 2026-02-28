@@ -259,6 +259,7 @@ pub fn extract_json_i64_field_by_pattern(json: &[u8], field_bytes: &[u8]) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn test_hmac_sha256() {
@@ -339,5 +340,37 @@ mod tests {
         let data = br#"{"e":"bookTicker","s":"BTCUSDT"}"#;
         assert!(contains_bytes(data, b"bookTicker"));
         assert!(!contains_bytes(data, b"aggTrade"));
+    }
+
+    #[test]
+    #[ignore = "profiling-only benchmark harness"]
+    fn bench_common_extractors_profile() {
+        let payload = br#"{"e":"bookTicker","s":"BTCUSDT","b":"50000.1","B":"1.5","a":"50000.2","A":"2.0","T":1700000000000,"m":1}"#;
+        let iterations: usize = 250_000;
+        let start = Instant::now();
+        let mut guard = 0i64;
+        for _ in 0..iterations {
+            let s = extract_json_string_field_ref_by_pattern(payload, b"\"s\"").unwrap();
+            let b = extract_json_string_field_ref_by_pattern(payload, b"\"b\"").unwrap();
+            let a = extract_json_string_field_ref_by_pattern(payload, b"\"a\"").unwrap();
+            let ts = extract_json_i64_field_by_pattern(payload, b"\"T\"").unwrap();
+            let m = extract_json_bool_field_by_pattern(payload, b"\"m\"").unwrap();
+            guard = guard
+                .wrapping_add(i64::from(s.len() as i32))
+                .wrapping_add(i64::from(b.len() as i32))
+                .wrapping_add(i64::from(a.len() as i32))
+                .wrapping_add(ts)
+                .wrapping_add(i64::from(m as i32));
+        }
+        let elapsed = start.elapsed();
+        let nanos_per_iter = elapsed.as_nanos() / iterations as u128;
+        eprintln!(
+            "bench_common_extractors_profile: iters={} elapsed_ms={} ns_per_iter={} guard={}",
+            iterations,
+            elapsed.as_millis(),
+            nanos_per_iter,
+            guard
+        );
+        assert_ne!(guard, 0);
     }
 }

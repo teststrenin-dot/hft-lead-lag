@@ -633,8 +633,8 @@ impl GateMarketData {
         strategy_symbol_ids: &std::collections::HashMap<Vec<u8>, SymbolId>,
         local_ts_ns: i64,
     ) -> Option<BookTicker> {
-        let contract = extract_json_string_field_ref_by_pattern(data, FIELD_S)
-            .or_else(|| extract_json_string_field_ref_by_pattern(data, FIELD_CONTRACT))
+        let contract = extract_json_string_field_ref_by_pattern(data, FIELD_CONTRACT)
+            .or_else(|| extract_json_string_field_ref_by_pattern(data, FIELD_S))
             .or_else(|| extract_json_string_field_ref_by_pattern(data, FIELD_C))?;
         let symbol = symbol_cache.intern_gate_contract(contract);
         let symbol_id = strategy_symbol_ids.get(symbol.as_ref()).copied();
@@ -756,6 +756,7 @@ impl GateMarketData {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     #[test]
     fn test_build_auth_payload() {
@@ -837,6 +838,34 @@ mod tests {
             123,
         )
         .expect("book ticker parses");
+        assert_eq!(ticker.strategy_symbol_id, Some(0));
+    }
+
+    #[test]
+    fn test_parse_book_ticker_prefers_contract_over_s_when_both_present() {
+        let mut market = GateMarketData::new();
+        market
+            .set_strategy_symbol_ids(&["BTCUSDT".to_string(), "ETHUSDT".to_string()])
+            .expect("symbol-id map");
+        let payload = br#"{
+            "channel":"futures.book_ticker",
+            "event":"update",
+            "contract":"BTC_USDT",
+            "s":"ETH_USDT",
+            "b":"50000.1",
+            "B":"1.5",
+            "a":"50000.2",
+            "A":"2.0",
+            "t":1700000000000
+        }"#;
+        let ticker = GateMarketData::parse_book_ticker_static(
+            payload,
+            &market.symbol_cache,
+            &market.strategy_symbol_ids,
+            123,
+        )
+        .expect("book ticker parses");
+        assert_eq!(ticker.symbol.as_ref(), b"BTCUSDT");
         assert_eq!(ticker.strategy_symbol_id, Some(0));
     }
 
@@ -977,5 +1006,41 @@ mod tests {
             !snapshot.iter().any(|msg| msg.contains(r#"S0_USDT"#)),
             "oldest entries should be trimmed"
         );
+    }
+
+    #[test]
+    #[ignore = "profiling-only benchmark harness"]
+    fn bench_gate_parse_book_ticker_profile() {
+        let cache = SymbolCache::new();
+        let mut strategy_symbol_ids = std::collections::HashMap::new();
+        strategy_symbol_ids.insert(b"BTCUSDT".to_vec(), 0);
+        let payload = br#"{"channel":"futures.book_ticker","event":"update","contract":"BTC_USDT","b":"50000.1","B":"1.5","a":"50000.2","A":"2.0","t":1700000000000}"#;
+
+        let iterations: usize = 250_000;
+        let start = Instant::now();
+        let mut guard = 0i64;
+        for _ in 0..iterations {
+            let ticker = GateMarketData::parse_book_ticker_static(
+                payload,
+                &cache,
+                &strategy_symbol_ids,
+                99,
+            )
+            .expect("ticker");
+            guard = guard
+                .wrapping_add(ticker.bid_price_ticks)
+                .wrapping_add(ticker.ask_price_ticks)
+                .wrapping_add(i64::from(ticker.strategy_symbol_id.unwrap_or(0)));
+        }
+        let elapsed = start.elapsed();
+        let nanos_per_iter = elapsed.as_nanos() / iterations as u128;
+        eprintln!(
+            "bench_gate_parse_book_ticker_profile: iters={} elapsed_ms={} ns_per_iter={} guard={}",
+            iterations,
+            elapsed.as_millis(),
+            nanos_per_iter,
+            guard
+        );
+        assert_ne!(guard, 0);
     }
 }

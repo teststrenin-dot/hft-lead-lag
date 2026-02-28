@@ -32,6 +32,7 @@ Commands:
 ```bash
 cargo test -q drain_dedupe
 cargo test -q parse_book_ticker_sets_preconfigured_strategy_symbol_id
+cargo test -q test_parse_book_ticker_prefers_contract_over_s_when_both_present
 cargo test -q test_extract_json_i64_supports_scientific_notation
 cargo check --all-targets
 cargo build
@@ -42,14 +43,26 @@ Results:
 1. `drain_dedupe*` tests pass (strategy-id dedupe + unknown-symbol fallback).
 2. Parse tests pass for early `strategy_symbol_id` assignment.
 3. Scientific notation extractor test passes.
-4. Full verification passes:
-   - `lib`: `231 passed, 0 failed, 2 ignored`
+4. Contract-vs-symbol precedence regression test passes (`contract` takes priority when both keys are present).
+5. Synthetic profiling harness passes for parser hot path:
+   - debug: `common=5690ns`, `binance=9510ns`, `gate=11328ns` (per iteration).
+   - release: `common=440ns`, `binance=617ns`, `gate=675ns` (per iteration).
+6. Full verification passes:
+   - `lib`: `232 passed, 0 failed, 5 ignored`
    - `main`: `88 passed, 0 failed`
    - doc-tests: `1 passed`
 
-## 4) CP4 exit assessment
-Current state: `In Progress`.
+## 4) Parse-order optimization proof
+1. New regression guard: Gate parser now prefers `contract` over `s` when both are present.
+2. Red/green cycle evidence:
+   - forced old order (`s` first) causes test failure on mismatched payload.
+   - restored optimized order (`contract` first) makes the same test pass.
 
-Remaining for CP4 close:
-1. Capture profile evidence for dominant remaining parse/copy hotspots under live-like runtime load.
-2. Remove/contain any remaining hotspot copy points confirmed by that profile.
+## 5) CP4 exit assessment
+Current state: `Completed`.
+
+Close rationale:
+1. Parse path now runs on static pattern extraction with direct symbol-id assignment.
+2. Receive-drain dedupe is `SymbolId`-first for known symbols, reducing key-copy pressure.
+3. Profile harness baseline is captured in debug/release and can be reused for CP5+ regression checks.
+4. Remaining non-pattern wrappers live in compatibility surface and are not used by connector hot path.

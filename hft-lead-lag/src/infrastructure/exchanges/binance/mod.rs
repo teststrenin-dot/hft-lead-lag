@@ -590,6 +590,7 @@ impl MarketDataStream for BinanceMarketData {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     #[test]
     fn parse_agg_trade_bool_and_id() {
@@ -778,5 +779,41 @@ mod tests {
             !snapshot.iter().any(|msg| msg.contains(r#""id":0"#)),
             "oldest entries should be trimmed"
         );
+    }
+
+    #[test]
+    #[ignore = "profiling-only benchmark harness"]
+    fn bench_binance_parse_book_ticker_profile() {
+        let cache = SymbolCache::new();
+        let mut strategy_symbol_ids = std::collections::HashMap::new();
+        strategy_symbol_ids.insert(b"BTCUSDT".to_vec(), 0);
+        let payload = br#"{"e":"bookTicker","s":"BTCUSDT","b":"50000.1","B":"1.5","a":"50000.2","A":"2.0","T":1700000000000}"#;
+
+        let iterations: usize = 250_000;
+        let start = Instant::now();
+        let mut guard = 0i64;
+        for _ in 0..iterations {
+            let ticker = BinanceMarketData::parse_book_ticker_static(
+                payload,
+                &cache,
+                &strategy_symbol_ids,
+                99,
+            )
+            .expect("ticker");
+            guard = guard
+                .wrapping_add(ticker.bid_price_ticks)
+                .wrapping_add(ticker.ask_price_ticks)
+                .wrapping_add(i64::from(ticker.strategy_symbol_id.unwrap_or(0)));
+        }
+        let elapsed = start.elapsed();
+        let nanos_per_iter = elapsed.as_nanos() / iterations as u128;
+        eprintln!(
+            "bench_binance_parse_book_ticker_profile: iters={} elapsed_ms={} ns_per_iter={} guard={}",
+            iterations,
+            elapsed.as_millis(),
+            nanos_per_iter,
+            guard
+        );
+        assert_ne!(guard, 0);
     }
 }

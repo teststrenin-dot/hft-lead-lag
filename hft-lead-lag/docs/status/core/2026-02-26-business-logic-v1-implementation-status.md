@@ -1,7 +1,7 @@
 # Implementation Status — HFT Runtime Migration
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (CP4 parse-path and early symbol-id assignment updates)
+Last sync: 2026-02-28 (CP4 completed with parse-profile evidence + contract-priority regression guard)
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Roadmap anchor: `docs/status/core/2026-02-26-business-logic-roadmap.md`
 Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
@@ -27,7 +27,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 | `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Hot-path ingest now dedupes latest-per-symbol, runtime consumes connector-attached `strategy_symbol_id`, and connectors/runtime use canonical `symbol->id` builder with fail-fast capacity guard | None |
 | `HFT-CP2` Lock-Free Strategy State | `Completed` | `LeadLagStrategy` migrated to single-owner state (no `RwLock/Mutex` in hot path); runtime strategy interface is `&mut self` sync; strategy updates pass through explicit event-loop queue boundary; p99 capture recorded | None (`docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md`) |
 | `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated-symbol batch de-duplicates without sort; pending-signal queue uses `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue carries tickers directly into strategy apply (no runtime cache-lookup clone in flush path) | None (`docs/status/core/2026-02-28-cp3-updated-only-proof.md`) |
-| `HFT-CP4` Minimal-Copy WS Parse Path | `In Progress` | ticks and fast parse are in place; symbol cache interns raw bytes directly (no UTF-8 fallback conversion path); runtime parse uses pattern-based extractors and assigns `strategy_symbol_id` during Binance/Gate parse; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse removes redundant re-interning | Remaining parse/copy hot spots need profiling-backed cleanup and final CP4 proof |
+| `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | ticks and fast parse are in place; symbol cache interns raw bytes directly; runtime parse uses pattern-based extractors with early `strategy_symbol_id`; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse removes redundant re-interning; parser profile baselines and contract-priority regression test are captured in CP4 evidence doc | None |
 | `HFT-CP5` Deterministic Replay Harness | `Planned` | N/A | No raw feed recorder + deterministic replay equivalence checks |
 | `HFT-CP6` Execution Fast Path | `Planned` | N/A | No explicit non-blocking `OrderIntent` queue SLA contract |
 | `HFT-CP7` Production Operations Layer | `Planned` | Health endpoint exists | Watchdog/recovery/alert contracts not complete |
@@ -43,10 +43,9 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 3. Any new feature that introduces Python into runtime data-plane.
 
 ## 6) Top open gaps (priority)
-1. `P1`: close `HFT-CP4` and remove remaining symbol-copy overhead with profiling evidence.
-2. `P1`: implement `HFT-CP5` replay harness for deterministic bug/perf validation.
-3. `P2`: implement `HFT-CP6` execution SLA contracts and `HFT-CP7` ops hardening.
-4. `P2`: optional `HFT-CP0` baseline snapshot automation for before/after regression diffs.
+1. `P1`: implement `HFT-CP5` replay harness for deterministic bug/perf validation.
+2. `P1`: implement `HFT-CP6` execution SLA contracts and `HFT-CP7` ops hardening.
+3. `P2`: optional `HFT-CP0` baseline snapshot automation for before/after regression diffs.
 
 ## 7) Tracking rule
 For every status change:

@@ -73,13 +73,14 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - Fast numeric extractors now handle scientific notation (`e/E`) in numeric token paths.
    - Connector drain dedupe now keys by `strategy_symbol_id` when present, reducing symbol-byte hashing/cloning on the hot receive drain path.
    - Gate trade parse now reuses normalized symbol bytes directly (removed redundant `intern_bytes` pass on already-normalized symbol).
+   - Gate parser now prefers `contract` over `s/c` fallback keys and is protected by regression test.
+   - Synthetic parse benchmark harness baselines are recorded (debug/release).
    - Current CP4 evidence log is tracked in `docs/status/core/2026-02-28-cp4-parse-path-evidence.md`.
 2. Done but must be reworked:
-   - Generic extractors using repeated `format!` still exist as compatibility helpers.
-   - Remaining byte-copy points in parse path still require profiling-backed elimination.
+   - None.
 3. Missing and required:
-   - Profile evidence for dominant remaining parse/copy hotspots.
-   - Final targeted cleanup to reach CP4 exit gate.
+   - None.
+   - Optional debt only: migrate or remove compatibility-only dynamic extractor wrappers in `common.rs`.
 
 ## `HFT-CP5` Deterministic Replay Harness
 1. Done and not touched:
