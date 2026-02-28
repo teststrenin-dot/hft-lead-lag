@@ -6,7 +6,7 @@ Last sync: 2026-02-28 (CP4 closed; CP5 block 1 raw-feed recorder/replay reader d
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 2. `docs/status/core/2026-02-27-operating-model-spec-v1.md`
-3. `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
+3. `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## Locked direction
 1. Keep business objective unchanged.

@@ -2,26 +2,29 @@
 
 Date: 2026-02-28
 Status: active
-Last sync: 2026-02-28 (CP4 closed; CP5 block 1 raw-feed recorder/replay reader delivered)
+Last sync: 2026-02-28 (core trimmed to 3 canonical docs; operational artifacts moved to dynamics)
 
 ## Purpose
 Single entry point for project status, checkpoint tracking, and operating constraints.
 
 ## Folder layout
-1. `core/` — business objective, operating model, roadmap, implementation status, checkpoint ladder.
-2. `dynamics/` — delivery workflow, contracts freeze, math model.
+1. `core/` — only canonical strategy docs (exactly 3 files).
+2. `dynamics/` — checkpoints, implementation status, evidence, workflow, math model.
 
 ## Read order (canonical)
 1. `core/2026-02-27-business-objective-economic-control-map.md`
-2. `core/2026-02-28-hft-rust-only-checkpoints.md`
-3. `core/2026-02-28-cp4-parse-path-evidence.md`
-4. `core/2026-02-28-cp5-block1-raw-feed-evidence.md`
-5. `core/2026-02-26-business-logic-roadmap.md`
-6. `core/2026-02-26-business-logic-v1-implementation-status.md`
-7. `core/2026-02-27-operating-model-spec-v1.md`
-8. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
-9. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
-10. `dynamics/2026-02-26-project-math-model.md`
+2. `core/2026-02-27-operating-model-spec-v1.md`
+3. `core/2026-02-26-business-logic-roadmap.md`
+4. `dynamics/2026-02-28-hft-rust-only-checkpoints.md`
+5. `dynamics/2026-02-28-hft-checkpoint-readiness-breakdown.md`
+6. `dynamics/2026-02-26-business-logic-v1-implementation-status.md`
+7. `dynamics/2026-02-28-cp2-lock-free-p99-evidence.md`
+8. `dynamics/2026-02-28-cp3-updated-only-proof.md`
+9. `dynamics/2026-02-28-cp4-parse-path-evidence.md`
+10. `dynamics/2026-02-28-cp5-block1-raw-feed-evidence.md`
+11. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
+12. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
+13. `dynamics/2026-02-26-project-math-model.md`
 
 ## Checkpoint system (`HFT-CP*`)
 1. `HFT-CP0` Latency and Allocation Observatory

@@ -84,5 +84,5 @@ Any contract change in sections 1-4 requires:
 2. Regression tests for affected contract.
 3. Docs sync in:
    - `docs/README.md`
-   - `docs/status/core/2026-02-26-business-logic-v1-implementation-status.md`
+   - `docs/status/dynamics/2026-02-26-business-logic-v1-implementation-status.md`
    - `docs/status/dynamics/2026-02-26-project-math-model.md`

@@ -12,7 +12,7 @@ Range: `05f9697..1d4fe35`
 
 ### P2
 1. `open` CP2 closure evidence is useful but methodologically weak: no strict before/after baseline with same load profile.
-- Evidence: `docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md:25`, `docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md:55`.
+- Evidence: `docs/status/dynamics/2026-02-28-cp2-lock-free-p99-evidence.md:25`, `docs/status/dynamics/2026-02-28-cp2-lock-free-p99-evidence.md:55`.
 - Impact: checkpoint claim confidence reduced.
 
 ### P3

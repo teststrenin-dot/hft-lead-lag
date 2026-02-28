@@ -15,4 +15,4 @@ Date: 2026-02-28
 
 ### P3
 1. CP2 evidence should include fixed benchmark protocol (`before/after`, same symbol set, same load window) as checkpoint policy.
-- Evidence: `docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md:21`.
+- Evidence: `docs/status/dynamics/2026-02-28-cp2-lock-free-p99-evidence.md:21`.

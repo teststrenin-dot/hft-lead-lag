@@ -4,7 +4,7 @@ Date: 2026-02-26
 Last sync: 2026-02-28 (CP4 parse-path and early symbol-id assignment updates)
 Scope: математика и формулы, реально используемые в runtime.
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
+Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## Strategic Math Targets (Control Plane)
 These targets align math with business objective (risk-adjusted return under constrained capital).

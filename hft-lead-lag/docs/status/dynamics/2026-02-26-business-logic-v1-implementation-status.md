@@ -4,7 +4,7 @@ Date: 2026-02-26
 Last sync: 2026-02-28 (CP4 closed; CP5 block 1 raw-feed recorder/replay reader delivered)
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Roadmap anchor: `docs/status/core/2026-02-26-business-logic-roadmap.md`
-Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
+Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## 1) Executive status
 1. Core Rust runtime is alive and producing signals/portfolio analytics.
@@ -25,8 +25,8 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
 |---|---|---|---|
 | `HFT-CP0` Latency and Allocation Observatory | `Completed` | `/health` includes staged timestamps, ingest/decision/e2e latency stats, and runtime backlog depths | `order_intent_enqueued_ts` remains proxy-level until CP6 execution queue is live |
 | `HFT-CP1` SymbolId and Allocation Removal | `Completed` | Hot-path ingest now dedupes latest-per-symbol, runtime consumes connector-attached `strategy_symbol_id`, and connectors/runtime use canonical `symbol->id` builder with fail-fast capacity guard | None |
-| `HFT-CP2` Lock-Free Strategy State | `Completed` | `LeadLagStrategy` migrated to single-owner state (no `RwLock/Mutex` in hot path); runtime strategy interface is `&mut self` sync; strategy updates pass through explicit event-loop queue boundary; p99 capture recorded | None (`docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md`) |
-| `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated-symbol batch de-duplicates without sort; pending-signal queue uses `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue carries tickers directly into strategy apply (no runtime cache-lookup clone in flush path) | None (`docs/status/core/2026-02-28-cp3-updated-only-proof.md`) |
+| `HFT-CP2` Lock-Free Strategy State | `Completed` | `LeadLagStrategy` migrated to single-owner state (no `RwLock/Mutex` in hot path); runtime strategy interface is `&mut self` sync; strategy updates pass through explicit event-loop queue boundary; p99 capture recorded | None (`docs/status/dynamics/2026-02-28-cp2-lock-free-p99-evidence.md`) |
+| `HFT-CP3` Event-Driven Updated-Only Processing | `Completed` | Updated-symbol batch de-duplicates without sort; pending-signal queue uses `SymbolId` bitset (`PendingSymbolSet`); strategy-update queue carries tickers directly into strategy apply (no runtime cache-lookup clone in flush path) | None (`docs/status/dynamics/2026-02-28-cp3-updated-only-proof.md`) |
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | ticks and fast parse are in place; symbol cache interns raw bytes directly; runtime parse uses pattern-based extractors with early `strategy_symbol_id`; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse removes redundant re-interning; parser profile baselines and contract-priority regression test are captured in CP4 evidence doc | None |
 | `HFT-CP5` Deterministic Replay Harness | `In Progress` | `src/infrastructure/replay/raw_feed.rs` provides JSONL recorder + strict reader and tests (`round-trip`, `invalid payload`) | Runtime capture wiring + decision/trade equivalence runner still missing |
 | `HFT-CP6` Execution Fast Path | `Planned` | N/A | No explicit non-blocking `OrderIntent` queue SLA contract |

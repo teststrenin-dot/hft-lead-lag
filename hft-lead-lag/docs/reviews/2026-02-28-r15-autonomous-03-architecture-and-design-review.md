@@ -19,4 +19,4 @@ Date: 2026-02-28
 
 ### P3
 1. CP2 evidence doc marks checkpoint complete without strict comparative benchmark contract.
-- Evidence: `docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md:54`.
+- Evidence: `docs/status/dynamics/2026-02-28-cp2-lock-free-p99-evidence.md:54`.

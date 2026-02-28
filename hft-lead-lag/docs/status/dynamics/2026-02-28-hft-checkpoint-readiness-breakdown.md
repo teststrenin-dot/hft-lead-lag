@@ -2,7 +2,7 @@
 
 Date: 2026-02-28
 Status: Active
-Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
+Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
@@ -47,7 +47,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - `LeadLagStrategy` hot-path state is now single-owner (`HashMap` + direct fields), with no `Arc<RwLock<...>>`/`Arc<Mutex<...>>`.
    - Runtime strategy API switched to sync `&mut self` path; event loop feeds strategy updates/checks without async lock points.
    - Event loop now uses explicit strategy-update queue boundary (`enqueue_strategy_updates` -> `flush_strategy_updates`) between ingest and strategy apply.
-   - Live p99 evidence captured and stored in `docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md`.
+   - Live p99 evidence captured and stored in `docs/status/dynamics/2026-02-28-cp2-lock-free-p99-evidence.md`.
 2. Done but must be reworked:
    - None.
 3. Missing and required:
@@ -58,7 +58,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - Pending-symbol scheduling mechanism exists.
    - Pending-symbol store is now `SymbolId` bitset-backed (`PendingSymbolSet`), replacing tree-based pending queue.
    - Strategy-update queue now carries `(ExchangeSide, SymbolId, BookTicker)` and flushes directly into strategy apply (removed runtime latest-cache lookup clone on this path).
-   - Rate-proportional behavior proof is captured in `docs/status/core/2026-02-28-cp3-updated-only-proof.md`.
+   - Rate-proportional behavior proof is captured in `docs/status/dynamics/2026-02-28-cp3-updated-only-proof.md`.
 2. Done but must be reworked:
    - None.
 3. Missing and required:
@@ -75,7 +75,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
    - Gate trade parse now reuses normalized symbol bytes directly (removed redundant `intern_bytes` pass on already-normalized symbol).
    - Gate parser now prefers `contract` over `s/c` fallback keys and is protected by regression test.
    - Synthetic parse benchmark harness baselines are recorded (debug/release).
-   - Current CP4 evidence log is tracked in `docs/status/core/2026-02-28-cp4-parse-path-evidence.md`.
+   - Current CP4 evidence log is tracked in `docs/status/dynamics/2026-02-28-cp4-parse-path-evidence.md`.
 2. Done but must be reworked:
    - None.
 3. Missing and required:
@@ -89,7 +89,7 @@ Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
      - JSONL raw-feed recorder (`seq`, `exchange`, `recv_ts_ns`, `payload_b64`).
      - Strict replay reader with sequence-order validation and payload decode validation.
      - Contract tests for deterministic round-trip and invalid payload rejection.
-   - Evidence captured in `docs/status/core/2026-02-28-cp5-block1-raw-feed-evidence.md`.
+   - Evidence captured in `docs/status/dynamics/2026-02-28-cp5-block1-raw-feed-evidence.md`.
 2. Done but must be reworked:
    - Recorder currently flushes per frame for reliability-first baseline; batching can be optimized after runtime wiring.
 3. Missing and required:

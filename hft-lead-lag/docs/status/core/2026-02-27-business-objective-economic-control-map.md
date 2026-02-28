@@ -46,5 +46,5 @@ Control chain:
 Any architecture or runtime change must update:
 1. This control map.
 2. `docs/status/core/2026-02-26-business-logic-roadmap.md`.
-3. `docs/status/core/2026-02-26-business-logic-v1-implementation-status.md`.
+3. `docs/status/dynamics/2026-02-26-business-logic-v1-implementation-status.md`.
 4. Evidence set (tests/runbook/metrics) for affected checkpoint.

@@ -11,7 +11,7 @@ Date: 2026-02-28
 
 ### P2
 1. CP2 statistical conclusion "p99 bounded/stable" is not benchmarked against pre-change baseline in same controlled run.
-- Evidence: `docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md:25`, `docs/status/core/2026-02-28-cp2-lock-free-p99-evidence.md:59`.
+- Evidence: `docs/status/dynamics/2026-02-28-cp2-lock-free-p99-evidence.md:25`, `docs/status/dynamics/2026-02-28-cp2-lock-free-p99-evidence.md:59`.
 - Consequence: statement is plausible but not mathematically strong for checkpoint closure proof.
 
 ### P3

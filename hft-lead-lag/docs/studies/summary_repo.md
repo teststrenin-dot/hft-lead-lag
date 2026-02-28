@@ -2,7 +2,7 @@
 
 * `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 * `docs/status/core/2026-02-26-business-logic-roadmap.md`
-* `docs/status/core/2026-02-26-business-logic-v1-implementation-status.md`
+* `docs/status/dynamics/2026-02-26-business-logic-v1-implementation-status.md`
 * `docs/status/dynamics/2026-02-26-delivery-contract-first-playbook.md`
 * `docs/status/dynamics/2026-02-27-cp0-contract-freeze-v2.md`
 * плюс код, который “материализует” эти правила: `src/domain/screener/portfolio_runtime.rs` и интеграцию в `src/domain/screener/mod.rs`.

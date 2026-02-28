@@ -3,7 +3,7 @@
 Date: 2026-02-26
 Scope: mandatory workflow for `HFT-CP*` delivery.
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Checkpoint set: `docs/status/core/2026-02-28-hft-rust-only-checkpoints.md`
+Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 Last delivery sync: 2026-02-28 (CP4 parse-path and early symbol-id assignment updates)
 
 ## 0) Strategic pre-check (mandatory)
