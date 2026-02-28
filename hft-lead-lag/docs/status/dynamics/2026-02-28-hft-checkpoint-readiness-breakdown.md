@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
-Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM4 contract closed)
+Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM3/RM4 contracts closed)
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
@@ -159,16 +159,21 @@ Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`; RM4 contract 
 
 ## `HFT-RM3` 2-core host budget guardrails
 1. Done and not touched:
-   - Runtime has explicit startup host caps via env for symbols and runtime-grid fanout:
+   - Runtime has explicit startup host caps for symbols and runtime-grid fanout:
      - `MAX_STRATEGY_SYMBOLS`
      - `MAX_SCREENER_SYMBOLS`
      - `MAX_RUNTIME_GRID_CONFIGS`
-   - Cap application is logged with before/after counts.
+   - Frozen default profile is applied when env overrides are absent:
+     - strategy symbols: `64`
+     - screener symbols: `128`
+     - runtime-grid configs: `512`
+   - Cap application is logged with before/after counts and cap source (`env` or `2core_default`).
+   - Evidence is captured in `docs/status/dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`.
 2. Done but must be reworked:
-   - Defaults remain permissive; 2-core strict profile still depends on operator-provided env values.
+   - None.
 3. Missing and required:
-   - Freeze and document default production cap profile for 2-core host.
-   - Add capped-profile evidence run (`/health` backlog + p99) to close RM3.
+   - None for RM3 closure.
+   - CP7 can optionally add continuous capped-profile health-window auditing as ops automation.
 
 ## `HFT-RM4` Numeric HFT SLO freeze
 1. Done and not touched:

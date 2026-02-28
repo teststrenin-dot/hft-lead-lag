@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (stud2 remediation track integrated; RM4 numeric SLO freeze closed)
+Last sync: 2026-02-28 (stud2 remediation track integrated; RM3/RM4 closure synced)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -50,7 +50,7 @@ Last sync: 2026-02-28 (stud2 remediation track integrated; RM4 numeric SLO freez
 |---|---|---|
 | `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | Runtime mode wiring starts: hot loop must support execution without per-tick screener ingest path. |
 | `HFT-RM2` Screener decoupling from data-plane | `In progress` | Bounded control-worker handoff is wired with latest-by-symbol overflow policy and health telemetry; compatibility fallback path still needs hard boundary. |
-| `HFT-RM3` 2-core host budget guardrails | `In progress` | Symbol/config fanout caps are enforceable at startup via env; production default profile is not frozen yet. |
+| `HFT-RM3` 2-core host budget guardrails | `Completed` | Runtime now enforces frozen 2-core defaults for strategy symbols, screener symbols, and runtime-grid configs; env remains override-only (`docs/status/dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`). |
 | `HFT-RM4` Numeric HFT SLO freeze | `Completed` | Core docs now contain numeric latency/backlog/drop envelopes and explicit `degraded/non-HFT` fail rule tied to `/health` (`business-objective-economic-control-map.md`, `operating-model-spec-v1.md`). |
 
 ## Rule -> Code -> Test Matrix
@@ -92,7 +92,7 @@ Last sync: 2026-02-28 (stud2 remediation track integrated; RM4 numeric SLO freez
 6. `HFT-CP6` delivered and hardened (execution fast path, intent->sent SLA, overflow/stale/cooldown safeguards).
 7. Deliver `HFT-CP7` (operations hardening and deterministic recovery).
 8. Deliver `HFT-RM1` and `HFT-RM2` to complete hot-path/control-plane boundary.
-9. Deliver `HFT-RM3` and wire CP7 ops automation to enforce existing `HFT-RM4` SLO governance at runtime.
+9. Wire CP7 ops automation to enforce existing `HFT-RM4` SLO governance at runtime.
 
 ## Legacy continuity map
 1. Legacy signal/validation/scoring remains reusable baseline.

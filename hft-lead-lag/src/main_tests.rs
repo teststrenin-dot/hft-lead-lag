@@ -46,9 +46,18 @@ fn apply_symbol_cap_respects_env_limit() {
         "ETHUSDT".to_string(),
         "SOLUSDT".to_string(),
     ];
-    let capped = apply_symbol_cap(symbols, MAX_STRATEGY_SYMBOLS_ENV);
+    let capped = apply_symbol_cap(symbols, MAX_STRATEGY_SYMBOLS_ENV, 64);
     assert_eq!(capped, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
     std::env::remove_var(MAX_STRATEGY_SYMBOLS_ENV);
+}
+
+#[test]
+fn apply_symbol_cap_uses_2core_default_when_env_missing() {
+    let _lock = env_test_lock();
+    std::env::remove_var(MAX_STRATEGY_SYMBOLS_ENV);
+    let symbols: Vec<String> = (0..80).map(|i| format!("S{i}USDT")).collect();
+    let capped = apply_symbol_cap(symbols, MAX_STRATEGY_SYMBOLS_ENV, 64);
+    assert_eq!(capped.len(), 64);
 }
 
 #[test]
@@ -61,9 +70,18 @@ fn apply_runtime_grid_config_cap_respects_env_limit() {
         TraderConfig::default(),
         TraderConfig::default(),
     ];
-    let capped = apply_runtime_grid_config_cap(configs);
+    let capped = apply_runtime_grid_config_cap(configs, 512);
     assert_eq!(capped.len(), 3);
     std::env::remove_var(MAX_RUNTIME_GRID_CONFIGS_ENV);
+}
+
+#[test]
+fn apply_runtime_grid_config_cap_uses_2core_default_when_env_missing() {
+    let _lock = env_test_lock();
+    std::env::remove_var(MAX_RUNTIME_GRID_CONFIGS_ENV);
+    let configs = vec![TraderConfig::default(); 700];
+    let capped = apply_runtime_grid_config_cap(configs, 512);
+    assert_eq!(capped.len(), 512);
 }
 
 #[test]

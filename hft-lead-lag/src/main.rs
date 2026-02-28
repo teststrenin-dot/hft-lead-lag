@@ -109,6 +109,9 @@ const RUNTIME_PLANE_MODE_ENV: &str = "RUNTIME_PLANE_MODE";
 const MAX_STRATEGY_SYMBOLS_ENV: &str = "MAX_STRATEGY_SYMBOLS";
 const MAX_SCREENER_SYMBOLS_ENV: &str = "MAX_SCREENER_SYMBOLS";
 const MAX_RUNTIME_GRID_CONFIGS_ENV: &str = "MAX_RUNTIME_GRID_CONFIGS";
+const DEFAULT_MAX_STRATEGY_SYMBOLS_2CORE: usize = 64;
+const DEFAULT_MAX_SCREENER_SYMBOLS_2CORE: usize = 128;
+const DEFAULT_MAX_RUNTIME_GRID_CONFIGS_2CORE: usize = 512;
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
 
@@ -156,14 +159,18 @@ fn parse_env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok()?.trim().parse::<usize>().ok()
 }
 
-fn apply_symbol_cap(mut symbols: Vec<String>, env_name: &str) -> Vec<String> {
-    let Some(limit) = parse_env_usize(env_name).filter(|value| *value > 0) else {
-        return symbols;
-    };
+fn apply_symbol_cap(mut symbols: Vec<String>, env_name: &str, default_limit: usize) -> Vec<String> {
+    let env_limit = parse_env_usize(env_name).filter(|value| *value > 0);
+    let limit = env_limit.unwrap_or(default_limit);
     if symbols.len() > limit {
         warn!(
-            "{} applied: {} -> {} symbols",
+            "{} cap applied (source={}): {} -> {} symbols",
             env_name,
+            if env_limit.is_some() {
+                "env"
+            } else {
+                "2core_default"
+            },
             symbols.len(),
             limit
         );
@@ -172,15 +179,21 @@ fn apply_symbol_cap(mut symbols: Vec<String>, env_name: &str) -> Vec<String> {
     symbols
 }
 
-fn apply_runtime_grid_config_cap(mut configs: Vec<TraderConfig>) -> Vec<TraderConfig> {
-    let Some(limit) = parse_env_usize(MAX_RUNTIME_GRID_CONFIGS_ENV).filter(|value| *value > 0)
-    else {
-        return configs;
-    };
+fn apply_runtime_grid_config_cap(
+    mut configs: Vec<TraderConfig>,
+    default_limit: usize,
+) -> Vec<TraderConfig> {
+    let env_limit = parse_env_usize(MAX_RUNTIME_GRID_CONFIGS_ENV).filter(|value| *value > 0);
+    let limit = env_limit.unwrap_or(default_limit);
     if configs.len() > limit {
         warn!(
-            "{} applied: {} -> {} configs",
+            "{} cap applied (source={}): {} -> {} configs",
             MAX_RUNTIME_GRID_CONFIGS_ENV,
+            if env_limit.is_some() {
+                "env"
+            } else {
+                "2core_default"
+            },
             configs.len(),
             limit
         );
@@ -374,8 +387,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         screener_symbols,
         gate_vol_map,
     } = universe;
-    let strategy_symbols = apply_symbol_cap(strategy_symbols, MAX_STRATEGY_SYMBOLS_ENV);
-    let screener_symbols = apply_symbol_cap(screener_symbols, MAX_SCREENER_SYMBOLS_ENV);
+    let strategy_symbols = apply_symbol_cap(
+        strategy_symbols,
+        MAX_STRATEGY_SYMBOLS_ENV,
+        DEFAULT_MAX_STRATEGY_SYMBOLS_2CORE,
+    );
+    let screener_symbols = apply_symbol_cap(
+        screener_symbols,
+        MAX_SCREENER_SYMBOLS_ENV,
+        DEFAULT_MAX_SCREENER_SYMBOLS_2CORE,
+    );
 
     // Initialize exchange connectors
     let mut binance = BinanceMarketData::new();
@@ -423,7 +444,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(generation) => {
                 runtime_grid_last_modified = Some(generation.modified);
                 if generation.config.enabled {
-                    let capped_configs = apply_runtime_grid_config_cap(generation.configs);
+                    let capped_configs = apply_runtime_grid_config_cap(
+                        generation.configs,
+                        DEFAULT_MAX_RUNTIME_GRID_CONFIGS_2CORE,
+                    );
                     let report = screener.replace_fleet_configs(capped_configs);
                     runtime_grid_last_signature = Some(generation.signature);
                     info!(
