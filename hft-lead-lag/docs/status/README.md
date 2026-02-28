@@ -2,7 +2,7 @@
 
 Date: 2026-02-28
 Status: active
-Last sync: 2026-02-28 (RM5 control-plane isolation + coalescing synced)
+Last sync: 2026-02-28 (CP7 block8 external alert-hook script added)
 
 ## Purpose
 Single entry point for project status, checkpoint tracking, and operating constraints.
@@ -28,9 +28,26 @@ Single entry point for project status, checkpoint tracking, and operating constr
 14. `dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`
 15. `dynamics/2026-02-28-rm5-control-plane-threaded-coalescing-evidence.md`
 16. `dynamics/2026-02-28-cp7-block1-rm4-health-enforcement.md`
-17. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
-18. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
-19. `dynamics/2026-02-26-project-math-model.md`
+17. `dynamics/2026-02-28-rm4-hft-core-live-slo-validation.md`
+18. `dynamics/2026-02-28-cp7-block2-event-driven-signal-loop-evidence.md`
+19. `dynamics/2026-02-28-cp7-block3-watchdog-stall-evidence.md`
+20. `dynamics/2026-02-28-cp7-block4-recovery-runbook-v1.md`
+21. `dynamics/2026-02-28-cp7-block5-recovery-drill-automation-evidence.md`
+22. `dynamics/2026-02-28-cp7-block6-dbwriter-drift-alert-evidence.md`
+23. `dynamics/2026-02-28-cp7-block7-alert-level-escalation-contract.md`
+24. `dynamics/2026-02-28-cp7-block8-alert-hook-script-evidence.md`
+25. `dynamics/2026-02-28-observer-scout-forward-control-evidence.md`
+26. `dynamics/2026-02-28-e2e-forward-race-gap-list.md`
+27. `dynamics/2026-02-28-forward-rust-runtime-runner-evidence.md`
+28. `dynamics/2026-02-28-forward-ui-live-race-lifecycle-evidence.md`
+29. `dynamics/2026-02-28-forward-fresh-start-guardrails-evidence.md`
+30. `dynamics/2026-02-28-e2e-forward-race-acceptance-evidence.md`
+31. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
+32. `dynamics/2026-02-26-project-math-model.md`
+
+## Archived dynamics docs
+1. `dynamics/archive/2026-02-27-cp0-contract-freeze-v2.md` (stale surface contract from pre-HFT observer scope).
+2. `dynamics/archive/2026-02-27-cp6-1-forward-only-orchestration-spec.md` (legacy forward-only orchestration draft).
 
 ## Checkpoint system (`HFT-CP*`)
 1. `HFT-CP0` Latency and Allocation Observatory

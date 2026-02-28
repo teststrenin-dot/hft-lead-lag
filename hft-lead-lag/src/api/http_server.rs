@@ -59,6 +59,13 @@ pub struct HealthState {
     pub runtime_end_to_end_p95_us: AtomicU64,
     pub runtime_end_to_end_p99_us: AtomicU64,
     pub runtime_end_to_end_max_us: AtomicU64,
+    pub runtime_drift_samples: AtomicU64,
+    pub runtime_drift_avg_ms: AtomicI64,
+    pub runtime_drift_p50_ms: AtomicI64,
+    pub runtime_drift_p95_ms: AtomicI64,
+    pub runtime_drift_p99_ms: AtomicI64,
+    pub runtime_drift_abs_p99_ms: AtomicU64,
+    pub runtime_drift_abs_max_ms: AtomicU64,
     pub runtime_binance_msg_queue_depth: AtomicU64,
     pub runtime_gate_msg_queue_depth: AtomicU64,
     pub runtime_signal_backlog_depth: AtomicU64,
@@ -116,6 +123,13 @@ impl HealthState {
             runtime_end_to_end_p95_us: AtomicU64::new(0),
             runtime_end_to_end_p99_us: AtomicU64::new(0),
             runtime_end_to_end_max_us: AtomicU64::new(0),
+            runtime_drift_samples: AtomicU64::new(0),
+            runtime_drift_avg_ms: AtomicI64::new(0),
+            runtime_drift_p50_ms: AtomicI64::new(0),
+            runtime_drift_p95_ms: AtomicI64::new(0),
+            runtime_drift_p99_ms: AtomicI64::new(0),
+            runtime_drift_abs_p99_ms: AtomicU64::new(0),
+            runtime_drift_abs_max_ms: AtomicU64::new(0),
             runtime_binance_msg_queue_depth: AtomicU64::new(0),
             runtime_gate_msg_queue_depth: AtomicU64::new(0),
             runtime_signal_backlog_depth: AtomicU64::new(0),
@@ -159,6 +173,13 @@ pub struct HttpServer {
     min_volume_usd: f64,
     screener: ScreenerStore,
     health: Arc<HealthState>,
+    surface: HttpServerSurface,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpServerSurface {
+    Full,
+    HealthOnly,
 }
 
 impl HttpServer {
@@ -167,12 +188,14 @@ impl HttpServer {
         min_volume_usd: f64,
         screener: ScreenerStore,
         health: Arc<HealthState>,
+        surface: HttpServerSurface,
     ) -> Self {
         Self {
             config,
             min_volume_usd,
             screener,
             health,
+            surface,
         }
     }
 
@@ -206,68 +229,77 @@ impl HttpServer {
             db_path,
         });
 
-        let app = Router::new()
-            .route(endpoints::HEALTH, get(handlers::health))
-            .route(endpoints::SYMBOLS, get(handlers::get_symbols))
-            .route(endpoints::SCREENER_DATA, get(handlers::get_screener))
-            .route(endpoints::SCREENER_PAGE, get(templates::screener_page))
-            .route(endpoints::PORTFOLIO_PAGE, get(templates::portfolio_page))
-            .route(
-                endpoints::PORTFOLIO_ACTIVE,
-                get(handlers::get_portfolio_active),
-            )
-            .route(
-                endpoints::PORTFOLIO_CANDIDATES,
-                get(handlers::get_portfolio_candidates),
-            )
-            .route(
-                endpoints::PORTFOLIO_PERFORMANCE,
-                get(handlers::get_portfolio_performance),
-            )
-            .route(
-                endpoints::PORTFOLIO_GUARDS,
-                get(handlers::get_portfolio_guards),
-            )
-            .route(endpoints::SHADOW_DEBUG, get(handlers::get_shadow_debug))
-            .route(endpoints::CHART_DATA, get(handlers::get_chart_data))
-            .route(endpoints::FLEET_RANKING, get(handlers::get_fleet_ranking))
-            .route(endpoints::FLEET_RANKED, get(handlers::get_fleet_ranked))
-            .route(endpoints::FLEET_SYMBOLS, get(handlers::get_fleet_by_symbol))
-            .route(
-                endpoints::FLEET_POLICY_OVERVIEW,
-                get(handlers::get_fleet_policy_overview),
-            )
-            .route(
-                endpoints::FLEET_POLICY_FOR_SYMBOL,
-                get(handlers::get_fleet_policy_for_symbol),
-            )
-            .route(endpoints::FORWARD_RUNS, get(handlers::get_forward_runs))
-            .route(
-                endpoints::FORWARD_SYMBOLS,
-                get(handlers::get_forward_by_symbol),
-            )
-            .route(endpoints::FLEET_PAGE, get(templates::fleet_page))
-            .route(endpoints::TRIALS_PAGE, get(templates::trials_page))
-            .route(endpoints::TRIALS, get(handlers::get_trial_runs))
-            .route(endpoints::TRIALS_AXES, get(handlers::get_trial_axes))
-            .route(endpoints::TRIALS_RUN_ID, get(handlers::get_trial_configs))
-            .route(
-                endpoints::TRIALS_RUNNER_CONFIG,
-                get(handlers::get_trial_runner_config),
-            )
-            .route(
-                endpoints::TRIALS_RUNNER_STATUS,
-                get(handlers::get_trial_runner_status),
-            )
-            .route(
-                endpoints::TRIALS_RUNNER_START,
-                post(handlers::start_trial_runner),
-            )
-            .route(
-                endpoints::TRIALS_RUNNER_STOP,
-                post(handlers::stop_trial_runner),
-            )
-            .with_state(state);
+        let app = match self.surface {
+            HttpServerSurface::HealthOnly => Router::new()
+                .route(endpoints::HEALTH, get(handlers::health))
+                .with_state(state),
+            HttpServerSurface::Full => Router::new()
+                .route(endpoints::HEALTH, get(handlers::health))
+                .route(endpoints::SYMBOLS, get(handlers::get_symbols))
+                .route(endpoints::SCREENER_DATA, get(handlers::get_screener))
+                .route(endpoints::SCREENER_PAGE, get(templates::screener_page))
+                .route(endpoints::PORTFOLIO_PAGE, get(templates::portfolio_page))
+                .route(
+                    endpoints::PORTFOLIO_ACTIVE,
+                    get(handlers::get_portfolio_active),
+                )
+                .route(
+                    endpoints::PORTFOLIO_CANDIDATES,
+                    get(handlers::get_portfolio_candidates),
+                )
+                .route(
+                    endpoints::PORTFOLIO_PERFORMANCE,
+                    get(handlers::get_portfolio_performance),
+                )
+                .route(
+                    endpoints::PORTFOLIO_GUARDS,
+                    get(handlers::get_portfolio_guards),
+                )
+                .route(endpoints::SHADOW_DEBUG, get(handlers::get_shadow_debug))
+                .route(endpoints::CHART_DATA, get(handlers::get_chart_data))
+                .route(endpoints::FLEET_RANKING, get(handlers::get_fleet_ranking))
+                .route(endpoints::FLEET_RANKED, get(handlers::get_fleet_ranked))
+                .route(endpoints::FLEET_SYMBOLS, get(handlers::get_fleet_by_symbol))
+                .route(
+                    endpoints::FLEET_POLICY_OVERVIEW,
+                    get(handlers::get_fleet_policy_overview),
+                )
+                .route(
+                    endpoints::FLEET_POLICY_FOR_SYMBOL,
+                    get(handlers::get_fleet_policy_for_symbol),
+                )
+                .route(endpoints::FORWARD_RUNS, get(handlers::get_forward_runs))
+                .route(
+                    endpoints::FORWARD_SYMBOLS,
+                    get(handlers::get_forward_by_symbol),
+                )
+                .route(
+                    endpoints::FORWARD_FRESH_START,
+                    post(handlers::post_forward_fresh_start),
+                )
+                .route(endpoints::FLEET_PAGE, get(templates::fleet_page))
+                .route(endpoints::TRIALS_PAGE, get(templates::trials_page))
+                .route(endpoints::TRIALS, get(handlers::get_trial_runs))
+                .route(endpoints::TRIALS_AXES, get(handlers::get_trial_axes))
+                .route(endpoints::TRIALS_RUN_ID, get(handlers::get_trial_configs))
+                .route(
+                    endpoints::TRIALS_RUNNER_CONFIG,
+                    get(handlers::get_trial_runner_config),
+                )
+                .route(
+                    endpoints::TRIALS_RUNNER_STATUS,
+                    get(handlers::get_trial_runner_status),
+                )
+                .route(
+                    endpoints::TRIALS_RUNNER_START,
+                    post(handlers::start_trial_runner),
+                )
+                .route(
+                    endpoints::TRIALS_RUNNER_STOP,
+                    post(handlers::stop_trial_runner),
+                )
+                .with_state(state),
+        };
 
         axum::serve(listener, app).await?;
         Ok(())
@@ -294,6 +326,7 @@ pub mod endpoints {
     pub const FLEET_POLICY_FOR_SYMBOL: &str = "/api/v1/fleet/policy/:symbol";
     pub const FORWARD_RUNS: &str = "/api/v1/forward/runs";
     pub const FORWARD_SYMBOLS: &str = "/api/v1/forward/symbols";
+    pub const FORWARD_FRESH_START: &str = "/api/v1/forward/fresh-start";
     pub const FLEET_PAGE: &str = "/fleet";
     pub const TRIALS_PAGE: &str = "/trials";
     pub const TRIALS: &str = "/api/v1/trials";

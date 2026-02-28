@@ -62,6 +62,7 @@ pub(crate) struct HttpState {
 #[derive(Debug, Serialize)]
 pub(crate) struct HealthResponse {
     status: &'static str,
+    alert_level: &'static str,
     binance: bool,
     gate: bool,
     binance_last_tick_age_ms: i64,
@@ -78,12 +79,17 @@ pub(crate) struct HealthResponse {
     db_overflowed_batches: u64,
     db_dropped_batch_budget: u64,
     db_overflow_warn_threshold: u64,
+    db_writer_enqueued_seq: u64,
+    db_writer_observed_seq: u64,
+    db_writer_backlog_seq: u64,
+    db_writer_last_progress_age_ms: Option<i64>,
     execution_sent_intents: u64,
     execution_dropped_intents: u64,
     execution_send_timeouts: u64,
     execution_kill_switch_active: bool,
     runtime_stage_timestamps: RuntimeStageTimestamps,
     runtime_latency_us: RuntimeLatencySnapshot,
+    runtime_drift_ms: RuntimeDriftSnapshot,
     runtime_backlog_depth: RuntimeBacklogDepth,
     hft_mode_status: &'static str,
     hft_mode_ever_degraded: bool,
@@ -119,6 +125,17 @@ pub(crate) struct RuntimeLatencySnapshot {
     decision: RuntimeLatencyStats,
     end_to_end: RuntimeLatencyStats,
     execution_intent_to_sent: RuntimeLatencyStats,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RuntimeDriftSnapshot {
+    samples: u64,
+    avg_ms: i64,
+    p50_ms: i64,
+    p95_ms: i64,
+    p99_ms: i64,
+    abs_p99_ms: u64,
+    abs_max_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -876,6 +893,68 @@ pub(crate) async fn get_forward_by_symbol(
         rusqlite::params![run_id],
     )?;
     Ok(Json(result))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ForwardFreshStartRequest {
+    confirm: bool,
+    run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ForwardFreshStartResponse {
+    run_id: String,
+    config_count: usize,
+    symbols_reset: usize,
+    drained_trades: usize,
+}
+
+pub(crate) async fn post_forward_fresh_start(
+    State(state): State<Arc<HttpState>>,
+    Json(req): Json<ForwardFreshStartRequest>,
+) -> Result<Json<ForwardFreshStartResponse>, (axum::http::StatusCode, String)> {
+    if !req.confirm {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "confirm=true is required for fresh start".to_string(),
+        ));
+    }
+
+    let runner = state.trial_runner.status(1).await;
+    if runner.running {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "stop active runner before fresh start".to_string(),
+        ));
+    }
+
+    let now_ms = crate::domain::screener::utils::now_ms();
+    let run_id = req
+        .run_id
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or_else(|| format!("forward-{now_ms}-fresh"));
+    if !run_id.starts_with("forward-") {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "run_id must start with forward-".to_string(),
+        ));
+    }
+
+    let configs = state.screener.fleet_configs();
+    let config_count = configs.len();
+    let reload = state.screener.replace_fleet_configs((*configs).clone());
+    state
+        .screener
+        .restore_portfolio_runtime_v1_from_db_rows(&[], &[]);
+    state.screener.set_run_id(Some(run_id.clone()));
+
+    Ok(Json(ForwardFreshStartResponse {
+        run_id,
+        config_count,
+        symbols_reset: reload.symbols_reset,
+        drained_trades: reload.drained_trades,
+    }))
 }
 
 #[derive(Debug, Serialize)]

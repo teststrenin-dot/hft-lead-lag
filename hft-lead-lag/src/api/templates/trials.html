@@ -25,6 +25,8 @@
     .card .label { font-size:11px; color:#9ca3af; }
     .card .value { font-size:20px; font-weight:600; margin-top:2px; }
     .pos { color: #34d399; } .neg { color: #f87171; }
+    .muted { color: #9ca3af; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
 
     .runner-panel { background:#111827; border:1px solid #1f2937; border-radius:8px; padding:12px; margin: 8px 0 16px; }
     .runner-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap:8px; align-items:end; }
@@ -212,6 +214,7 @@
       <div class="run-select">
         <label style="font-size:12px;color:#9ca3af;">Forward run: </label>
         <select id="forward-run-filter"><option value="">No forward runs</option></select>
+        <button id="forward-fresh-start" class="btn btn-stop" style="margin-left:8px;">Fresh Start</button>
       </div>
       <div class="meta" id="forward-meta">Loading forward data…</div>
 
@@ -233,6 +236,23 @@
           <th class="num">Trades</th><th class="num">Wins</th>
           <th class="num">WR%</th>
           <th class="num">PnL%</th><th class="num">Avg%</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <h2>Live Portfolio Allocation (race)</h2>
+      <table id="tbl-forward-live-active">
+        <thead><tr>
+          <th>Portfolio</th><th>Active Symbols</th><th>Shortlist</th><th class="num">Active Count</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <h2>Live Candidate Race</h2>
+      <table id="tbl-forward-live-candidates">
+        <thead><tr>
+          <th>Symbol</th><th class="num">Age (min)</th><th class="num">Trades</th><th class="num">Useful WR%</th>
+          <th class="num">pm_raw</th><th class="num">Avg PnL%</th><th class="num">Wins</th><th class="num">Loses</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -263,6 +283,10 @@ const maybeNum = id => {
   const v = Number(raw);
   return Number.isFinite(v) ? v : null;
 };
+const listFmt = arr => {
+  const items = Array.isArray(arr) ? arr : [];
+  return items.length ? `<span class="mono">${items.join(', ')}</span>` : '<span class="muted">-</span>';
+};
 
 const AXIS_LABELS = {
   spike_threshold_bps: 'Spike (bps)',
@@ -281,16 +305,26 @@ let activeTab = 'trials';
 let forwardGlobalRows = [];
 let forwardSymbolRows = [];
 let forwardRuns = [];
+let forwardLiveActiveRows = [];
+let forwardLiveCandidateRows = [];
+let forwardLivePerformanceRows = [];
+let latestRunnerStatus = null;
+let latestHealth = null;
 const PHASES_BY_TAB = {
-  trials: ['scout', 'expand'],
-  forward: ['forward', 'promote'],
+  trials: ['scout'],
+  forward: ['forward'],
 };
 let runnerConfig = {
   phases: [
     { name: 'scout' },
-    { name: 'expand' },
-    { name: 'forward' },
-    { name: 'promote' },
+    {
+      name: 'forward',
+      max_budget: 240,
+      grace_period: 60,
+      report_interval: 30,
+      max_refs: 64,
+      max_configs: 1200,
+    },
   ]
 };
 
@@ -347,22 +381,49 @@ function setActiveTab(tab, syncUrl=true) {
 function renderForward() {
   const globalRows = Array.isArray(forwardGlobalRows) ? forwardGlobalRows : [];
   const symbolRows = Array.isArray(forwardSymbolRows) ? forwardSymbolRows : [];
+  const liveActiveRows = Array.isArray(forwardLiveActiveRows) ? forwardLiveActiveRows : [];
+  const liveCandidateRows = Array.isArray(forwardLiveCandidateRows) ? forwardLiveCandidateRows : [];
+  const livePerfRows = Array.isArray(forwardLivePerformanceRows) ? forwardLivePerformanceRows : [];
   const runMeta = (forwardRuns || []).find(r => r.run_id === selectedForwardRunId) || null;
+  const activeRunId = latestHealth?.trial_active_run_id || '-';
+  const ackStatus = latestHealth?.trial_last_ack_status || '-';
+  const lastForwardJob = (latestRunnerStatus?.recent_jobs || []).find(j => j.phase === 'forward') || null;
+  const runnerActive = (latestRunnerStatus?.running && latestRunnerStatus?.active_job)
+    ? latestRunnerStatus.active_job
+    : null;
+  const runnerMarker = runnerActive
+    ? `${runnerActive.phase}:${runnerActive.state}`
+    : 'idle';
+  const lastForwardMarker = lastForwardJob
+    ? `${lastForwardJob.state}@${tsFmt(lastForwardJob.finished_at_ms || lastForwardJob.started_at_ms)}`
+    : '-';
+  const lifecycleMeta = `active_run=${activeRunId} | runner=${runnerMarker} | last_forward=${lastForwardMarker} | ack=${ackStatus}`;
 
   const totalTrades = runMeta ? asNum(runMeta.total_trades, 0) : globalRows.reduce((s, r) => s + asNum(r.total_trades, 0), 0);
   const profConfigs = globalRows.filter(r => asNum(r.avg_pnl_pct, 0) > 0).length;
   const profSymbols = symbolRows.filter(r => asNum(r.avg_pnl_pct, 0) > 0).length;
   const bestAvg = globalRows.length ? asNum(globalRows[0].avg_pnl_pct, 0) : 0;
+  const liveActiveCount = liveActiveRows.reduce((sum, row) => {
+    const active = Array.isArray(row.active_symbols) ? row.active_symbols.length : 0;
+    return sum + active;
+  }, 0);
+  const liveTotalCandidates = liveCandidateRows.length;
+  const liveTotalEquity = livePerfRows.reduce((sum, row) => sum + asNum(row.equity_usd, 0), 0);
+  const liveTotalPnl = livePerfRows.reduce((sum, row) => sum + asNum(row.realized_pnl_usd, 0), 0);
 
   document.getElementById('forward-summary').innerHTML = `
     <div class="card"><div class="label">Total Trades</div><div class="value">${totalTrades.toLocaleString()}</div></div>
     <div class="card"><div class="label">Profitable Configs</div><div class="value ${profConfigs?'pos':'neg'}">${profConfigs}/${globalRows.length}</div></div>
     <div class="card"><div class="label">Profitable Symbols</div><div class="value ${profSymbols?'pos':'neg'}">${profSymbols}/${symbolRows.length}</div></div>
     <div class="card"><div class="label">Best Avg PnL</div><div class="value ${bestAvg>=0?'pos':'neg'}">${bestAvg>=0?'+':''}${bestAvg.toFixed(4)}%</div></div>
+    <div class="card"><div class="label">Live Active Symbols</div><div class="value">${liveActiveCount}</div></div>
+    <div class="card"><div class="label">Live Candidates</div><div class="value">${liveTotalCandidates}</div></div>
+    <div class="card"><div class="label">Live Equity</div><div class="value">${liveTotalEquity.toFixed(2)}</div></div>
+    <div class="card"><div class="label">Live Realized PnL</div><div class="value ${liveTotalPnl>=0?'pos':'neg'}">${liveTotalPnl>=0?'+':''}${liveTotalPnl.toFixed(2)}</div></div>
   `;
   document.getElementById('forward-meta').textContent = runMeta
-    ? `run=${runMeta.run_id} | trades=${asNum(runMeta.total_trades, 0)} | avg=${asNum(runMeta.avg_pnl_pct, 0).toFixed(4)}% | updated ${new Date().toLocaleTimeString()}`
-    : 'No forward data';
+    ? `run=${runMeta.run_id} | trades=${asNum(runMeta.total_trades, 0)} | avg=${asNum(runMeta.avg_pnl_pct, 0).toFixed(4)}% | ${lifecycleMeta} | updated ${new Date().toLocaleTimeString()}`
+    : `No forward data | ${lifecycleMeta}`;
 
   const gb = document.querySelector('#tbl-forward-global tbody');
   gb.innerHTML = globalRows.map((r, i) =>
@@ -403,13 +464,69 @@ function renderForward() {
       <td class="num">${cl(r.avg_pnl_pct)}</td>
     </tr>`
   ).join('');
+
+  const liveActiveBody = document.querySelector('#tbl-forward-live-active tbody');
+  if (!liveActiveRows.length) {
+    liveActiveBody.innerHTML = '<tr><td colspan="4" class="muted">No live portfolio allocation yet</td></tr>';
+  } else {
+    liveActiveBody.innerHTML = liveActiveRows.map(r => {
+      const activeSymbols = Array.isArray(r.active_symbols) ? r.active_symbols : [];
+      return `<tr>
+        <td><b>${r.portfolio_id ?? '-'}</b></td>
+        <td>${listFmt(activeSymbols)}</td>
+        <td>${listFmt(r.shortlist)}</td>
+        <td class="num">${activeSymbols.length}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  const liveCandidatesBody = document.querySelector('#tbl-forward-live-candidates tbody');
+  if (!liveCandidateRows.length) {
+    liveCandidatesBody.innerHTML = '<tr><td colspan="8" class="muted">No live candidate race data yet</td></tr>';
+  } else {
+    liveCandidatesBody.innerHTML = liveCandidateRows.slice(0, 30).map(r => `
+      <tr>
+        <td><b>${r.symbol ?? '-'}</b></td>
+        <td class="num">${asNum(r.age_minutes_from_first_tick, 0)}</td>
+        <td class="num">${asNum(r.closed_trades, 0)}</td>
+        <td class="num">${asNum(r.useful_winrate_pct, 0).toFixed(1)}</td>
+        <td class="num">${asNum(r.pm_raw, 0)}</td>
+        <td class="num">${cl(r.avg_pnl_pct)}</td>
+        <td class="num">${asNum(r.profitable_trades, 0)}</td>
+        <td class="num">${asNum(r.losing_trades, 0)}</td>
+      </tr>
+    `).join('');
+  }
 }
 
 async function loadForward() {
   try {
-    const runsRes = await fetch('/api/v1/forward/runs');
+    const [runsRes, activeRes, candidatesRes, perfRes] = await Promise.all([
+      fetch('/api/v1/forward/runs'),
+      fetch('/api/v1/portfolio/active', { cache: 'no-store' }),
+      fetch('/api/v1/portfolio/candidates', { cache: 'no-store' }),
+      fetch('/api/v1/portfolio/performance', { cache: 'no-store' }),
+    ]);
     if (!runsRes.ok) return;
     forwardRuns = await runsRes.json();
+    if (activeRes.ok) {
+      const active = await activeRes.json();
+      forwardLiveActiveRows = Array.isArray(active.portfolios) ? active.portfolios : [];
+    } else {
+      forwardLiveActiveRows = [];
+    }
+    if (candidatesRes.ok) {
+      const candidates = await candidatesRes.json();
+      forwardLiveCandidateRows = Array.isArray(candidates.rows) ? candidates.rows : [];
+    } else {
+      forwardLiveCandidateRows = [];
+    }
+    if (perfRes.ok) {
+      const perf = await perfRes.json();
+      forwardLivePerformanceRows = Array.isArray(perf.portfolios) ? perf.portfolios : [];
+    } else {
+      forwardLivePerformanceRows = [];
+    }
 
     const sel = document.getElementById('forward-run-filter');
     sel.innerHTML = '';
@@ -425,15 +542,19 @@ async function loadForward() {
       return;
     }
 
-    const candidate = selectedForwardRunId && forwardRuns.some(r => r.run_id === selectedForwardRunId)
+    const activeRunId = latestHealth?.trial_active_run_id || '';
+    const selectedStillExists = selectedForwardRunId && forwardRuns.some(r => r.run_id === selectedForwardRunId);
+    const activeExists = activeRunId && forwardRuns.some(r => r.run_id === activeRunId);
+    const candidate = selectedStillExists
       ? selectedForwardRunId
-      : forwardRuns[0].run_id;
+      : (activeExists ? activeRunId : forwardRuns[0].run_id);
     selectedForwardRunId = candidate;
 
     for (const r of forwardRuns) {
       const opt = document.createElement('option');
       opt.value = r.run_id;
-      opt.textContent = `${r.run_id} — ${asNum(r.total_trades, 0)} trades, avg ${asNum(r.avg_pnl_pct, 0).toFixed(4)}%`;
+      const activePrefix = (activeRunId && r.run_id === activeRunId) ? '[ACTIVE] ' : '';
+      opt.textContent = `${activePrefix}${r.run_id} — ${asNum(r.total_trades, 0)} trades, avg ${asNum(r.avg_pnl_pct, 0).toFixed(4)}%`;
       if (r.run_id === selectedForwardRunId) opt.selected = true;
       sel.appendChild(opt);
     }
@@ -447,6 +568,30 @@ async function loadForward() {
     forwardSymbolRows = await symRes.json();
     renderForward();
   } catch (_) {}
+}
+
+async function freshStartForward() {
+  const ok = window.confirm('Fresh start will reset active race state and start a new forward run scope. Continue?');
+  if (!ok) return;
+  const btn = document.getElementById('forward-fresh-start');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/v1/forward/fresh-start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    if (!res.ok) {
+      const msg = await res.text();
+      alert(`Fresh start failed: ${msg}`);
+      return;
+    }
+    const data = await res.json();
+    selectedForwardRunId = data.run_id || '';
+    await Promise.all([loadHealthSummary(), loadRunnerStatus(), loadForward()]);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function phaseCfg(name) {
@@ -470,15 +615,12 @@ async function loadRunnerConfig() {
   } catch (_) {}
 
   setIfMissing('runner-duration', phaseCfg('scout').duration, true);
-  setIfMissing('runner-cycles', phaseCfg('scout').cycles ?? phaseCfg('expand').cycles, true);
+  setIfMissing('runner-cycles', phaseCfg('scout').cycles, true);
   setIfMissing('runner-max-budget', phaseCfg('forward').max_budget, true);
   setIfMissing('runner-grace-period', phaseCfg('forward').grace_period, true);
   setIfMissing('runner-report-interval', phaseCfg('forward').report_interval, true);
   setIfMissing('runner-max-refs', phaseCfg('forward').max_refs, true);
   setIfMissing('runner-max-configs', phaseCfg('forward').max_configs, true);
-  setIfMissing('runner-top-k', phaseCfg('promote').top_k, true);
-  setIfMissing('runner-min-trades', phaseCfg('promote').min_trades, true);
-  setIfMissing('runner-min-pnl', phaseCfg('promote').min_pnl, true);
   refreshRunnerPhaseOptions();
 }
 
@@ -567,6 +709,7 @@ async function loadRunnerStatus() {
   const res = await fetch('/api/v1/trials/runner/status?tail=200');
   if (!res.ok) return;
   const data = await res.json();
+  latestRunnerStatus = data;
 
   const statusEl = document.getElementById('runner-status');
   const metaEl = document.getElementById('runner-meta');
@@ -601,6 +744,16 @@ async function loadRunnerStatus() {
 
   startBtn.disabled = data.running;
   stopBtn.disabled = !data.running;
+  if (activeTab === 'forward') renderForward();
+}
+
+async function loadHealthSummary() {
+  try {
+    const res = await fetch('/health');
+    if (!res.ok) return;
+    latestHealth = await res.json();
+    if (activeTab === 'forward') renderForward();
+  } catch (_) {}
 }
 
 async function loadAxes() {
@@ -748,6 +901,7 @@ document.getElementById('forward-run-filter').addEventListener('change', e => {
   selectedForwardRunId = e.target.value;
   loadForward();
 });
+document.getElementById('forward-fresh-start').addEventListener('click', freshStartForward);
 document.getElementById('tab-btn-trials').addEventListener('click', () => setActiveTab('trials'));
 document.getElementById('tab-btn-forward').addEventListener('click', () => setActiveTab('forward'));
 
@@ -758,13 +912,13 @@ document.getElementById('runner-stop').addEventListener('click', stopRunner);
 async function init() {
   setActiveTab(tabFromUrl(), false);
   await loadRunnerConfig();
-  await Promise.all([loadAxes(), loadRuns(), loadRunnerStatus(), loadForward()]);
-  document.getElementById('meta').textContent = `Updated: ${new Date().toLocaleTimeString()} | Auto-refresh 30s`;
+  await Promise.all([loadAxes(), loadRuns(), loadRunnerStatus(), loadHealthSummary(), loadForward()]);
+  document.getElementById('meta').textContent = `Updated: ${new Date().toLocaleTimeString()} | Auto-refresh 15s`;
 }
 
 init();
-setInterval(() => { loadAxes(); loadRuns(); loadForward(); }, 30000);
-setInterval(() => { loadRunnerStatus(); }, 2000);
+setInterval(() => { loadAxes(); loadRuns(); loadForward(); }, 15000);
+setInterval(() => { loadRunnerStatus(); loadHealthSummary(); }, 2000);
 </script>
 </body>
 </html>

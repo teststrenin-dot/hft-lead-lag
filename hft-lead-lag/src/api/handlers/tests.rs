@@ -402,6 +402,164 @@ async fn health_does_not_increment_rm4_streak_without_window_advance() {
 }
 
 #[tokio::test]
+async fn health_reports_watchdog_stalls_for_engine_signal_and_execution() {
+    let health_state = Arc::new(HealthState::new());
+    let now_ms = crate::domain::screener::utils::now_ms();
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos() as i64;
+    let stale_ns = now_ns.saturating_sub(10_000_000_000);
+    health_state
+        .binance_connected
+        .store(true, Ordering::Relaxed);
+    health_state.gate_connected.store(true, Ordering::Relaxed);
+    health_state
+        .binance_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .gate_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .runtime_last_state_updated_ts_ns
+        .store(stale_ns, Ordering::Relaxed);
+    health_state
+        .runtime_last_signal_decided_ts_ns
+        .store(stale_ns, Ordering::Relaxed);
+    health_state
+        .runtime_last_order_intent_enqueued_ts_ns
+        .store(stale_ns, Ordering::Relaxed);
+    health_state
+        .runtime_last_order_intent_sent_ts_ns
+        .store(stale_ns, Ordering::Relaxed);
+    health_state
+        .runtime_signal_backlog_depth
+        .store(3, Ordering::Relaxed);
+    health_state
+        .runtime_execution_queue_depth
+        .store(2, Ordering::Relaxed);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let (code, Json(resp)) = health(State(state)).await;
+    assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(resp.issues.contains(&"engine_state_stall"));
+    assert!(resp.issues.contains(&"signal_loop_stall"));
+    assert!(resp.issues.contains(&"execution_loop_stall"));
+}
+
+#[tokio::test]
+async fn health_reports_db_writer_stall_when_backlog_progress_is_stale() {
+    let health_state = Arc::new(HealthState::new());
+    let now_ms = crate::domain::screener::utils::now_ms();
+    DbWriter::reset_health_counters_for_tests();
+    health_state
+        .binance_connected
+        .store(true, Ordering::Relaxed);
+    health_state.gate_connected.store(true, Ordering::Relaxed);
+    health_state
+        .binance_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .gate_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+
+    DbWriter::set_watchdog_snapshot_for_tests(120, 100, now_ms.saturating_sub(20_000));
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let (code, Json(resp)) = health(State(state)).await;
+    assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.alert_level, "critical");
+    assert_eq!(resp.db_writer_backlog_seq, 20);
+    assert!(resp.db_writer_last_progress_age_ms.unwrap_or_default() >= 20_000);
+    assert!(resp.issues.contains(&"db_writer_stall"));
+    DbWriter::reset_health_counters_for_tests();
+}
+
+#[tokio::test]
+async fn health_emits_drift_warning_when_p99_abs_is_high() {
+    let health_state = Arc::new(HealthState::new());
+    let now_ms = crate::domain::screener::utils::now_ms();
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos() as i64;
+    DbWriter::reset_health_counters_for_tests();
+    crate::infrastructure::exchanges::BinanceMarketData::reset_dropped_messages_for_tests();
+    crate::infrastructure::exchanges::GateMarketData::reset_dropped_messages_for_tests();
+    health_state
+        .binance_connected
+        .store(true, Ordering::Relaxed);
+    health_state.gate_connected.store(true, Ordering::Relaxed);
+    health_state
+        .binance_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .gate_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .runtime_last_state_updated_ts_ns
+        .store(now_ns, Ordering::Relaxed);
+    health_state
+        .runtime_drift_samples
+        .store(100, Ordering::Relaxed);
+    health_state
+        .runtime_drift_abs_p99_ms
+        .store(250, Ordering::Relaxed);
+    health_state
+        .runtime_drift_abs_max_ms
+        .store(400, Ordering::Relaxed);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let (_code, Json(resp)) = health(State(state)).await;
+    assert_eq!(resp.runtime_drift_ms.samples, 100);
+    assert_eq!(resp.runtime_drift_ms.abs_p99_ms, 250);
+    assert_eq!(resp.runtime_drift_ms.abs_max_ms, 400);
+    assert_eq!(resp.alert_level, "warn");
+    assert!(resp.warnings.contains(&"drift_p99_high"));
+    DbWriter::reset_health_counters_for_tests();
+    crate::infrastructure::exchanges::BinanceMarketData::reset_dropped_messages_for_tests();
+    crate::infrastructure::exchanges::GateMarketData::reset_dropped_messages_for_tests();
+}
+
+#[tokio::test]
 async fn fleet_policy_endpoint_returns_empty_for_unknown_symbol() {
     let health_state = Arc::new(HealthState::new());
     let state = Arc::new(HttpState {
@@ -888,4 +1046,160 @@ async fn portfolio_guards_endpoint_falls_back_to_db_state_snapshot() {
     let _ = fs::remove_file(&db_path);
     let _ = fs::remove_file(format!("{}-wal", db_path.display()));
     let _ = fs::remove_file(format!("{}-shm", db_path.display()));
+}
+
+#[tokio::test]
+async fn portfolio_api_exposes_assignment_transition_after_cooldown() {
+    let health_state = Arc::new(HealthState::new());
+    let screener = ScreenerStore::default();
+    screener.update("XRPUSDT", "binance", 1.0, 1.001, 1_000_000, 1_000_000);
+    screener.update("DOGEUSDT", "binance", 0.1, 0.101, 1_000_000, 1_000_000);
+    screener.restore_portfolio_runtime_v1_from_db_rows(
+        &[crate::infrastructure::db::PortfolioStateRecordV1 {
+            portfolio_id: "A".to_string(),
+            shortlist: vec!["XRPUSDT".to_string()],
+            active_symbols: vec!["XRPUSDT".to_string()],
+            updated_at_ms: 1_000,
+        }],
+        &[],
+    );
+    for i in 0..5 {
+        screener.portfolio_observe_closed_trade_v1("XRPUSDT", 0.12, false, 2_000 + i * 1_000);
+        screener.portfolio_observe_closed_trade_v1("DOGEUSDT", 0.10, false, 3_000 + i * 1_000);
+    }
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener,
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state,
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let Json(before_active) = get_portfolio_active(State(state.clone())).await;
+    let before_symbols: std::collections::HashSet<String> = before_active
+        .portfolios
+        .iter()
+        .flat_map(|p| p.active_symbols.iter().cloned())
+        .collect();
+    assert!(
+        before_symbols.contains("XRPUSDT"),
+        "precondition: XRPUSDT must be active before cooldown trigger"
+    );
+
+    for i in 0..5 {
+        state
+            .screener
+            .portfolio_observe_closed_trade_v1("XRPUSDT", -0.08, true, 700_000 + i * 1_000);
+    }
+    state.screener.portfolio_scheduler_tick_v1(900_000);
+
+    let Json(after_active) = get_portfolio_active(State(state.clone())).await;
+    let after_symbols: std::collections::HashSet<String> = after_active
+        .portfolios
+        .iter()
+        .flat_map(|p| p.active_symbols.iter().cloned())
+        .collect();
+    assert!(
+        !after_symbols.contains("XRPUSDT"),
+        "XRPUSDT must be removed after cooldown-triggered rebalance"
+    );
+
+    let Json(candidates) = get_portfolio_candidates(State(state)).await;
+    let candidate_symbols: std::collections::HashSet<String> =
+        candidates.rows.iter().map(|r| r.symbol.clone()).collect();
+    assert!(
+        candidate_symbols.contains("XRPUSDT") && candidate_symbols.contains("DOGEUSDT"),
+        "candidate API should expose both symbols during race transition"
+    );
+}
+
+#[tokio::test]
+async fn forward_fresh_start_requires_explicit_confirm() {
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: Arc::new(HealthState::new()),
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let err = post_forward_fresh_start(
+        State(state),
+        Json(ForwardFreshStartRequest {
+            confirm: false,
+            run_id: None,
+        }),
+    )
+    .await
+    .expect_err("must reject");
+    assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+    assert!(err.1.contains("confirm=true"));
+}
+
+#[tokio::test]
+async fn forward_fresh_start_resets_runtime_race_state() {
+    let screener = ScreenerStore::default();
+    screener.set_run_id(Some("forward-old".to_string()));
+    screener.update("BTCUSDT", "binance", 100.0, 100.1, 1_000_000, 1_000_000);
+    screener.portfolio_observe_closed_trade_v1("BTCUSDT", 0.20, false, 1_001_000);
+    for i in 0..5 {
+        screener.portfolio_observe_closed_trade_v1("ETHUSDT", -0.05, true, 1_010_000 + i * 1_000);
+    }
+    assert!(
+        !screener.portfolio_candidate_stats_v1(2_000_000).is_empty(),
+        "precondition: candidate stats must exist before reset"
+    );
+    assert!(
+        !screener.portfolio_guard_states_v1().is_empty(),
+        "precondition: guard state must exist before reset"
+    );
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener,
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: Arc::new(HealthState::new()),
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    let Json(resp) = post_forward_fresh_start(
+        State(state.clone()),
+        Json(ForwardFreshStartRequest {
+            confirm: true,
+            run_id: None,
+        }),
+    )
+    .await
+    .expect("fresh start");
+
+    assert!(resp.run_id.starts_with("forward-"));
+    assert!(resp.config_count > 0);
+    assert_eq!(state.screener.current_run_id(), Some(resp.run_id));
+    assert!(
+        state.screener.portfolio_candidate_stats_v1(3_000_000).is_empty(),
+        "candidate history must be cleared on fresh start"
+    );
+    assert!(
+        state.screener.portfolio_guard_states_v1().is_empty(),
+        "guard/cooldown state must be cleared on fresh start"
+    );
 }
