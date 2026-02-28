@@ -149,20 +149,26 @@ Last sync: 2026-02-28 (stud2 deep-dive deltas mapped to `HFT-RM*`)
 1. Done and not touched:
    - `ScreenerStore` and portfolio runtime logic are functionally complete for paper analytics.
    - Bounded control-plane queue/worker is wired: ingest path enqueues `ControlUpdate`; worker applies `screener.update` and WS fanout outside strategy hot path.
+   - Full queue policy is latest-by-symbol overflow lane (not hard drop-all).
+   - `/health` exposes control-plane backlog and dropped-update counters.
 2. Done but must be reworked:
    - Fallback direct ingest path remains available when control-plane worker is not configured (compatibility path).
 3. Missing and required:
-   - Harden backpressure policy from current drop-on-full to explicit documented strategy (latest-wins or drop-oldest by symbol).
-   - Add queue depth/drop telemetry for control-plane handoff.
+   - Constrain or remove compatibility fallback direct-ingest path to avoid accidental mixed semantics.
+   - Add dedicated regression tests for overflow-lane behavior and control-plane queue telemetry in health API.
 
 ## `HFT-RM3` 2-core host budget guardrails
 1. Done and not touched:
-   - Runtime has existing env/config knobs for queue capacities and runtime-grid size.
+   - Runtime has explicit startup host caps via env for symbols and runtime-grid fanout:
+     - `MAX_STRATEGY_SYMBOLS`
+     - `MAX_SCREENER_SYMBOLS`
+     - `MAX_RUNTIME_GRID_CONFIGS`
+   - Cap application is logged with before/after counts.
 2. Done but must be reworked:
-   - Default `runtime-grid` / screener fanout remains too high for strict low-latency host profile.
+   - Defaults remain permissive; 2-core strict profile still depends on operator-provided env values.
 3. Missing and required:
-   - Explicit host-profile caps (symbols/configs/tasks) enforced at startup.
-   - Guardrail evidence from `/health` under capped mode.
+   - Freeze and document default production cap profile for 2-core host.
+   - Add capped-profile evidence run (`/health` backlog + p99) to close RM3.
 
 ## `HFT-RM4` Numeric HFT SLO freeze
 1. Done and not touched:

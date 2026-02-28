@@ -9,7 +9,6 @@ use bytes::Bytes;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::HashSet;
-use tracing::warn;
 
 #[cfg(test)]
 pub(super) fn strategy_ticks_in_order<'a>(
@@ -150,16 +149,14 @@ pub(super) fn ingest_latest_batch<F: Fn() -> i64>(
         let bid = ticker.bid_price();
         let ask = ticker.ask_price();
         if let Some(control_plane) = ctx.control_plane {
-            if !control_plane.try_enqueue(ControlUpdate {
+            let _ = control_plane.try_enqueue(ControlUpdate {
                 symbol: symbol_str.to_string(),
                 exchange: ctx.exchange,
                 bid,
                 ask,
                 exchange_ts_ns: ticker.exchange_ts_ns,
                 local_ts_ns: ticker.local_ts_ns,
-            }) {
-                warn!("control-plane queue full/closed: dropping update symbol={symbol_str}");
-            }
+            });
             continue;
         }
         if let Some(screener) = ctx.screener {
@@ -220,16 +217,14 @@ fn ingest_ticker<F: Fn() -> i64>(
     let bid = ticker.bid_price();
     let ask = ticker.ask_price();
     if let Some(control_plane) = ctx.control_plane {
-        if !control_plane.try_enqueue(ControlUpdate {
+        let _ = control_plane.try_enqueue(ControlUpdate {
             symbol: symbol_str.to_string(),
             exchange: ctx.exchange,
             bid,
             ask,
             exchange_ts_ns: ticker.exchange_ts_ns,
             local_ts_ns: ticker.local_ts_ns,
-        }) {
-            warn!("control-plane queue full/closed: dropping update symbol={symbol_str}");
-        }
+        });
         return;
     }
     if let Some(screener) = ctx.screener {

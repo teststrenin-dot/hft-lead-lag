@@ -49,8 +49,8 @@ Last sync: 2026-02-28 (stud2 remediation track integrated into active delivery)
 | Remediation | Status | Notes |
 |---|---|---|
 | `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | Runtime mode wiring starts: hot loop must support execution without per-tick screener ingest path. |
-| `HFT-RM2` Screener decoupling from data-plane | `In progress` | Bounded control-worker handoff is wired; backpressure/telemetry policy still needs hardening. |
-| `HFT-RM3` 2-core host budget guardrails | `Planned` | Runtime defaults/caps for symbol and config fanout must be enforced for trading host profile. |
+| `HFT-RM2` Screener decoupling from data-plane | `In progress` | Bounded control-worker handoff is wired with latest-by-symbol overflow policy and health telemetry; compatibility fallback path still needs hard boundary. |
+| `HFT-RM3` 2-core host budget guardrails | `In progress` | Symbol/config fanout caps are enforceable at startup via env; production default profile is not frozen yet. |
 | `HFT-RM4` Numeric HFT SLO freeze | `Planned` | Core docs must include numeric p99/backlog fail/pass contracts tied to `/health`. |
 
 ## Rule -> Code -> Test Matrix

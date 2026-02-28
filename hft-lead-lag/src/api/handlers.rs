@@ -73,6 +73,7 @@ pub(crate) struct HealthResponse {
     trial_active_run_id: Option<String>,
     binance_dropped_messages: u64,
     gate_dropped_messages: u64,
+    control_dropped_updates: u64,
     db_dropped_batches: u64,
     db_overflowed_batches: u64,
     db_dropped_batch_budget: u64,
@@ -120,6 +121,7 @@ pub(crate) struct RuntimeBacklogDepth {
     binance_msg_queue_depth: u64,
     gate_msg_queue_depth: u64,
     signal_backlog_depth: u64,
+    control_update_queue_depth: u64,
     execution_intent_queue_depth: u64,
 }
 

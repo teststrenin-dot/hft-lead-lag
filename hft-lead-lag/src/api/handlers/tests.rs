@@ -118,6 +118,7 @@ async fn health_reports_drop_counters() {
         resp.gate_dropped_messages,
         crate::infrastructure::exchanges::GateMarketData::dropped_messages()
     );
+    assert_eq!(resp.control_dropped_updates, 0);
     assert_eq!(
         resp.db_dropped_batches,
         crate::infrastructure::db::DbWriter::dropped_batches()
@@ -273,6 +274,7 @@ async fn health_reports_execution_fast_path_telemetry_and_kill_switch_issue() {
     assert!(resp.execution_kill_switch_active);
     assert_eq!(resp.runtime_stage_timestamps.order_intent_sent_ts_ns, 42);
     assert_eq!(resp.runtime_backlog_depth.execution_intent_queue_depth, 7);
+    assert_eq!(resp.runtime_backlog_depth.control_update_queue_depth, 0);
     assert_eq!(resp.runtime_latency_us.execution_intent_to_sent.samples, 50);
     assert_eq!(resp.runtime_latency_us.execution_intent_to_sent.p50_us, 300);
     assert_eq!(resp.runtime_latency_us.execution_intent_to_sent.p95_us, 700);

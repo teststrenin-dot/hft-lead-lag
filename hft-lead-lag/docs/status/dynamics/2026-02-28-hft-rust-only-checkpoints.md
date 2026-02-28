@@ -26,8 +26,8 @@ Last sync: 2026-02-28 (stud2 deep-dive remediation track added)
 | Remediation | Status | Scope | Exit gate |
 |---|---|---|---|
 | `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | Introduce explicit runtime mode so hot path can run without screener/control-plane fanout in ingest loop | `hft_core` mode runs event loop without per-tick `screener.update` and without screener WS event fanout |
-| `HFT-RM2` Screener decoupling from data-plane | `In progress` | Replace direct screener ingest call from event loop with bounded control-update handoff | Hot strategy/event path no longer blocks on screener/shadow update code |
-| `HFT-RM3` 2-core host budget guardrails | `Planned` | Hard caps for symbol/config fanout on trading host (`runtime-grid`, subscriptions, screener workload) | Host caps are explicit, enforced, and reflected in status + runtime logs |
+| `HFT-RM2` Screener decoupling from data-plane | `In progress` | Replace direct screener ingest call from event loop with bounded control-update handoff | Bounded handoff + latest-by-symbol overflow + health telemetry are active; compatibility direct path must be explicitly constrained |
+| `HFT-RM3` 2-core host budget guardrails | `In progress` | Hard caps for symbol/config fanout on trading host (`runtime-grid`, subscriptions, screener workload) | Host caps are explicit and enforced; production default cap profile is frozen and documented |
 | `HFT-RM4` Numeric HFT SLO freeze | `Planned` | Add hard p99/backlog envelope to core contracts (not qualitative-only) | Core docs include numeric fail/pass criteria tied to `/health` metrics |
 
 Notes:

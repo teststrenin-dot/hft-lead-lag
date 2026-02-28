@@ -106,6 +106,9 @@ const REPLAY_RAW_FEED_PATH_ENV: &str = "REPLAY_RAW_FEED_PATH";
 const REPLAY_STRATEGY_SYMBOLS_ENV: &str = "REPLAY_STRATEGY_SYMBOLS";
 const REPLAY_PRIMARY_EXCHANGE_ENV: &str = "REPLAY_PRIMARY_EXCHANGE";
 const RUNTIME_PLANE_MODE_ENV: &str = "RUNTIME_PLANE_MODE";
+const MAX_STRATEGY_SYMBOLS_ENV: &str = "MAX_STRATEGY_SYMBOLS";
+const MAX_SCREENER_SYMBOLS_ENV: &str = "MAX_SCREENER_SYMBOLS";
+const MAX_RUNTIME_GRID_CONFIGS_ENV: &str = "MAX_RUNTIME_GRID_CONFIGS";
 #[cfg(test)]
 const TRIAL_BATCH_ARCHIVE_MAX_FILES: usize = trial_queue_io::TRIAL_BATCH_ARCHIVE_MAX_FILES;
 
@@ -147,6 +150,43 @@ fn runtime_plane_mode_from_env() -> RuntimePlaneMode {
             RuntimePlaneMode::Mixed
         }
     }
+}
+
+fn parse_env_usize(name: &str) -> Option<usize> {
+    std::env::var(name).ok()?.trim().parse::<usize>().ok()
+}
+
+fn apply_symbol_cap(mut symbols: Vec<String>, env_name: &str) -> Vec<String> {
+    let Some(limit) = parse_env_usize(env_name).filter(|value| *value > 0) else {
+        return symbols;
+    };
+    if symbols.len() > limit {
+        warn!(
+            "{} applied: {} -> {} symbols",
+            env_name,
+            symbols.len(),
+            limit
+        );
+        symbols.truncate(limit);
+    }
+    symbols
+}
+
+fn apply_runtime_grid_config_cap(mut configs: Vec<TraderConfig>) -> Vec<TraderConfig> {
+    let Some(limit) = parse_env_usize(MAX_RUNTIME_GRID_CONFIGS_ENV).filter(|value| *value > 0)
+    else {
+        return configs;
+    };
+    if configs.len() > limit {
+        warn!(
+            "{} applied: {} -> {} configs",
+            MAX_RUNTIME_GRID_CONFIGS_ENV,
+            configs.len(),
+            limit
+        );
+        configs.truncate(limit);
+    }
+    configs
 }
 
 #[cfg(test)]
@@ -334,6 +374,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         screener_symbols,
         gate_vol_map,
     } = universe;
+    let strategy_symbols = apply_symbol_cap(strategy_symbols, MAX_STRATEGY_SYMBOLS_ENV);
+    let screener_symbols = apply_symbol_cap(screener_symbols, MAX_SCREENER_SYMBOLS_ENV);
 
     // Initialize exchange connectors
     let mut binance = BinanceMarketData::new();
@@ -381,7 +423,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(generation) => {
                 runtime_grid_last_modified = Some(generation.modified);
                 if generation.config.enabled {
-                    let report = screener.replace_fleet_configs(generation.configs);
+                    let capped_configs = apply_runtime_grid_config_cap(generation.configs);
+                    let report = screener.replace_fleet_configs(capped_configs);
                     runtime_grid_last_signature = Some(generation.signature);
                     info!(
                         "runtime-grid: startup apply old={} new={} symbols_reset={} drained_trades={}",
@@ -441,7 +484,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let control_plane = if runtime_plane_mode.hft_core() {
         None
     } else {
-        Some(spawn_control_plane_worker(screener.clone(), ws_tx.clone()))
+        Some(spawn_control_plane_worker(
+            screener.clone(),
+            ws_tx.clone(),
+            health_state.clone(),
+        ))
     };
     if control_plane.is_some() {
         info!("control-plane worker: enabled (bounded handoff from ingest path)");

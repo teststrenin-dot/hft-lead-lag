@@ -1,7 +1,7 @@
 # Implementation Status — HFT Runtime Migration
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (stud2 remediation track started: RM1 in progress)
+Last sync: 2026-02-28 (stud2 remediation track: RM1/RM2/RM3 active)
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Roadmap anchor: `docs/status/core/2026-02-26-business-logic-roadmap.md`
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
@@ -36,8 +36,8 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 | Remediation | Status | Evidence | Main gap |
 |---|---|---|---|
 | `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `In progress` | `src/main.rs` adds `RUNTIME_PLANE_MODE`; `hft_core` startup path disables runtime-grid hot reload, NATR refresher, screener DB persistence, and switches subscriptions to strategy symbols; `src/event_loop_runtime.rs` gates portfolio scheduler by mode | Complete explicit mode runbook and add dedicated mode test coverage |
-| `HFT-RM2` Screener decoupling from data-plane | `In progress` | `src/event_loop_control.rs` adds bounded `ControlUpdate` handoff worker; `src/event_loop_ingest.rs` now enqueues control updates instead of direct screener/ws side-effects when control-plane is present; `src/main.rs` wires worker in `mixed` mode | Harden queue backpressure policy + add control-plane depth/drop telemetry |
-| `HFT-RM3` 2-core host budget guardrails | `Planned` | Runtime mode now allows lighter subscription profile in `hft_core` (`strategy_symbols` only) | Enforce hard startup caps for symbols/config fanout |
+| `HFT-RM2` Screener decoupling from data-plane | `In progress` | `src/event_loop_control.rs` adds bounded `ControlUpdate` handoff worker; full queue now keeps latest update per symbol in overflow lane; `HealthState` and `/health` expose control queue depth + dropped updates; `src/event_loop_ingest.rs` enqueues control updates instead of direct screener/ws side-effects when control-plane is present; `src/main.rs` wires worker in `mixed` mode | Remove compatibility fallback direct-ingest path or constrain it to test-only mode |
+| `HFT-RM3` 2-core host budget guardrails | `In progress` | Startup caps are now configurable and enforced via env: `MAX_STRATEGY_SYMBOLS`, `MAX_SCREENER_SYMBOLS`, `MAX_RUNTIME_GRID_CONFIGS`; runtime logs explicit truncation when caps apply | Define and freeze production default cap profile for 2-core host (today caps are opt-in via env) |
 | `HFT-RM4` Numeric HFT SLO freeze | `Planned` | `/health` latency/backlog metrics already present | Add numeric pass/fail SLO contract into core docs and checks |
 
 ## 4) What is kept from legacy track

@@ -96,6 +96,10 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
 
     let binance_dropped_messages = BinanceMarketData::dropped_messages();
     let gate_dropped_messages = GateMarketData::dropped_messages();
+    let control_dropped_updates = state
+        .health
+        .runtime_control_dropped_updates
+        .load(Ordering::Relaxed);
     let db_dropped_batches = DbWriter::dropped_batches();
     let db_overflowed_batches = DbWriter::overflowed_batches();
     let execution_sent_intents = state
@@ -217,6 +221,10 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
             .health
             .runtime_signal_backlog_depth
             .load(Ordering::Relaxed),
+        control_update_queue_depth: state
+            .health
+            .runtime_control_queue_depth
+            .load(Ordering::Relaxed),
         execution_intent_queue_depth: state
             .health
             .runtime_execution_queue_depth
@@ -252,6 +260,9 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
     }
     if execution_dropped_intents > 0 {
         warnings.push("execution_intents_dropped");
+    }
+    if control_dropped_updates > 0 {
+        warnings.push("control_updates_dropped");
     }
     if execution_kill_switch_active {
         issues.push("execution_kill_switch_active");
@@ -297,6 +308,7 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
             trial_active_run_id,
             binance_dropped_messages,
             gate_dropped_messages,
+            control_dropped_updates,
             db_dropped_batches,
             db_overflowed_batches,
             db_dropped_batch_budget: DbWriter::dropped_batch_budget(),

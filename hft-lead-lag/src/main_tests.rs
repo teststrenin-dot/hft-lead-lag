@@ -2,6 +2,7 @@ use super::*;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 fn write_temp_config(name: &str, content: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -10,6 +11,13 @@ fn write_temp_config(name: &str, content: &str) -> PathBuf {
     ));
     fs::write(&path, content).expect("write temp config");
     path
+}
+
+fn env_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env test lock")
 }
 
 #[test]
@@ -23,9 +31,39 @@ fn parse_portfolio_ids_deduplicates_and_skips_empty_tokens() {
 
 #[test]
 fn parse_portfolio_ids_from_env_returns_none_for_empty_input() {
+    let _lock = env_test_lock();
     std::env::set_var(PORTFOLIO_IDS_ENV, " ,  ,");
     assert!(portfolio_ids_from_env().is_none());
     std::env::remove_var(PORTFOLIO_IDS_ENV);
+}
+
+#[test]
+fn apply_symbol_cap_respects_env_limit() {
+    let _lock = env_test_lock();
+    std::env::set_var(MAX_STRATEGY_SYMBOLS_ENV, "2");
+    let symbols = vec![
+        "BTCUSDT".to_string(),
+        "ETHUSDT".to_string(),
+        "SOLUSDT".to_string(),
+    ];
+    let capped = apply_symbol_cap(symbols, MAX_STRATEGY_SYMBOLS_ENV);
+    assert_eq!(capped, vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+    std::env::remove_var(MAX_STRATEGY_SYMBOLS_ENV);
+}
+
+#[test]
+fn apply_runtime_grid_config_cap_respects_env_limit() {
+    let _lock = env_test_lock();
+    std::env::set_var(MAX_RUNTIME_GRID_CONFIGS_ENV, "3");
+    let configs = vec![
+        TraderConfig::default(),
+        TraderConfig::default(),
+        TraderConfig::default(),
+        TraderConfig::default(),
+    ];
+    let capped = apply_runtime_grid_config_cap(configs);
+    assert_eq!(capped.len(), 3);
+    std::env::remove_var(MAX_RUNTIME_GRID_CONFIGS_ENV);
 }
 
 #[test]
