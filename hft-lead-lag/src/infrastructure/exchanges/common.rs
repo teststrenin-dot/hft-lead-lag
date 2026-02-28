@@ -240,7 +240,12 @@ pub fn extract_json_i64_field_by_pattern(json: &[u8], field_bytes: &[u8]) -> Opt
             let start = value_pos;
             let mut end = value_pos;
             while end < json.len()
-                && (json[end].is_ascii_digit() || json[end] == b'-' || json[end] == b'.')
+                && (json[end].is_ascii_digit()
+                    || json[end] == b'-'
+                    || json[end] == b'+'
+                    || json[end] == b'.'
+                    || json[end] == b'e'
+                    || json[end] == b'E')
             {
                 end += 1;
             }
@@ -283,6 +288,13 @@ mod tests {
         let json = br#"{"T":1234567890,"p":50000}"#;
         let ts = extract_json_i64_field(json, "T").unwrap();
         assert_eq!(ts, 1234567890);
+    }
+
+    #[test]
+    fn test_extract_json_i64_supports_scientific_notation() {
+        let json = br#"{"T":1e3,"x":-2.5e2}"#;
+        assert_eq!(extract_json_i64_field(json, "T"), Some(1000));
+        assert_eq!(extract_json_i64_field(json, "x"), Some(-250));
     }
 
     #[test]
