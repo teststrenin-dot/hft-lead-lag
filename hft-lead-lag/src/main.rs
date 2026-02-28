@@ -14,6 +14,8 @@ use hft_lead_lag::infrastructure::replay::raw_feed::{
 use hft_lead_lag::{
     build_runtime_strategy, BinanceMarketData, ConfigManager, GateMarketData, RuntimeStrategy,
 };
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -155,12 +157,30 @@ fn runtime_plane_mode_from_env() -> RuntimePlaneMode {
     }
 }
 
-fn parse_env_usize(name: &str) -> Option<usize> {
-    std::env::var(name).ok()?.trim().parse::<usize>().ok()
+fn parse_positive_env_usize(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    let value = raw.trim();
+    match value.parse::<usize>() {
+        Ok(v) if v > 0 => Some(v),
+        Ok(_) => {
+            warn!(
+                "{} is set to '{}' but must be > 0; falling back to default",
+                name, value
+            );
+            None
+        }
+        Err(_) => {
+            warn!(
+                "{} is set to '{}' but is not a valid integer; falling back to default",
+                name, value
+            );
+            None
+        }
+    }
 }
 
 fn apply_symbol_cap(mut symbols: Vec<String>, env_name: &str, default_limit: usize) -> Vec<String> {
-    let env_limit = parse_env_usize(env_name).filter(|value| *value > 0);
+    let env_limit = parse_positive_env_usize(env_name);
     let limit = env_limit.unwrap_or(default_limit);
     if symbols.len() > limit {
         warn!(
@@ -183,7 +203,7 @@ fn apply_runtime_grid_config_cap(
     mut configs: Vec<TraderConfig>,
     default_limit: usize,
 ) -> Vec<TraderConfig> {
-    let env_limit = parse_env_usize(MAX_RUNTIME_GRID_CONFIGS_ENV).filter(|value| *value > 0);
+    let env_limit = parse_positive_env_usize(MAX_RUNTIME_GRID_CONFIGS_ENV);
     let limit = env_limit.unwrap_or(default_limit);
     if configs.len() > limit {
         warn!(
@@ -200,6 +220,31 @@ fn apply_runtime_grid_config_cap(
         configs.truncate(limit);
     }
     configs
+}
+
+fn prioritize_symbols_for_cap(symbols: &mut Vec<String>, volume_map: &HashMap<String, f64>) {
+    symbols.sort_by(|a, b| {
+        let a_vol = volume_map.get(a).copied().unwrap_or(0.0);
+        let b_vol = volume_map.get(b).copied().unwrap_or(0.0);
+        b_vol
+            .partial_cmp(&a_vol)
+            .unwrap_or(CmpOrdering::Equal)
+            .then_with(|| a.cmp(b))
+    });
+}
+
+fn merge_subscription_symbols(
+    strategy_symbols: &[String],
+    screener_symbols: &[String],
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(strategy_symbols.len() + screener_symbols.len());
+    let mut seen = HashSet::with_capacity(strategy_symbols.len() + screener_symbols.len());
+    for symbol in strategy_symbols.iter().chain(screener_symbols.iter()) {
+        if seen.insert(symbol.clone()) {
+            out.push(symbol.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -383,10 +428,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
     let RuntimeUniverse {
         common_symbols,
-        strategy_symbols,
-        screener_symbols,
+        mut strategy_symbols,
+        mut screener_symbols,
         gate_vol_map,
     } = universe;
+    prioritize_symbols_for_cap(&mut strategy_symbols, &gate_vol_map);
+    prioritize_symbols_for_cap(&mut screener_symbols, &gate_vol_map);
     let strategy_symbols = apply_symbol_cap(
         strategy_symbols,
         MAX_STRATEGY_SYMBOLS_ENV,
@@ -520,14 +567,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("control-plane worker: disabled in hft_core plane mode");
     }
 
-    let subscription_symbols: &Vec<String> = if runtime_plane_mode.hft_core() {
-        &strategy_symbols
+    let subscription_symbols: Vec<String> = if runtime_plane_mode.hft_core() {
+        strategy_symbols.clone()
     } else {
-        &screener_symbols
+        merge_subscription_symbols(&strategy_symbols, &screener_symbols)
     };
     // Subscribe to runtime symbols for live WS ticks.
     let (binance_subscribed, binance_subscribe_errors) = match binance
-        .subscribe_book_tickers_batch(subscription_symbols)
+        .subscribe_book_tickers_batch(&subscription_symbols)
         .await
     {
         Ok(count) => (count, 0usize),
@@ -543,7 +590,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     // Subscribe Gate to runtime symbols as well.
-    subscribe_gate_symbols(&mut gate, subscription_symbols).await;
+    subscribe_gate_symbols(&mut gate, &subscription_symbols).await;
 
     // Build runtime strategy selected via config.
     let mut strategy = match build_runtime_strategy(&config_manager, strategy_symbols.clone()) {

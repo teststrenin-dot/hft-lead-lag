@@ -24,11 +24,12 @@ Single entry point for project status, checkpoint tracking, and operating constr
 10. `dynamics/2026-02-28-cp5-block1-raw-feed-evidence.md`
 11. `dynamics/2026-02-28-cp6-execution-fast-path-evidence.md`
 12. `dynamics/2026-02-28-rm1-plane-mode-contract-evidence.md`
-13. `dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`
-14. `dynamics/2026-02-28-cp7-block1-rm4-health-enforcement.md`
-15. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
-16. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
-17. `dynamics/2026-02-26-project-math-model.md`
+13. `dynamics/2026-02-28-rm2-control-plane-decoupling-evidence.md`
+14. `dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`
+15. `dynamics/2026-02-28-cp7-block1-rm4-health-enforcement.md`
+16. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
+17. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
+18. `dynamics/2026-02-26-project-math-model.md`
 
 ## Checkpoint system (`HFT-CP*`)
 1. `HFT-CP0` Latency and Allocation Observatory

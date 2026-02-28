@@ -28,8 +28,8 @@ Executed:
 ```bash
 cargo test -q apply_symbol_cap_uses_2core_default_when_env_missing
 cargo test -q apply_runtime_grid_config_cap_uses_2core_default_when_env_missing
-cargo test -q apply_symbol_cap_
-cargo test -q apply_runtime_grid_config_cap_
+cargo test -q apply_symbol_cap_respects_env_limit
+cargo test -q apply_runtime_grid_config_cap_respects_env_limit
 ```
 
 Coverage:

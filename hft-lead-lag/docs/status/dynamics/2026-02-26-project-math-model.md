@@ -31,7 +31,7 @@ admission requires useful_winrate >= 0.30 and avg_pnl_pct >= 0
    - `Validation`: admission and ranking math.
    - `Competition`: shortlist/assignment ranking effects.
    - `Risk`: reset/cooldown trigger math.
-   - `Capital`: allocation metrics (planned in `HFT-CP6`, extended in `HFT-CP7`).
+   - `Capital`: allocation metrics are post-CP7 roadmap scope (outside current runtime-hardening stage).
    - `Feedback`: health/read-model observability metrics.
 
 ## Forward Runtime Math (legacy + target)

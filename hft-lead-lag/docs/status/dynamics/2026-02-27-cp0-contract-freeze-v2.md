@@ -16,7 +16,7 @@ Node-to-endpoint mapping:
 3. `Competition`: `/api/v1/portfolio/active`, `/api/v1/portfolio/performance`
 4. `Risk`: `/api/v1/portfolio/guards`, `ExitReason` contract
 5. `Feedback`: `/health`, `/portfolio`, `/fleet`, `/trials`
-6. `Capital` (future): kept as reserved semantic space under portfolio runtime contracts (`HFT-CP6/HFT-CP7`)
+6. `Capital` (future): reserved semantic space for post-CP7 stage (outside current runtime-hardening scope `HFT-CP0..HFT-CP7`)
 
 ## 1) API Surface (Frozen)
 

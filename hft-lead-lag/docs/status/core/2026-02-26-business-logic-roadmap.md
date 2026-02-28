@@ -49,7 +49,7 @@ Last sync: 2026-02-28 (RM1-RM4 closed; CP7 block1 enforcement started)
 | Remediation | Status | Notes |
 |---|---|---|
 | `HFT-RM1` Plane mode split (`mixed` vs `hft_core`) | `Completed` | Runtime mode split is startup-enforced and test-covered; `mixed` and `hft_core` contracts are documented (`docs/status/dynamics/2026-02-28-rm1-plane-mode-contract-evidence.md`). |
-| `HFT-RM2` Screener decoupling from data-plane | `Completed` | Runtime ingest now enforces control-plane handoff as the production path; direct ingest fallback is constrained to test builds only, and overflow-lane replacement behavior is regression-tested. |
+| `HFT-RM2` Screener decoupling from data-plane | `Completed` | Runtime ingest enforces control-plane handoff as production path; direct-ingest fallback is test-only; overflow semantics are per `(symbol, exchange)` with regression coverage (`docs/status/dynamics/2026-02-28-rm2-control-plane-decoupling-evidence.md`). |
 | `HFT-RM3` 2-core host budget guardrails | `Completed` | Runtime now enforces frozen 2-core defaults for strategy symbols, screener symbols, and runtime-grid configs; env remains override-only (`docs/status/dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`). |
 | `HFT-RM4` Numeric HFT SLO freeze | `Completed` | Core docs now contain numeric latency/backlog/drop envelopes and explicit `degraded/non-HFT` fail rule tied to `/health` (`business-objective-economic-control-map.md`, `operating-model-spec-v1.md`). |
 
@@ -91,8 +91,8 @@ Last sync: 2026-02-28 (RM1-RM4 closed; CP7 block1 enforcement started)
 5. `HFT-CP5` delivered and hardened (deterministic replay for bugs/perf regression + strict recorder semantics).
 6. `HFT-CP6` delivered and hardened (execution fast path, intent->sent SLA, overflow/stale/cooldown safeguards).
 7. Deliver `HFT-CP7` (operations hardening and deterministic recovery).
-8. Deliver `HFT-RM1` and `HFT-RM2` to complete hot-path/control-plane boundary.
-9. Wire CP7 ops automation to enforce existing `HFT-RM4` SLO governance at runtime.
+8. `HFT-RM1` and `HFT-RM2` are delivered; maintain boundary invariants as regression guards.
+9. Wire CP7 ops automation to enforce and audit existing `HFT-RM4` SLO governance at runtime.
 
 ## Legacy continuity map
 1. Legacy signal/validation/scoring remains reusable baseline.

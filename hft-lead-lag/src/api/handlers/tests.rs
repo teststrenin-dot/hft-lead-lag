@@ -78,7 +78,7 @@ async fn health_returns_degraded_when_feed_is_stale() {
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
-        health: health_state,
+        health: health_state.clone(),
         trial_runner: TrialRunnerManager::new(
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         ),
@@ -102,7 +102,7 @@ async fn health_reports_drop_counters() {
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
-        health: health_state,
+        health: health_state.clone(),
         trial_runner: TrialRunnerManager::new(
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         ),
@@ -185,7 +185,7 @@ async fn health_reports_trial_lifecycle_telemetry() {
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
-        health: health_state,
+        health: health_state.clone(),
         trial_runner: TrialRunnerManager::new(
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         ),
@@ -319,6 +319,72 @@ async fn health_marks_hft_mode_degraded_after_three_consecutive_rm4_breaches() {
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+        health: health_state.clone(),
+        trial_runner: TrialRunnerManager::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+        db_path: PathBuf::from("data/optimizer.db"),
+    });
+
+    health_state
+        .runtime_rm4_last_eval_ms
+        .store(now_ms.saturating_sub(10_000), Ordering::Relaxed);
+    let (_code_1, Json(resp_1)) = health(State(state.clone())).await;
+    assert!(!resp_1.issues.contains(&"hft_slo_degraded_non_hft"));
+    assert!(resp_1.warnings.contains(&"hft_slo_window_breach"));
+    assert_eq!(resp_1.rm4_breach_streak, 1);
+    assert_eq!(resp_1.hft_mode_status, "hft");
+
+    health_state
+        .runtime_rm4_last_eval_ms
+        .store(now_ms.saturating_sub(10_000), Ordering::Relaxed);
+    let (_code_2, Json(resp_2)) = health(State(state.clone())).await;
+    assert!(!resp_2.issues.contains(&"hft_slo_degraded_non_hft"));
+    assert!(resp_2.warnings.contains(&"hft_slo_window_breach"));
+    assert_eq!(resp_2.rm4_breach_streak, 2);
+    assert_eq!(resp_2.hft_mode_status, "hft");
+
+    health_state
+        .runtime_rm4_last_eval_ms
+        .store(now_ms.saturating_sub(10_000), Ordering::Relaxed);
+    let (code_3, Json(resp_3)) = health(State(state)).await;
+    assert_eq!(code_3, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(resp_3.issues.contains(&"hft_slo_degraded_non_hft"));
+    assert_eq!(resp_3.hft_mode_status, "degraded_non_hft");
+    assert!(resp_3.hft_mode_ever_degraded);
+}
+
+#[tokio::test]
+async fn health_does_not_increment_rm4_streak_without_window_advance() {
+    let health_state = Arc::new(HealthState::new());
+    let now_ms = crate::domain::screener::utils::now_ms();
+    health_state
+        .binance_connected
+        .store(true, Ordering::Relaxed);
+    health_state.gate_connected.store(true, Ordering::Relaxed);
+    health_state
+        .binance_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .gate_last_tick_ms
+        .store(now_ms, Ordering::Relaxed);
+    health_state
+        .runtime_end_to_end_samples
+        .store(10, Ordering::Relaxed);
+    health_state
+        .runtime_end_to_end_p99_us
+        .store(3_000, Ordering::Relaxed);
+    health_state
+        .runtime_rm4_last_eval_ms
+        .store(now_ms.saturating_sub(10_000), Ordering::Relaxed);
+
+    let state = Arc::new(HttpState {
+        min_volume_usd: 1_000_000.0,
+        screener: ScreenerStore::default(),
+        natr_cache: Arc::new(DashMap::new()),
+        fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
+        fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
+        fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
         health: health_state,
         trial_runner: TrialRunnerManager::new(
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -327,16 +393,12 @@ async fn health_marks_hft_mode_degraded_after_three_consecutive_rm4_breaches() {
     });
 
     let (_code_1, Json(resp_1)) = health(State(state.clone())).await;
-    assert!(!resp_1.issues.contains(&"hft_slo_degraded_non_hft"));
-    assert!(resp_1.warnings.contains(&"hft_slo_window_breach"));
-
+    assert_eq!(resp_1.rm4_breach_streak, 1);
     let (_code_2, Json(resp_2)) = health(State(state.clone())).await;
-    assert!(!resp_2.issues.contains(&"hft_slo_degraded_non_hft"));
-    assert!(resp_2.warnings.contains(&"hft_slo_window_breach"));
-
-    let (code_3, Json(resp_3)) = health(State(state)).await;
-    assert_eq!(code_3, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-    assert!(resp_3.issues.contains(&"hft_slo_degraded_non_hft"));
+    assert_eq!(resp_2.rm4_breach_streak, 1);
+    let (_code_3, Json(resp_3)) = health(State(state)).await;
+    assert_eq!(resp_3.rm4_breach_streak, 1);
+    assert!(!resp_3.issues.contains(&"hft_slo_degraded_non_hft"));
 }
 
 #[tokio::test]

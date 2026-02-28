@@ -7,6 +7,7 @@ use tracing::warn;
 
 const DEFAULT_CONTROL_UPDATE_QUEUE_CAPACITY: usize = 8_192;
 const CONTROL_UPDATE_QUEUE_CAPACITY_ENV: &str = "CONTROL_UPDATE_QUEUE_CAPACITY";
+type OverflowKey = (String, &'static str);
 
 #[derive(Debug, Clone)]
 pub(super) struct ControlUpdate {
@@ -22,7 +23,7 @@ pub(super) struct ControlUpdate {
 pub(super) struct ControlPlaneTx {
     sender: mpsc::Sender<ControlUpdate>,
     queue_depth: Arc<AtomicU64>,
-    overflow_latest_by_symbol: Arc<Mutex<HashMap<String, ControlUpdate>>>,
+    overflow_latest_by_symbol: Arc<Mutex<HashMap<OverflowKey, ControlUpdate>>>,
     health: Arc<HealthState>,
 }
 
@@ -41,9 +42,10 @@ impl ControlPlaneTx {
                 self.health
                     .runtime_control_queue_depth
                     .store(self.queue_depth.load(Ordering::Acquire), Ordering::Relaxed);
-                // Keep latest update per symbol in overflow lane.
+                // Keep latest update per (symbol, exchange) in overflow lane.
                 let replaced = if let Ok(mut overflow) = self.overflow_latest_by_symbol.lock() {
-                    overflow.insert(update.symbol.clone(), update).is_some()
+                    let key = (update.symbol.clone(), update.exchange);
+                    overflow.insert(key, update).is_some()
                 } else {
                     self.health
                         .runtime_control_dropped_updates
@@ -87,7 +89,7 @@ fn decrement_saturating(counter: &AtomicU64) {
 }
 
 fn pop_overflow_update(
-    overflow_latest_by_symbol: &Mutex<HashMap<String, ControlUpdate>>,
+    overflow_latest_by_symbol: &Mutex<HashMap<OverflowKey, ControlUpdate>>,
 ) -> Option<ControlUpdate> {
     let mut overflow = overflow_latest_by_symbol.lock().ok()?;
     let key = overflow.keys().next()?.to_owned();
@@ -243,7 +245,13 @@ mod tests {
             .lock()
             .expect("overflow lock");
         assert_eq!(overflow.len(), 1);
-        assert_eq!(overflow["BTCUSDT"].bid, 102.0);
+        assert_eq!(
+            overflow
+                .get(&(String::from("BTCUSDT"), "binance"))
+                .expect("overflow entry")
+                .bid,
+            102.0
+        );
         drop(overflow);
 
         assert_eq!(
@@ -252,6 +260,57 @@ mod tests {
                 .load(Ordering::Relaxed),
             1,
             "replacement in overflow lane must increment dropped counter once",
+        );
+    }
+
+    #[test]
+    fn control_plane_overflow_lane_keeps_latest_per_symbol_and_exchange() {
+        let health = Arc::new(HealthState::new());
+        let (sender, _receiver) = mpsc::channel::<ControlUpdate>(1);
+        let control = ControlPlaneTx {
+            sender,
+            queue_depth: Arc::new(AtomicU64::new(0)),
+            overflow_latest_by_symbol: Arc::new(Mutex::new(HashMap::new())),
+            health,
+        };
+
+        assert!(control.try_enqueue(ControlUpdate {
+            symbol: "BTCUSDT".to_string(),
+            exchange: "binance",
+            bid: 100.0,
+            ask: 100.1,
+            exchange_ts_ns: 1,
+            local_ts_ns: 2,
+        }));
+        assert!(control.try_enqueue(ControlUpdate {
+            symbol: "BTCUSDT".to_string(),
+            exchange: "gate",
+            bid: 200.0,
+            ask: 200.1,
+            exchange_ts_ns: 3,
+            local_ts_ns: 4,
+        }));
+        assert!(control.try_enqueue(ControlUpdate {
+            symbol: "BTCUSDT".to_string(),
+            exchange: "binance",
+            bid: 101.0,
+            ask: 101.1,
+            exchange_ts_ns: 5,
+            local_ts_ns: 6,
+        }));
+
+        let overflow = control
+            .overflow_latest_by_symbol
+            .lock()
+            .expect("overflow lock");
+        assert_eq!(
+            overflow.len(),
+            2,
+            "overflow must keep one update per exchange"
+        );
+        assert!(
+            overflow.contains_key(&(String::from("BTCUSDT"), "gate"))
+                && overflow.contains_key(&(String::from("BTCUSDT"), "binance"))
         );
     }
 }

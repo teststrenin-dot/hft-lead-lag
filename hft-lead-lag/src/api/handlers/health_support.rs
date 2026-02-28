@@ -12,6 +12,7 @@ use super::{
 
 pub(super) const FALLBACK_ROWS_TTL_MS: i64 = 5_000;
 const RM4_BREACH_WINDOW_THRESHOLD: u64 = 3;
+const RM4_EVAL_INTERVAL_MS: i64 = 5_000;
 const RM4_MAX_INGEST_P99_US: u64 = 1_500;
 const RM4_MAX_DECISION_P99_US: u64 = 1_500;
 const RM4_MAX_END_TO_END_P99_US: u64 = 2_000;
@@ -65,6 +66,26 @@ pub(super) fn maybe_spawn_fallback_rows_refresh(state: &Arc<HttpState>) {
 fn counter_delta_and_update_last(current: u64, last: &std::sync::atomic::AtomicU64) -> u64 {
     let previous = last.swap(current, Ordering::AcqRel);
     current.saturating_sub(previous)
+}
+
+fn try_claim_rm4_window_eval(health: &crate::api::HealthState, now_ms: i64) -> bool {
+    let mut observed = health.runtime_rm4_last_eval_ms.load(Ordering::Acquire);
+    loop {
+        if observed > 0 && now_ms.saturating_sub(observed) < RM4_EVAL_INTERVAL_MS {
+            return false;
+        }
+        match health.runtime_rm4_last_eval_ms.compare_exchange_weak(
+            observed,
+            now_ms,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(current) => {
+                observed = current;
+            }
+        }
+    }
 }
 
 fn rm4_slo_breached(
@@ -264,43 +285,71 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
             .runtime_execution_queue_depth
             .load(Ordering::Relaxed),
     };
-    let execution_dropped_delta = counter_delta_and_update_last(
-        execution_dropped_intents,
-        &state.health.runtime_last_eval_execution_dropped_intents,
-    );
-    let execution_timeout_delta = counter_delta_and_update_last(
-        execution_send_timeouts,
-        &state.health.runtime_last_eval_execution_send_timeouts,
-    );
-    let control_dropped_delta = counter_delta_and_update_last(
-        control_dropped_updates,
-        &state.health.runtime_last_eval_control_dropped_updates,
-    );
-    let rm4_breached = rm4_slo_breached(
-        &runtime_latency_us,
-        &runtime_backlog_depth,
-        execution_dropped_delta,
-        execution_timeout_delta,
-        control_dropped_delta,
-    );
-    let rm4_breach_streak = if rm4_breached {
-        state
-            .health
-            .runtime_rm4_breach_streak
-            .fetch_add(1, Ordering::AcqRel)
-            + 1
-    } else {
-        state
-            .health
-            .runtime_rm4_breach_streak
-            .store(0, Ordering::Release);
-        0
-    };
-    let hft_mode_degraded = rm4_breach_streak >= RM4_BREACH_WINDOW_THRESHOLD;
-    state
+    let mut rm4_breach_streak = state
+        .health
+        .runtime_rm4_breach_streak
+        .load(Ordering::Relaxed);
+    let mut rm4_breached = state
+        .health
+        .runtime_rm4_last_window_breached
+        .load(Ordering::Relaxed);
+    let mut hft_mode_degraded = state
         .health
         .runtime_hft_mode_degraded
-        .store(hft_mode_degraded, Ordering::Relaxed);
+        .load(Ordering::Relaxed);
+    if try_claim_rm4_window_eval(&state.health, now_ms) {
+        let execution_dropped_delta = counter_delta_and_update_last(
+            execution_dropped_intents,
+            &state.health.runtime_last_eval_execution_dropped_intents,
+        );
+        let execution_timeout_delta = counter_delta_and_update_last(
+            execution_send_timeouts,
+            &state.health.runtime_last_eval_execution_send_timeouts,
+        );
+        let control_dropped_delta = counter_delta_and_update_last(
+            control_dropped_updates,
+            &state.health.runtime_last_eval_control_dropped_updates,
+        );
+        rm4_breached = rm4_slo_breached(
+            &runtime_latency_us,
+            &runtime_backlog_depth,
+            execution_dropped_delta,
+            execution_timeout_delta,
+            control_dropped_delta,
+        );
+        state
+            .health
+            .runtime_rm4_last_window_breached
+            .store(rm4_breached, Ordering::Relaxed);
+        rm4_breach_streak = if rm4_breached {
+            state
+                .health
+                .runtime_rm4_breach_streak
+                .fetch_add(1, Ordering::AcqRel)
+                + 1
+        } else {
+            state
+                .health
+                .runtime_rm4_breach_streak
+                .store(0, Ordering::Release);
+            0
+        };
+        hft_mode_degraded = rm4_breach_streak >= RM4_BREACH_WINDOW_THRESHOLD;
+        if hft_mode_degraded {
+            state
+                .health
+                .runtime_hft_mode_ever_degraded
+                .store(true, Ordering::Relaxed);
+        }
+        state
+            .health
+            .runtime_hft_mode_degraded
+            .store(hft_mode_degraded, Ordering::Relaxed);
+    }
+    let hft_mode_ever_degraded = state
+        .health
+        .runtime_hft_mode_ever_degraded
+        .load(Ordering::Relaxed);
     let hft_mode_status = if hft_mode_degraded {
         "degraded_non_hft"
     } else {
@@ -402,8 +451,10 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
             runtime_latency_us,
             runtime_backlog_depth,
             hft_mode_status,
+            hft_mode_ever_degraded,
             rm4_breach_streak,
             rm4_window_threshold: RM4_BREACH_WINDOW_THRESHOLD,
+            rm4_window_interval_ms: RM4_EVAL_INTERVAL_MS,
             issues,
             warnings,
         },

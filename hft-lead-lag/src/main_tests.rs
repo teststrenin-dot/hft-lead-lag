@@ -108,6 +108,36 @@ fn apply_runtime_grid_config_cap_uses_2core_default_when_env_missing() {
 }
 
 #[test]
+fn merge_subscription_symbols_keeps_strategy_union_without_duplicates() {
+    let strategy = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+    let screener = vec!["ETHUSDT".to_string(), "SOLUSDT".to_string()];
+    let merged = merge_subscription_symbols(&strategy, &screener);
+    assert_eq!(
+        merged,
+        vec![
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+            "SOLUSDT".to_string()
+        ]
+    );
+}
+
+#[test]
+fn prioritize_symbols_for_cap_prefers_higher_volume() {
+    let mut symbols = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+    let mut volume_map = std::collections::HashMap::new();
+    volume_map.insert("A".to_string(), 10.0);
+    volume_map.insert("B".to_string(), 100.0);
+    volume_map.insert("C".to_string(), 50.0);
+
+    prioritize_symbols_for_cap(&mut symbols, &volume_map);
+    assert_eq!(
+        symbols,
+        vec!["B".to_string(), "C".to_string(), "A".to_string()]
+    );
+}
+
+#[test]
 fn load_trial_batch_parses_incremental_mode() {
     let config = TraderConfig::default();
     let path = std::env::temp_dir().join(format!(

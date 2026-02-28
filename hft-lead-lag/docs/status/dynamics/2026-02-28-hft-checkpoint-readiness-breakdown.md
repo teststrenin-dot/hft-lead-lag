@@ -159,6 +159,7 @@ Last sync: 2026-02-28 (stud2 deltas closed; CP7 block1 RM4 enforcement landed)
    - Full queue policy is latest-by-symbol overflow lane (not hard drop-all).
    - `/health` exposes control-plane backlog and dropped-update counters.
    - Overflow-lane replacement behavior is covered by regression test in `src/event_loop_control.rs`.
+   - RM2 evidence bundle is captured in `docs/status/dynamics/2026-02-28-rm2-control-plane-decoupling-evidence.md`.
    - Runtime direct-ingest compatibility path is constrained to test builds only (`cfg!(test)` guard in `src/event_loop_core.rs`).
 2. Done but must be reworked:
    - None.
@@ -193,4 +194,4 @@ Last sync: 2026-02-28 (stud2 deltas closed; CP7 block1 RM4 enforcement landed)
 2. Done but must be reworked:
    - None.
 3. Missing and required:
-   - CP7 operational check path that auto-flags `degraded/non-HFT` runs against the frozen RM4 contract.
+   - CP7 block2+: continuous ops audit/alert pipeline around already-implemented RM4 auto-flagging (runtime check exists; runbook+automation remains).
