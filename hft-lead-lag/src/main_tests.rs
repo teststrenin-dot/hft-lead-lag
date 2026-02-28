@@ -108,6 +108,11 @@ fn apply_runtime_grid_config_cap_uses_2core_default_when_env_missing() {
 }
 
 #[test]
+fn runtime_grid_config_default_matches_2core_profile() {
+    assert_eq!(RuntimeGridConfig::default().max_configs, 512);
+}
+
+#[test]
 fn merge_subscription_symbols_keeps_strategy_union_without_duplicates() {
     let strategy = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
     let screener = vec!["ETHUSDT".to_string(), "SOLUSDT".to_string()];

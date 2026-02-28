@@ -1,7 +1,7 @@
 # Implementation Status — HFT Runtime Migration
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (stud2 remediation track closed; CP7 block1 started)
+Last sync: 2026-02-28 (RM5 control-plane isolation/coalescing applied)
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Roadmap anchor: `docs/status/core/2026-02-26-business-logic-roadmap.md`
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
@@ -39,6 +39,7 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 | `HFT-RM2` Screener decoupling from data-plane | `Completed` | Bounded `ControlUpdate` handoff worker is runtime-wired; `/health` exposes control queue depth + dropped updates; runtime ingest enforces control-plane production path and constrains direct-ingest fallback to test builds only; overflow lane is keyed by `(symbol, exchange)` and regression-tested | None (`docs/status/dynamics/2026-02-28-rm2-control-plane-decoupling-evidence.md`) |
 | `HFT-RM3` 2-core host budget guardrails | `Completed` | Startup now enforces frozen 2-core defaults (`64/128/512`) for `MAX_STRATEGY_SYMBOLS` / `MAX_SCREENER_SYMBOLS` / `MAX_RUNTIME_GRID_CONFIGS`; env overrides still work and cap source is logged on truncation | None (`docs/status/dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`) |
 | `HFT-RM4` Numeric HFT SLO freeze | `Completed` | Core contracts now define numeric latency/backlog/drop envelopes and a `3`-window degradation rule tied to `/health` fields (`docs/status/core/2026-02-27-business-objective-economic-control-map.md`, `docs/status/core/2026-02-27-operating-model-spec-v1.md`) | Keep CP7 ops checks aligned with frozen contract |
+| `HFT-RM5` Control-plane threaded isolation + coalesced apply | `Completed` | Control worker moved to dedicated OS thread/runtime; updates are coalesced latest-per `(symbol, exchange)` within flush windows before `screener.update`; runtime-grid default `max_configs` reduced to `512` with regression tests | Optional CP7 visibility polish only (`docs/status/dynamics/2026-02-28-rm5-control-plane-threaded-coalescing-evidence.md`) |
 
 ## 4) What is kept from legacy track
 1. Existing strategy and screener business logic is reused as functional baseline.

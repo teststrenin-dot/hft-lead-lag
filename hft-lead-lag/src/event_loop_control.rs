@@ -7,6 +7,10 @@ use tracing::warn;
 
 const DEFAULT_CONTROL_UPDATE_QUEUE_CAPACITY: usize = 8_192;
 const CONTROL_UPDATE_QUEUE_CAPACITY_ENV: &str = "CONTROL_UPDATE_QUEUE_CAPACITY";
+const DEFAULT_CONTROL_UPDATE_FLUSH_INTERVAL_MS: u64 = 50;
+const CONTROL_UPDATE_FLUSH_INTERVAL_MS_ENV: &str = "CONTROL_UPDATE_FLUSH_INTERVAL_MS";
+const DEFAULT_CONTROL_UPDATE_MAX_BATCH: usize = 1_024;
+const CONTROL_UPDATE_MAX_BATCH_ENV: &str = "CONTROL_UPDATE_MAX_BATCH";
 type OverflowKey = (String, &'static str);
 
 #[derive(Debug, Clone)]
@@ -17,6 +21,13 @@ pub(super) struct ControlUpdate {
     pub(super) ask: f64,
     pub(super) exchange_ts_ns: i64,
     pub(super) local_ts_ns: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ControlWorkerConfig {
+    queue_capacity: usize,
+    flush_interval_ms: u64,
+    max_batch: usize,
 }
 
 #[derive(Clone)]
@@ -77,6 +88,24 @@ fn parse_env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok()?.trim().parse::<usize>().ok()
 }
 
+fn parse_env_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.trim().parse::<u64>().ok()
+}
+
+fn worker_config_from_env() -> ControlWorkerConfig {
+    ControlWorkerConfig {
+        queue_capacity: parse_env_usize(CONTROL_UPDATE_QUEUE_CAPACITY_ENV)
+            .unwrap_or(DEFAULT_CONTROL_UPDATE_QUEUE_CAPACITY)
+            .max(1),
+        flush_interval_ms: parse_env_u64(CONTROL_UPDATE_FLUSH_INTERVAL_MS_ENV)
+            .unwrap_or(DEFAULT_CONTROL_UPDATE_FLUSH_INTERVAL_MS)
+            .max(1),
+        max_batch: parse_env_usize(CONTROL_UPDATE_MAX_BATCH_ENV)
+            .unwrap_or(DEFAULT_CONTROL_UPDATE_MAX_BATCH)
+            .max(1),
+    }
+}
+
 fn decrement_saturating(counter: &AtomicU64) {
     let mut current = counter.load(Ordering::Acquire);
     loop {
@@ -88,12 +117,78 @@ fn decrement_saturating(counter: &AtomicU64) {
     }
 }
 
-fn pop_overflow_update(
+fn drain_overflow_updates(
     overflow_latest_by_symbol: &Mutex<HashMap<OverflowKey, ControlUpdate>>,
-) -> Option<ControlUpdate> {
-    let mut overflow = overflow_latest_by_symbol.lock().ok()?;
-    let key = overflow.keys().next()?.to_owned();
-    overflow.remove(&key)
+    pending: &mut HashMap<OverflowKey, ControlUpdate>,
+) {
+    let Ok(mut overflow) = overflow_latest_by_symbol.lock() else {
+        return;
+    };
+    for (key, update) in overflow.drain() {
+        pending.insert(key, update);
+    }
+}
+
+fn queue_pending_update(pending: &mut HashMap<OverflowKey, ControlUpdate>, update: ControlUpdate) {
+    let key = (update.symbol.clone(), update.exchange);
+    pending.insert(key, update);
+}
+
+fn flush_pending_updates(
+    screener: &ScreenerStore,
+    ws_tx: Option<&broadcast::Sender<MarketDataEvent>>,
+    pending: &mut HashMap<OverflowKey, ControlUpdate>,
+) {
+    for update in pending.drain().map(|(_, update)| update) {
+        apply_control_update(screener, ws_tx, update);
+    }
+}
+
+async fn run_control_plane_worker_loop(
+    mut receiver: mpsc::Receiver<ControlUpdate>,
+    queue_depth: Arc<AtomicU64>,
+    overflow_latest_by_symbol: Arc<Mutex<HashMap<OverflowKey, ControlUpdate>>>,
+    screener: ScreenerStore,
+    ws_tx: Option<broadcast::Sender<MarketDataEvent>>,
+    health: Arc<HealthState>,
+    config: ControlWorkerConfig,
+) {
+    let mut pending: HashMap<OverflowKey, ControlUpdate> = HashMap::with_capacity(config.max_batch);
+    let mut flush_interval =
+        tokio::time::interval(tokio::time::Duration::from_millis(config.flush_interval_ms));
+    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            update = receiver.recv() => {
+                let Some(update) = update else {
+                    drain_overflow_updates(&overflow_latest_by_symbol, &mut pending);
+                    flush_pending_updates(&screener, ws_tx.as_ref(), &mut pending);
+                    break;
+                };
+                decrement_saturating(queue_depth.as_ref());
+                health
+                    .runtime_control_queue_depth
+                    .store(queue_depth.load(Ordering::Acquire), Ordering::Relaxed);
+                queue_pending_update(&mut pending, update);
+                drain_overflow_updates(&overflow_latest_by_symbol, &mut pending);
+                if pending.len() >= config.max_batch {
+                    flush_pending_updates(&screener, ws_tx.as_ref(), &mut pending);
+                }
+            }
+            _ = flush_interval.tick() => {
+                drain_overflow_updates(&overflow_latest_by_symbol, &mut pending);
+                if !pending.is_empty() {
+                    flush_pending_updates(&screener, ws_tx.as_ref(), &mut pending);
+                }
+            }
+        }
+    }
+
+    health
+        .runtime_control_queue_depth
+        .store(0, Ordering::Relaxed);
+    warn!("control-plane worker stopped: update channel closed");
 }
 
 pub(super) fn spawn_control_plane_worker(
@@ -101,10 +196,17 @@ pub(super) fn spawn_control_plane_worker(
     ws_tx: Option<broadcast::Sender<MarketDataEvent>>,
     health: Arc<HealthState>,
 ) -> Arc<ControlPlaneTx> {
-    let capacity = parse_env_usize(CONTROL_UPDATE_QUEUE_CAPACITY_ENV)
-        .unwrap_or(DEFAULT_CONTROL_UPDATE_QUEUE_CAPACITY)
-        .max(1);
-    let (sender, mut receiver) = mpsc::channel::<ControlUpdate>(capacity);
+    let config = worker_config_from_env();
+    spawn_control_plane_worker_with_config(screener, ws_tx, health, config)
+}
+
+fn spawn_control_plane_worker_with_config(
+    screener: ScreenerStore,
+    ws_tx: Option<broadcast::Sender<MarketDataEvent>>,
+    health: Arc<HealthState>,
+    config: ControlWorkerConfig,
+) -> Arc<ControlPlaneTx> {
+    let (sender, receiver) = mpsc::channel::<ControlUpdate>(config.queue_capacity);
     let queue_depth = Arc::new(AtomicU64::new(0));
     let overflow_latest_by_symbol = Arc::new(Mutex::new(HashMap::new()));
     let tx = Arc::new(ControlPlaneTx {
@@ -114,26 +216,27 @@ pub(super) fn spawn_control_plane_worker(
         health: health.clone(),
     });
 
-    tokio::spawn(async move {
-        loop {
-            if let Some(update) = pop_overflow_update(&overflow_latest_by_symbol) {
-                apply_control_update(&screener, ws_tx.as_ref(), update);
-                continue;
-            }
-            let Some(update) = receiver.recv().await else {
-                break;
+    std::thread::Builder::new()
+        .name("control-plane-worker".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let Ok(runtime) = runtime else {
+                warn!("control-plane worker runtime init failed");
+                return;
             };
-            decrement_saturating(queue_depth.as_ref());
-            health
-                .runtime_control_queue_depth
-                .store(queue_depth.load(Ordering::Acquire), Ordering::Relaxed);
-            apply_control_update(&screener, ws_tx.as_ref(), update);
-        }
-        health
-            .runtime_control_queue_depth
-            .store(0, Ordering::Relaxed);
-        warn!("control-plane worker stopped: update channel closed");
-    });
+            runtime.block_on(run_control_plane_worker_loop(
+                receiver,
+                queue_depth,
+                overflow_latest_by_symbol,
+                screener,
+                ws_tx,
+                health,
+                config,
+            ));
+        })
+        .expect("failed to spawn control-plane worker thread");
 
     tx
 }
@@ -196,6 +299,56 @@ mod tests {
                 .runtime_control_dropped_updates
                 .load(Ordering::Relaxed),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn control_plane_worker_coalesces_latest_update_within_flush_window() {
+        let screener = ScreenerStore::default();
+        let health = Arc::new(HealthState::new());
+        let (ws_tx, mut ws_rx) = broadcast::channel::<MarketDataEvent>(8);
+        let control = spawn_control_plane_worker_with_config(
+            screener,
+            Some(ws_tx),
+            health,
+            ControlWorkerConfig {
+                queue_capacity: 32,
+                flush_interval_ms: 150,
+                max_batch: 256,
+            },
+        );
+
+        assert!(control.try_enqueue(ControlUpdate {
+            symbol: "BTCUSDT".to_string(),
+            exchange: "binance",
+            bid: 100.0,
+            ask: 100.2,
+            exchange_ts_ns: 1_000,
+            local_ts_ns: 1_100,
+        }));
+        assert!(control.try_enqueue(ControlUpdate {
+            symbol: "BTCUSDT".to_string(),
+            exchange: "binance",
+            bid: 101.0,
+            ask: 101.2,
+            exchange_ts_ns: 1_200,
+            local_ts_ns: 1_300,
+        }));
+
+        let event = tokio::time::timeout(tokio::time::Duration::from_millis(500), ws_rx.recv())
+            .await
+            .expect("ws recv timeout")
+            .expect("ws event");
+        assert_eq!(event.symbol, "BTCUSDT");
+        assert_eq!(event.exchange, "binance");
+        assert_eq!(event.bid, 101.0, "must keep latest update in window");
+        assert_eq!(event.ask, 101.2, "must keep latest update in window");
+
+        let next =
+            tokio::time::timeout(tokio::time::Duration::from_millis(120), ws_rx.recv()).await;
+        assert!(
+            next.is_err(),
+            "worker must emit one coalesced update for same symbol/exchange per flush window"
         );
     }
 

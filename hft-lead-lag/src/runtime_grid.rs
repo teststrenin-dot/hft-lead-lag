@@ -121,7 +121,7 @@ impl Default for RuntimeGridConfig {
             enabled: true,
             watch_interval_ms: 5_000,
             apply_interval_ms: 5 * 60 * 1_000,
-            max_configs: 1_500,
+            max_configs: 512,
             gap_threshold_bps: GridAxisF64 {
                 min: 30.0,
                 max: 80.0,
@@ -173,7 +173,7 @@ const DEFAULT_RUNTIME_GRID_CONFIG_TOML: &str = r#"# Runtime grid hot-reload (dea
 enabled = true
 watch_interval_ms = 5000
 apply_interval_ms = 300000
-max_configs = 1500
+max_configs = 512
 
 [gap_threshold_bps]
 min = 30.0

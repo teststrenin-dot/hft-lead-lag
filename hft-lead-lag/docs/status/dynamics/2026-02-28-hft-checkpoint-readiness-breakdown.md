@@ -195,3 +195,19 @@ Last sync: 2026-02-28 (stud2 deltas closed; CP7 block1 RM4 enforcement landed)
    - None.
 3. Missing and required:
    - CP7 block2+: continuous ops audit/alert pipeline around already-implemented RM4 auto-flagging (runtime check exists; runbook+automation remains).
+
+## `HFT-RM5` Control-plane threaded isolation + coalesced apply
+1. Done and not touched:
+   - Control-plane worker now runs in dedicated OS thread with a current-thread Tokio runtime (`src/event_loop_control.rs`).
+   - Worker batches updates by `(symbol, exchange)` and applies latest-only values per flush window.
+   - Flush policy is bounded by interval and max-batch thresholds.
+   - Runtime-grid default fanout is reduced to `512` in both default config template and checked-in runtime config.
+   - Regression tests:
+     - `control_plane_worker_coalesces_latest_update_within_flush_window`
+     - `runtime_grid_config_default_matches_2core_profile`
+   - Evidence bundle:
+     - `docs/status/dynamics/2026-02-28-rm5-control-plane-threaded-coalescing-evidence.md`
+2. Done but must be reworked:
+   - None.
+3. Missing and required:
+   - Optional CP7 hardening: expose coalesce window/batch settings in `/health` for operator visibility.

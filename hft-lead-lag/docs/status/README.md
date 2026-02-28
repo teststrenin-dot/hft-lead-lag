@@ -2,7 +2,7 @@
 
 Date: 2026-02-28
 Status: active
-Last sync: 2026-02-28 (RM1-RM4 closures + CP7 block1 enforcement synced)
+Last sync: 2026-02-28 (RM5 control-plane isolation + coalescing synced)
 
 ## Purpose
 Single entry point for project status, checkpoint tracking, and operating constraints.
@@ -26,10 +26,11 @@ Single entry point for project status, checkpoint tracking, and operating constr
 12. `dynamics/2026-02-28-rm1-plane-mode-contract-evidence.md`
 13. `dynamics/2026-02-28-rm2-control-plane-decoupling-evidence.md`
 14. `dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`
-15. `dynamics/2026-02-28-cp7-block1-rm4-health-enforcement.md`
-16. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
-17. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
-18. `dynamics/2026-02-26-project-math-model.md`
+15. `dynamics/2026-02-28-rm5-control-plane-threaded-coalescing-evidence.md`
+16. `dynamics/2026-02-28-cp7-block1-rm4-health-enforcement.md`
+17. `dynamics/2026-02-26-delivery-contract-first-playbook.md`
+18. `dynamics/2026-02-27-cp0-contract-freeze-v2.md`
+19. `dynamics/2026-02-26-project-math-model.md`
 
 ## Checkpoint system (`HFT-CP*`)
 1. `HFT-CP0` Latency and Allocation Observatory

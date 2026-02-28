@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (RM1-RM4 closed; CP7 block1 enforcement started)
+Last sync: 2026-02-28 (RM5 control-plane isolation/coalescing added)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -52,6 +52,7 @@ Last sync: 2026-02-28 (RM1-RM4 closed; CP7 block1 enforcement started)
 | `HFT-RM2` Screener decoupling from data-plane | `Completed` | Runtime ingest enforces control-plane handoff as production path; direct-ingest fallback is test-only; overflow semantics are per `(symbol, exchange)` with regression coverage (`docs/status/dynamics/2026-02-28-rm2-control-plane-decoupling-evidence.md`). |
 | `HFT-RM3` 2-core host budget guardrails | `Completed` | Runtime now enforces frozen 2-core defaults for strategy symbols, screener symbols, and runtime-grid configs; env remains override-only (`docs/status/dynamics/2026-02-28-rm3-2core-cap-profile-evidence.md`). |
 | `HFT-RM4` Numeric HFT SLO freeze | `Completed` | Core docs now contain numeric latency/backlog/drop envelopes and explicit `degraded/non-HFT` fail rule tied to `/health` (`business-objective-economic-control-map.md`, `operating-model-spec-v1.md`). |
+| `HFT-RM5` Control-plane threaded isolation + coalesced apply | `Completed` | Control-plane worker is isolated in dedicated OS thread/runtime and applies latest-only micro-batches by `(symbol, exchange)`; runtime-grid default fanout is reduced to `512` (`docs/status/dynamics/2026-02-28-rm5-control-plane-threaded-coalescing-evidence.md`). |
 
 ## Rule -> Code -> Test Matrix
 1. Eligibility gate (`age>5`, `closed>5`, `useful_winrate>=0.30`, `avg_pnl>=0`):

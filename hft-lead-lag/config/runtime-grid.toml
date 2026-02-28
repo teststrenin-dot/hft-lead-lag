@@ -3,7 +3,7 @@
 enabled = true
 watch_interval_ms = 5000
 apply_interval_ms = 300000
-max_configs = 1500
+max_configs = 512
 
 [gap_threshold_bps]
 min = 30.0

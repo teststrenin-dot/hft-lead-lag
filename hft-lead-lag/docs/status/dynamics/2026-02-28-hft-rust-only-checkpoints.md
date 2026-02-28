@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Last sync: 2026-02-28 (stud2 remediation closed; CP7 block1 started)
+Last sync: 2026-02-28 (RM5 control-plane isolation/coalescing applied)
 
 ## 1) Locked Architecture Invariant
 1. Runtime hot path is Rust-only.
@@ -29,6 +29,7 @@ Last sync: 2026-02-28 (stud2 remediation closed; CP7 block1 started)
 | `HFT-RM2` Screener decoupling from data-plane | `Completed` | Event loop uses bounded control-update handoff and production runtime path is control-plane only (`2026-02-28-rm2-control-plane-decoupling-evidence.md`) | Compatibility direct-ingest path is constrained to test builds only |
 | `HFT-RM3` 2-core host budget guardrails | `Completed` | Hard caps for symbol/config fanout on trading host (`runtime-grid`, subscriptions, screener workload) are always applied with frozen 2-core defaults and env override path | Production default cap profile is frozen and documented (`2026-02-28-rm3-2core-cap-profile-evidence.md`) |
 | `HFT-RM4` Numeric HFT SLO freeze | `Completed` | Hard p99/backlog/drop envelopes and degradation rule are now frozen in core contracts | Core docs are the single source of numeric fail/pass criteria tied to `/health` metrics |
+| `HFT-RM5` Control-plane threaded isolation + coalesced apply | `Completed` | Control worker runs in dedicated OS thread/runtime and applies latest-only micro-batched updates by `(symbol, exchange)`; runtime-grid default fanout lowered to `512` | Regression proof and command evidence in `2026-02-28-rm5-control-plane-threaded-coalescing-evidence.md` |
 
 Notes:
 1. `HFT-RM*` is a mandatory continuation layer after CP6, not a replacement of CP0-CP7.
