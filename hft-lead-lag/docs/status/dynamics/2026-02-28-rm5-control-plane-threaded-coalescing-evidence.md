@@ -9,7 +9,13 @@ Scope: isolate control-plane execution from hot runtime workers and reduce per-t
 2. Control updates are coalesced by `(symbol, exchange)` before apply:
    - latest update wins inside a flush window.
    - worker flushes on interval and on max-batch threshold.
-3. Runtime-grid default config fanout was reduced from `1500` to `512` on default profile.
+3. Coalescing overwrite pressure is observable in health counters:
+   - each pending-map replacement increments `runtime_control_dropped_updates`.
+4. Control-plane env settings are strictly validated (`>0`) with warning on invalid values:
+   - `CONTROL_UPDATE_QUEUE_CAPACITY`
+   - `CONTROL_UPDATE_FLUSH_INTERVAL_MS`
+   - `CONTROL_UPDATE_MAX_BATCH`
+5. Runtime-grid default config fanout was reduced from `1500` to `512` on default profile.
 
 ## Code evidence
 1. Dedicated thread + coalesced loop:
@@ -19,21 +25,26 @@ Scope: isolate control-plane execution from hot runtime workers and reduce per-t
 2. Coalescing regression test:
    - `src/event_loop_control.rs`
    - `control_plane_worker_coalesces_latest_update_within_flush_window`
-3. Runtime-grid default cap update:
+3. Control-plane env validation regression test:
+   - `src/event_loop_control.rs`
+   - `worker_config_from_env_rejects_zero_values_and_uses_defaults`
+4. Runtime-grid default cap update:
    - `src/runtime_grid.rs` (`RuntimeGridConfig::default`, default TOML template)
    - `config/runtime-grid.toml` (`max_configs = 512`)
-4. Default-cap regression test:
+5. Default-cap regression test:
    - `src/main_tests.rs`
    - `runtime_grid_config_default_matches_2core_profile`
 
 ## Verification commands
 ```bash
 cargo test -q control_plane_worker_coalesces_latest_update_within_flush_window
+cargo test -q worker_config_from_env_rejects_zero_values_and_uses_defaults
 cargo test -q control_plane_worker_
 cargo test -q runtime_grid_config_default_matches_2core_profile
 ```
 
 ## Outcome
 1. Control-plane work no longer depends on Tokio worker scheduling of the main runtime loop.
-2. Repeated updates for the same symbol/exchange in burst windows are collapsed before `screener.update`.
-3. Default config fanout matches 2-core profile and avoids accidental high-load startup defaults.
+2. Repeated updates for the same symbol/exchange in burst windows are collapsed before `screener.update`, and replacements are now observable via dropped counter.
+3. Invalid control-plane env overrides no longer silently degrade behavior.
+4. Default config fanout matches 2-core profile and avoids accidental high-load startup defaults.

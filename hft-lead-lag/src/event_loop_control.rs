@@ -84,23 +84,47 @@ impl ControlPlaneTx {
     }
 }
 
-fn parse_env_usize(name: &str) -> Option<usize> {
-    std::env::var(name).ok()?.trim().parse::<usize>().ok()
+fn parse_positive_env_usize(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    let value = raw.trim();
+    match value.parse::<usize>() {
+        Ok(v) if v > 0 => Some(v),
+        Ok(_) => {
+            warn!("{name} is set to '{value}' but must be > 0; using default");
+            None
+        }
+        Err(_) => {
+            warn!("{name} is set to '{value}' but is not a valid integer; using default");
+            None
+        }
+    }
 }
 
-fn parse_env_u64(name: &str) -> Option<u64> {
-    std::env::var(name).ok()?.trim().parse::<u64>().ok()
+fn parse_positive_env_u64(name: &str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    let value = raw.trim();
+    match value.parse::<u64>() {
+        Ok(v) if v > 0 => Some(v),
+        Ok(_) => {
+            warn!("{name} is set to '{value}' but must be > 0; using default");
+            None
+        }
+        Err(_) => {
+            warn!("{name} is set to '{value}' but is not a valid integer; using default");
+            None
+        }
+    }
 }
 
 fn worker_config_from_env() -> ControlWorkerConfig {
     ControlWorkerConfig {
-        queue_capacity: parse_env_usize(CONTROL_UPDATE_QUEUE_CAPACITY_ENV)
+        queue_capacity: parse_positive_env_usize(CONTROL_UPDATE_QUEUE_CAPACITY_ENV)
             .unwrap_or(DEFAULT_CONTROL_UPDATE_QUEUE_CAPACITY)
             .max(1),
-        flush_interval_ms: parse_env_u64(CONTROL_UPDATE_FLUSH_INTERVAL_MS_ENV)
+        flush_interval_ms: parse_positive_env_u64(CONTROL_UPDATE_FLUSH_INTERVAL_MS_ENV)
             .unwrap_or(DEFAULT_CONTROL_UPDATE_FLUSH_INTERVAL_MS)
             .max(1),
-        max_batch: parse_env_usize(CONTROL_UPDATE_MAX_BATCH_ENV)
+        max_batch: parse_positive_env_usize(CONTROL_UPDATE_MAX_BATCH_ENV)
             .unwrap_or(DEFAULT_CONTROL_UPDATE_MAX_BATCH)
             .max(1),
     }
@@ -120,18 +144,25 @@ fn decrement_saturating(counter: &AtomicU64) {
 fn drain_overflow_updates(
     overflow_latest_by_symbol: &Mutex<HashMap<OverflowKey, ControlUpdate>>,
     pending: &mut HashMap<OverflowKey, ControlUpdate>,
-) {
+) -> u64 {
     let Ok(mut overflow) = overflow_latest_by_symbol.lock() else {
-        return;
+        return 0;
     };
+    let mut replaced: u64 = 0;
     for (key, update) in overflow.drain() {
-        pending.insert(key, update);
+        if pending.insert(key, update).is_some() {
+            replaced = replaced.saturating_add(1);
+        }
     }
+    replaced
 }
 
-fn queue_pending_update(pending: &mut HashMap<OverflowKey, ControlUpdate>, update: ControlUpdate) {
+fn queue_pending_update(
+    pending: &mut HashMap<OverflowKey, ControlUpdate>,
+    update: ControlUpdate,
+) -> bool {
     let key = (update.symbol.clone(), update.exchange);
-    pending.insert(key, update);
+    pending.insert(key, update).is_some()
 }
 
 fn flush_pending_updates(
@@ -162,7 +193,12 @@ async fn run_control_plane_worker_loop(
         tokio::select! {
             update = receiver.recv() => {
                 let Some(update) = update else {
-                    drain_overflow_updates(&overflow_latest_by_symbol, &mut pending);
+                    let replaced = drain_overflow_updates(&overflow_latest_by_symbol, &mut pending);
+                    if replaced > 0 {
+                        health
+                            .runtime_control_dropped_updates
+                            .fetch_add(replaced, Ordering::Relaxed);
+                    }
                     flush_pending_updates(&screener, ws_tx.as_ref(), &mut pending);
                     break;
                 };
@@ -170,14 +206,28 @@ async fn run_control_plane_worker_loop(
                 health
                     .runtime_control_queue_depth
                     .store(queue_depth.load(Ordering::Acquire), Ordering::Relaxed);
-                queue_pending_update(&mut pending, update);
-                drain_overflow_updates(&overflow_latest_by_symbol, &mut pending);
+                if queue_pending_update(&mut pending, update) {
+                    health
+                        .runtime_control_dropped_updates
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                let replaced = drain_overflow_updates(&overflow_latest_by_symbol, &mut pending);
+                if replaced > 0 {
+                    health
+                        .runtime_control_dropped_updates
+                        .fetch_add(replaced, Ordering::Relaxed);
+                }
                 if pending.len() >= config.max_batch {
                     flush_pending_updates(&screener, ws_tx.as_ref(), &mut pending);
                 }
             }
             _ = flush_interval.tick() => {
-                drain_overflow_updates(&overflow_latest_by_symbol, &mut pending);
+                let replaced = drain_overflow_updates(&overflow_latest_by_symbol, &mut pending);
+                if replaced > 0 {
+                    health
+                        .runtime_control_dropped_updates
+                        .fetch_add(replaced, Ordering::Relaxed);
+                }
                 if !pending.is_empty() {
                     flush_pending_updates(&screener, ws_tx.as_ref(), &mut pending);
                 }
@@ -216,27 +266,24 @@ fn spawn_control_plane_worker_with_config(
         health: health.clone(),
     });
 
-    std::thread::Builder::new()
-        .name("control-plane-worker".to_string())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let Ok(runtime) = runtime else {
-                warn!("control-plane worker runtime init failed");
-                return;
-            };
-            runtime.block_on(run_control_plane_worker_loop(
-                receiver,
-                queue_depth,
-                overflow_latest_by_symbol,
-                screener,
-                ws_tx,
-                health,
-                config,
-            ));
-        })
-        .expect("failed to spawn control-plane worker thread");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let Ok(runtime) = runtime else {
+            warn!("control-plane worker runtime init failed");
+            return;
+        };
+        runtime.block_on(run_control_plane_worker_loop(
+            receiver,
+            queue_depth,
+            overflow_latest_by_symbol,
+            screener,
+            ws_tx,
+            health,
+            config,
+        ));
+    });
 
     tx
 }
@@ -269,6 +316,14 @@ fn apply_control_update(
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env test lock")
+    }
 
     #[tokio::test]
     async fn control_plane_worker_applies_update_and_emits_ws_event() {
@@ -343,6 +398,14 @@ mod tests {
         assert_eq!(event.exchange, "binance");
         assert_eq!(event.bid, 101.0, "must keep latest update in window");
         assert_eq!(event.ask, 101.2, "must keep latest update in window");
+        assert_eq!(
+            control
+                .health
+                .runtime_control_dropped_updates
+                .load(Ordering::Relaxed),
+            1,
+            "coalescing overwrite must be observable in dropped counter"
+        );
 
         let next =
             tokio::time::timeout(tokio::time::Duration::from_millis(120), ws_rx.recv()).await;
@@ -350,6 +413,26 @@ mod tests {
             next.is_err(),
             "worker must emit one coalesced update for same symbol/exchange per flush window"
         );
+    }
+
+    #[test]
+    fn worker_config_from_env_rejects_zero_values_and_uses_defaults() {
+        let _lock = env_test_lock();
+        std::env::set_var(CONTROL_UPDATE_QUEUE_CAPACITY_ENV, "0");
+        std::env::set_var(CONTROL_UPDATE_FLUSH_INTERVAL_MS_ENV, "0");
+        std::env::set_var(CONTROL_UPDATE_MAX_BATCH_ENV, "0");
+
+        let cfg = worker_config_from_env();
+        assert_eq!(cfg.queue_capacity, DEFAULT_CONTROL_UPDATE_QUEUE_CAPACITY);
+        assert_eq!(
+            cfg.flush_interval_ms,
+            DEFAULT_CONTROL_UPDATE_FLUSH_INTERVAL_MS
+        );
+        assert_eq!(cfg.max_batch, DEFAULT_CONTROL_UPDATE_MAX_BATCH);
+
+        std::env::remove_var(CONTROL_UPDATE_QUEUE_CAPACITY_ENV);
+        std::env::remove_var(CONTROL_UPDATE_FLUSH_INTERVAL_MS_ENV);
+        std::env::remove_var(CONTROL_UPDATE_MAX_BATCH_ENV);
     }
 
     #[test]
