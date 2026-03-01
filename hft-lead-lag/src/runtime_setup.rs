@@ -1,6 +1,7 @@
 use super::{ConfigManager, EventLoopState, HealthState, SUBSCRIBE_DELAY_MS};
 use hft_lead_lag::api::{
-    HttpServer, HttpServerConfig, MarketDataEvent, MarketDataServer, ScreenerStore, WsServerConfig,
+    HttpServer, HttpServerConfig, HttpServerSurface, MarketDataEvent, MarketDataServer,
+    ScreenerStore, WsServerConfig,
 };
 use hft_lead_lag::infrastructure::rest::GateRestClient;
 use hft_lead_lag::{BinanceMarketData, GateMarketData, MarketDataStream};
@@ -273,15 +274,22 @@ pub(super) async fn start_api_servers(
     screener: ScreenerStore,
     health_state: Arc<HealthState>,
     enable_screener_chart_pipeline: bool,
+    health_only: bool,
 ) -> Result<
     Option<tokio::sync::broadcast::Sender<MarketDataEvent>>,
     Box<dyn std::error::Error + Send + Sync>,
 > {
+    let surface = if health_only {
+        HttpServerSurface::HealthOnly
+    } else {
+        HttpServerSurface::Full
+    };
     let http_server = HttpServer::with_runtime(
         HttpServerConfig::default(),
         min_volume_usd,
         screener,
         health_state,
+        surface,
     );
     let http_listener = tokio::net::TcpListener::bind(http_server.bind_address()).await?;
     info!("HTTP server bound on {}", http_server.bind_address());

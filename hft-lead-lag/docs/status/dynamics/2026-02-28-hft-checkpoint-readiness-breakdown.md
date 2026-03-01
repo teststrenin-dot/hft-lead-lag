@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
-Last sync: 2026-02-28 (stud2 deltas closed; CP7 block1 RM4 enforcement landed)
+Last sync: 2026-02-28 (CP7 block8 alert-hook script landed; dynamics scope aligned to observer-first UI + `scout+forward` control)
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
@@ -132,19 +132,52 @@ Last sync: 2026-02-28 (stud2 deltas closed; CP7 block1 RM4 enforcement landed)
      - per-window SLO breach evaluation in `/health`
      - consecutive breach streak tracking
      - `degraded_non_hft` escalation after 3 consecutive breached windows
-   - Evidence captured in `docs/status/dynamics/2026-02-28-cp7-block1-rm4-health-enforcement.md`.
+   - Evidence captured in:
+     - `docs/status/dynamics/2026-02-28-cp7-block1-rm4-health-enforcement.md`
+     - `docs/status/dynamics/2026-02-28-rm4-hft-core-live-slo-validation.md`
+     - `docs/status/dynamics/2026-02-28-cp7-block2-event-driven-signal-loop-evidence.md`
+     - `docs/status/dynamics/2026-02-28-cp7-block3-watchdog-stall-evidence.md`
+     - `docs/status/dynamics/2026-02-28-cp7-block4-recovery-runbook-v1.md`
+     - `docs/status/dynamics/2026-02-28-cp7-block5-recovery-drill-automation-evidence.md`
+     - `docs/status/dynamics/2026-02-28-cp7-block6-dbwriter-drift-alert-evidence.md`
+     - `docs/status/dynamics/2026-02-28-cp7-block7-alert-level-escalation-contract.md`
+     - `docs/status/dynamics/2026-02-28-cp7-block8-alert-hook-script-evidence.md`
+   - Runtime watchdog issue signals are active in `/health` for:
+     - `engine_state_stall`
+     - `signal_loop_stall`
+     - `execution_loop_stall`
+   - Recovery runbook v1 defines deterministic restart/validation flow with idempotent restore checks.
+   - Automated recovery drill script is now available:
+     - `scripts/ops/health_recovery_drill.sh`
+   - DB writer progress is observable in `/health` and stall is flagged via:
+     - `db_writer_stall`
+   - Drift alert signal is runtime-visible in `/health` via:
+     - `drift_p99_high`
+   - Operator severity is machine-readable via `/health.alert_level` (`ok|warn|critical`).
+   - External alert-hook script is available:
+     - `scripts/ops/health_alert_gate.sh`
 2. Done but must be reworked:
-   - Ops coverage is still incomplete for production deterministic recovery.
+   - Recovery drill is script-level; still needs orchestration integration in ops pipeline.
 3. Missing and required:
-   - Component watchdogs (`feed/engine/execution/dbwriter`).
-   - Alert contract for drift, drops, backlog, engine stall.
-   - Idempotent snapshot/restore runbook and recovery verification.
+   - Continuous scheduled execution of recovery drill in CI/ops loop.
+   - Deploy and schedule alert hooks/drills under concrete policy (cron/systemd/CI).
+
+## Observation / UI-Feedback Scope (active)
+1. Done and not touched:
+   - `mixed` mode provides portfolio/symbol race observation through API/UI.
+   - UI runner control surface is constrained to `scout` + `forward`, with server-side rejection of other phases and forward prerequisite guard (`2026-02-28-observer-scout-forward-control-evidence.md`).
+2. Done but must be reworked:
+   - polling UI remains transitional; near-realtime observer stream is still open.
+3. Missing and required:
+   - avoid re-introducing broad trials/runner control endpoints in active contour.
+   - keep observer plane isolated from `hft_core` hot path.
 
 ## `HFT-RM1` Plane mode split (`mixed` vs `hft_core`)
 1. Done and not touched:
    - Runtime supports explicit plane mode via `RUNTIME_PLANE_MODE` (`mixed` / `hft_core`).
    - `hft_core` mode disables direct screener ingest in event loop and disables portfolio scheduler tick in runtime loop.
    - `hft_core` mode uses strategy-only subscriptions and does not start runtime-grid hot reload / NATR refresher / screener DB persistence.
+   - `hft_core` server surface is health-only (`/health`): trial runner/trials orchestration routes are not exposed.
    - Mode parser contract is regression-tested in `src/main_tests.rs` (default/valid/invalid inputs).
    - Contract evidence is captured in `docs/status/dynamics/2026-02-28-rm1-plane-mode-contract-evidence.md`.
 2. Done but must be reworked:
@@ -191,6 +224,8 @@ Last sync: 2026-02-28 (stud2 deltas closed; CP7 block1 RM4 enforcement landed)
    - Core contracts now freeze numeric HFT envelopes and degradation rule:
      - `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
      - `docs/status/core/2026-02-27-operating-model-spec-v1.md`
+   - Live `hft_core` window sampling evidence is captured in
+     `docs/status/dynamics/2026-02-28-rm4-hft-core-live-slo-validation.md`.
 2. Done but must be reworked:
    - None.
 3. Missing and required:

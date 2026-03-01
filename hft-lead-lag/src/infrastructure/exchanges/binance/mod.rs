@@ -439,6 +439,11 @@ impl BinanceMarketData {
         DROPPED_MESSAGES.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
+    pub fn reset_dropped_messages_for_tests() {
+        DROPPED_MESSAGES.store(0, Ordering::Relaxed);
+    }
+
     /// Subscribe to many symbols using chunked requests to respect WS rate limits.
     pub async fn subscribe_book_tickers_batch(
         &mut self,

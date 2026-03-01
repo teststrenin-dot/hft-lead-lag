@@ -550,6 +550,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         screener.clone(),
         health_state.clone(),
         ENABLE_SCREENER_CHART_PIPELINE,
+        runtime_plane_mode.hft_core(),
     )
     .await?;
     let control_plane = if runtime_plane_mode.hft_core() {

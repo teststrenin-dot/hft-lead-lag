@@ -1,11 +1,11 @@
 # Business Objective and Economic Control Map v2
 
 Date: 2026-02-27
-Status: Active strategic anchor (Rust-only migration stage)
-Last sync: 2026-02-28 (business contract formalized with numeric runtime envelopes and fail rule)
+Status: Active strategic anchor (`HFT-based-only`, Rust-only runtime stage)
+Last sync: 2026-02-28 (`HFT-based-only` objective and observer-first UI feedback contract clarified)
 
 ## 1) Locked Business Objective
-Maximize risk-adjusted return under constrained capital by continuously selecting robust alpha contexts (symbols/configs/portfolios) from shadow validation into paper/live execution, while strictly containing drawdown and operational failure risk.
+Maximize risk-adjusted return under constrained capital by continuously selecting robust alpha contexts (symbols/configs/portfolios) from shadow validation into paper/live execution, while strictly containing drawdown and operational failure risk, in an `HFT-based-only` architecture (event-driven, low-jitter, Rust hot path).
 
 ## 2) Economic Control Map
 Control chain:
@@ -18,12 +18,16 @@ Control chain:
 | `Competition` | Allocate best contexts across portfolios/configs | Attention lock on weak contexts | Partial (portfolio side in Rust, forward engine transitional) |
 | `Risk` | Contain degradation and operational failure | Loss streak damage, restart drift, duplication | Partial |
 | `Capital` | Allocate money to strongest portfolios | Misallocation/overexposure | Planned |
-| `Feedback` | Keep operator/system aligned and auditable | Blind operation, delayed incident response | Partial |
+| `Feedback` | Provide operator observation and control entrypoint | Blind operation, delayed incident response, incorrect manual control surface | Partial |
 
 ## 3) Architecture Law (mandatory)
 1. Runtime hot path is Rust-only.
 2. Python is not allowed in forward compute/data-plane target architecture.
 3. Transitional Python/Ray components are migration artifacts and must be removed by checkpoint gate.
+4. UI is observer-first and control-minimal:
+   - Primary UI role: observe symbol race + portfolio race in near real time.
+   - Allowed control from UI: start `scout`, start `forward` (only with valid non-empty scout artifact).
+   - Other orchestration controls (`expand`, `promote`, broad runner management) are out of target scope.
 
 ## 4) Checkpoint binding (`HFT-CP`)
 1. `HFT-CP0`: latency and allocation observability baseline.
@@ -89,6 +93,32 @@ Control chain:
 8. Stage scope:
    - Paper competition is active.
    - Live money rebalance/allocation across portfolios is not enabled yet.
+
+## 6.1 Observation / UI-Feedback Contract (mandatory)
+1. Purpose:
+   - Operator must see portfolio race and symbol race as the main feedback loop for strategy quality and risk behavior.
+2. Required observable entities:
+   - Candidate ranking transitions (enter/leave, rank drift).
+   - Portfolio shortlist and active allocation transitions.
+   - Guard/cooldown/hard-reset transitions per symbol.
+   - Paper performance deltas per portfolio.
+3. Control surface:
+   - UI may start `scout` and `forward` only.
+   - `forward` start must be prevalidated by scout artifact dependency.
+   - UI must not expose broad runtime orchestration controls in target `HFT-based-only` contour.
+4. Mode boundary:
+   - `mixed`: observer pages are enabled and fed from runtime snapshots.
+   - `hft_core`: execution kernel remains minimal; observer integration must not contaminate hot path.
+
+## 6.2 Scout Contract (mandatory)
+1. Purpose of `scout`:
+   - find only trade-bearing parameter corridors (ranges where trades exist).
+2. Non-goals of `scout`:
+   - no full optimization, no final ranking, no promotion logic.
+3. Output of `scout`:
+   - compact corridor artifact (small info volume) passed to race runtime.
+4. Downstream ownership:
+   - portfolio/symbol race consumes scout corridors and performs competition.
 
 ## 7) State Machine (business view)
 1. `ShadowCollecting` -> `EligiblePool`:

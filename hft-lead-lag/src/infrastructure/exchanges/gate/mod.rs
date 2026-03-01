@@ -355,6 +355,11 @@ impl GateMarketData {
         DROPPED_MESSAGES.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
+    pub fn reset_dropped_messages_for_tests() {
+        DROPPED_MESSAGES.store(0, Ordering::Relaxed);
+    }
+
     pub fn parse_book_ticker_for_replay(&self, data: &[u8], recv_ts_ns: i64) -> Option<BookTicker> {
         let is_book_ticker = contains_bytes(data, EVENT_BOOK_TICKER_CHANNEL)
             || contains_bytes(data, EVENT_BOOK_TICKER);

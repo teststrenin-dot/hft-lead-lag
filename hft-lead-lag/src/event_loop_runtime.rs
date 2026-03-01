@@ -101,6 +101,7 @@ pub(super) async fn run_event_loop(
                     strategy,
                     &tick_context,
                 ).await;
+                state.handle_signal_tick(strategy, runtime_context.health_state, runtime_context.execution);
                 runtime_context
                     .health_state
                     .runtime_binance_msg_queue_depth
@@ -116,14 +117,11 @@ pub(super) async fn run_event_loop(
                     strategy,
                     &tick_context,
                 ).await;
+                state.handle_signal_tick(strategy, runtime_context.health_state, runtime_context.execution);
                 runtime_context
                     .health_state
                     .runtime_gate_msg_queue_depth
                     .store(gate.msg_queue_depth() as u64, Ordering::Relaxed);
-            }
-
-            _ = state.signal_interval.tick() => {
-                state.handle_signal_tick(strategy, runtime_context.health_state, runtime_context.execution);
             }
 
             _ = portfolio_rebalance_interval.tick() => {

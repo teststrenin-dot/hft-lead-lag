@@ -3,12 +3,14 @@
 Date: 2026-02-28
 Status: Active
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Last sync: 2026-02-28 (RM5 control-plane isolation/coalescing applied)
+Last sync: 2026-02-28 (CP7 block8 external alert-hook script + observer `scout+forward` scope sync)
 
 ## 1) Locked Architecture Invariant
 1. Runtime hot path is Rust-only.
 2. Python/Ray is allowed only for offline/cold tasks and must not consume runtime CPU budget on the trading host.
 3. Control-plane and data-plane are separated by explicit contracts.
+4. UI scope is observer-first (symbol/portfolio race) with minimal control (`scout` + `forward` start only).
+5. `scout` is pre-race range discovery only (trade-bearing corridors), not final selector.
 
 ## 2) Checkpoint Ladder (to production)
 | Checkpoint | Status | Scope | Exit gate |
@@ -20,7 +22,7 @@ Last sync: 2026-02-28 (RM5 control-plane isolation/coalescing applied)
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | Parse only required fields, map symbol to id early, avoid symbol copying in hot path | Symbol cache interns raw bytes; Binance/Gate parse paths assign `strategy_symbol_id` during parse; drain dedupe is `SymbolId`-first; profile baselines + parse-order regression proof in `2026-02-28-cp4-parse-path-evidence.md` |
 | `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw feed recorder + replay mode + decision equivalence checks | JSONL recorder + strict reader are wired into WS ingest via opt-in env; recorder sequence advances only after successful write+flush; reader rejects malformed JSON/out-of-order sequence; offline replay determinism runner validates stable signal traces (`2026-02-28-cp5-block1-raw-feed-evidence.md`) |
 | `HFT-CP6` Execution Fast Path | `Completed` | Non-blocking `OrderIntent` queue, async fire-and-track, strict send SLA, kill-switch | Strategy thread uses bounded `try_send` queue; queue-depth accounting is race-safe; full queue keeps latest overflow intent per symbol; stale intent max-age guard and kill-switch cooldown recovery are active; `/health` exposes intent->sent SLA metrics (`2026-02-28-cp6-execution-fast-path-evidence.md`) |
-| `HFT-CP7` Production Operations Layer | `In progress` | RM4 SLO contract is runtime-enforced in `/health` windows with breach-streak escalation (`2026-02-28-cp7-block1-rm4-health-enforcement.md`) | Close remaining ops gates: watchdogs, idempotent snapshot/restore runbook, and full alert contract validation |
+| `HFT-CP7` Production Operations Layer | `In progress` | RM4 SLO contract is runtime-enforced (`block1`), timer-driven decision jitter is removed via event-driven signal loop (`block2`), health watchdog stall signals are active (`block3`), deterministic recovery runbook v1 is documented (`block4`), executable recovery drill script is shipped (`block5`), `/health` includes DB-writer stall + drift alert contracts (`block6`), machine-readable `alert_level` is active (`block7`), and external alert-gate script is shipped (`block8`) | Close remaining ops gates: scheduled policy integration (cron/systemd/CI hooks) |
 
 ## 2.1) Remediation Track (from `docs/studies/stud2.md`)
 | Remediation | Status | Scope | Exit gate |
@@ -39,6 +41,7 @@ Notes:
 1. Existing Rust signal/validation portfolio logic remains the functional base.
 2. Legacy CP artifacts are historical context, not planning authority.
 3. Python `ray_driver` is transitional for research/control tasks only.
+4. Legacy specs for old forward/trials surface are archived under `docs/status/dynamics/archive/`.
 
 ## 4) Review Rule
 Each `HFT-CP*` is reviewed as a separate large round:

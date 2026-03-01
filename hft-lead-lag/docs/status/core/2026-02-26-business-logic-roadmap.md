@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (RM5 control-plane isolation/coalescing added)
+Last sync: 2026-02-28 (`HFT-based-only` direction and observer-first UI feedback scope clarified)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -12,26 +12,47 @@ Last sync: 2026-02-28 (RM5 control-plane isolation/coalescing added)
 1. Keep business objective unchanged.
 2. Build deterministic low-jitter runtime path first (CP0-CP4).
 3. Add replay, execution SLA, and operations layers after runtime stabilization (CP5-CP7).
-4. Keep Python/Ray out of runtime data-plane and off the trading host CPU budget (offline only).
+4. Keep `HFT-based-only` architecture: event-driven Rust runtime, no Python/Ray in runtime data-plane.
 5. Post-CP6 mandatory remediation (`HFT-RM*`): enforce hot-path/control-plane split and host-budget compliance on target hardware.
 
-## End-to-End Business Process (current stage)
+## End-to-End Business Process (current stage, `mixed` mode)
 1. Shadow ingest:
    - Runtime collects quotes/trades and computes closed-trade symbol stats.
-2. Eligibility gate:
+2. Scout pre-stage (input narrowing only):
+   - `scout` collects limited evidence only to find ranges where trades exist.
+   - `scout` output is compact and is passed to race runtime.
+   - `scout` does not optimize/select final winners.
+3. Eligibility gate:
    - Candidate enters portfolio pool only if V1 thresholds pass.
-3. Competition:
+4. Competition:
    - Ranked candidates are distributed into portfolio shortlists without overlap.
    - Active symbols are selected from shortlists without overlap and with `0..4` cap.
-4. Risk containment:
+5. Risk containment:
    - Stop-loss streak rules trigger symbol cooldown.
    - Positive trades reset streak counter.
-5. Re-entry:
+6. Re-entry:
    - After cooldown symbol may return only through eligibility gate.
-6. Rebalance:
+7. Rebalance:
    - Scheduler applies assignment update every `120_000 ms`.
-7. Outputs:
+8. Outputs:
    - Portfolio assignment snapshots and paper performance metrics are persisted and exposed in UI/API.
+   - UI feedback is observer-first: symbol race + portfolio race are primary operator signals.
+   - UI control scope is limited to `scout` + `forward` start; `forward` requires valid non-empty scout artifact; other orchestration controls remain out of target contour.
+
+For `hft_core` mode, canonical runtime flow is reduced to `Signal -> Execution -> Health` as defined in
+`docs/status/core/2026-02-27-operating-model-spec-v1.md` (mode-specific boundary section).
+
+## Observation / UI-Feedback Scope (target)
+1. Mandatory observer views:
+   - Symbol race (candidate ranking movement, gate transitions).
+   - Portfolio race (shortlist/active transitions, paper equity/pnl progression).
+2. Mandatory risk visibility:
+   - Cooldown/hard-reset events and current guard state.
+3. Allowed controls from UI:
+   - Start `scout`.
+   - Start `forward` (only when scout artifact prerequisites pass).
+4. Explicitly out of scope for target contour:
+   - Runtime runner orchestration, broad control-plane management, and non-target trial controls (`expand`, `promote`).
 
 ## Checkpoint Status (current baseline)
 | Checkpoint | Status | Notes |
@@ -43,7 +64,7 @@ Last sync: 2026-02-28 (RM5 control-plane isolation/coalescing added)
 | `HFT-CP4` Minimal-Copy WS Parse Path | `Completed` | Fast parsing exists; symbol cache interns raw bytes directly; runtime parse paths use pattern-based extractors with early `strategy_symbol_id` assignment in Binance/Gate; connector drain dedupe is `strategy_symbol_id`-first; Gate trade parse avoids redundant re-interning; profile baselines and parser-priority regression proof are captured in CP4 evidence doc. |
 | `HFT-CP5` Deterministic Replay Harness | `Completed` | Raw-feed recorder is wired into WS ingest via opt-in env, recorder now advances `seq` only after successful write+flush, connector wiring surfaces recorder errors, replay reader validates invalid JSON/out-of-order sequence, and concurrent monotonic-sequence safety is test-covered. |
 | `HFT-CP6` Execution Fast Path | `Completed` | Order intent queue uses non-blocking `try_send`, queue-depth drift race is fixed, full-queue path keeps latest intent per symbol, stale intents are dropped by max-age guard, timeout kill-switch now auto-recovers via cooldown, and intent->sent SLA telemetry remains formalized (`2026-02-28-cp6-execution-fast-path-evidence.md`). |
-| `HFT-CP7` Production Operations Layer | `In progress` | RM4 health-window enforcement is now runtime-active (`2026-02-28-cp7-block1-rm4-health-enforcement.md`); watchdog/recovery stack remains open. |
+| `HFT-CP7` Production Operations Layer | `In progress` | RM4 health-window enforcement is runtime-active (`2026-02-28-cp7-block1-rm4-health-enforcement.md`); block2 event-driven signal loop removes timer-jitter and restores `hft_core` latency compliance (`2026-02-28-cp7-block2-event-driven-signal-loop-evidence.md`); block3 adds `/health` watchdog stall issues (`2026-02-28-cp7-block3-watchdog-stall-evidence.md`); block4 defines deterministic recovery runbook v1 (`2026-02-28-cp7-block4-recovery-runbook-v1.md`); block5 ships recovery drill automation (`2026-02-28-cp7-block5-recovery-drill-automation-evidence.md`); block6 adds DB-writer stall + drift warning contracts (`2026-02-28-cp7-block6-dbwriter-drift-alert-evidence.md`); block7 adds machine-readable escalation severity (`alert_level`) (`2026-02-28-cp7-block7-alert-level-escalation-contract.md`); block8 ships external alert-gate script (`2026-02-28-cp7-block8-alert-hook-script-evidence.md`); remaining tail is scheduler integration policy. |
 
 ## Remediation Track Status (`HFT-RM*`, derived from `stud2`)
 | Remediation | Status | Notes |

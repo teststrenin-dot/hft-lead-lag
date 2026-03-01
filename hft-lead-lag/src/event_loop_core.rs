@@ -25,6 +25,19 @@ struct LatencyStatsSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+struct DriftStatsSnapshot {
+    samples: u64,
+    avg_ms: i64,
+    p50_ms: i64,
+    p95_ms: i64,
+    p99_ms: i64,
+    #[cfg(test)]
+    max_ms: i64,
+    abs_p99_ms: u64,
+    abs_max_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 struct SymbolStageTimestamps {
     recv_ws_frame_ts_ns: i64,
     parsed_ts_ns: i64,
@@ -150,9 +163,9 @@ impl EventLoopMetrics {
         }
     }
 
-    pub(super) fn drift_stats_string_and_reset(&mut self) -> String {
+    fn drift_snapshot_and_reset(&mut self) -> DriftStatsSnapshot {
         if self.drift_samples.is_empty() {
-            return "no_data".to_string();
+            return DriftStatsSnapshot::default();
         }
 
         self.drift_samples.sort_unstable();
@@ -160,12 +173,40 @@ impl EventLoopMetrics {
         let p50 = self.drift_samples[n / 2];
         let p95 = self.drift_samples[n * 95 / 100];
         let p99 = self.drift_samples[n * 99 / 100];
+        #[cfg(test)]
         let max = self.drift_samples[n - 1];
         let avg = self.drift_samples.iter().sum::<i64>() / n as i64;
+        let mut abs_samples: Vec<u64> = self
+            .drift_samples
+            .iter()
+            .map(|v| v.unsigned_abs())
+            .collect();
+        abs_samples.sort_unstable();
+        let abs_p99 = abs_samples[n * 99 / 100];
+        let abs_max = abs_samples[n - 1];
         self.drift_samples.clear();
+        DriftStatsSnapshot {
+            samples: n as u64,
+            avg_ms: avg,
+            p50_ms: p50,
+            p95_ms: p95,
+            p99_ms: p99,
+            #[cfg(test)]
+            max_ms: max,
+            abs_p99_ms: abs_p99,
+            abs_max_ms: abs_max,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn drift_stats_string_and_reset(&mut self) -> String {
+        let drift = self.drift_snapshot_and_reset();
+        if drift.samples == 0 {
+            return "no_data".to_string();
+        }
         format!(
             "n={} avg={}ms p50={}ms p95={}ms p99={}ms max={}ms",
-            n, avg, p50, p95, p99, max
+            drift.samples, drift.avg_ms, drift.p50_ms, drift.p95_ms, drift.p99_ms, drift.max_ms
         )
     }
 
@@ -246,7 +287,6 @@ pub(super) struct EventLoopState {
     pub(super) signal_count: usize,
     screener_ingest_enabled: bool,
     last_status_at: Instant,
-    pub(super) signal_interval: tokio::time::Interval,
     #[cfg(test)]
     latest_bn_by_symbol_id: Vec<Option<hft_lead_lag::domain::BookTicker>>,
     #[cfg(test)]
@@ -450,14 +490,11 @@ pub(super) fn resolve_strategy_exchange_routing(
 
 impl EventLoopState {
     pub(super) fn new() -> Self {
-        let mut signal_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
-        signal_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         Self {
             ticker_count: 0,
             signal_count: 0,
             screener_ingest_enabled: true,
             last_status_at: Instant::now(),
-            signal_interval,
             #[cfg(test)]
             latest_bn_by_symbol_id: Vec::new(),
             #[cfg(test)]
@@ -736,7 +773,7 @@ impl EventLoopState {
     fn maybe_log_status(&mut self, health: &HealthState) {
         if self.last_status_at.elapsed() >= Duration::from_secs(5) {
             let interval_tickers = self.metrics.snapshot_and_roll_status(self.ticker_count);
-            let drift_stats = self.metrics.drift_stats_string_and_reset();
+            let drift = self.metrics.drift_snapshot_and_reset();
             let (ingest, decision, end_to_end) = self.metrics.latency_snapshots_and_reset();
 
             health
@@ -786,13 +823,40 @@ impl EventLoopState {
             health
                 .runtime_end_to_end_max_us
                 .store(end_to_end.max_us, Ordering::Relaxed);
+            health
+                .runtime_drift_samples
+                .store(drift.samples, Ordering::Relaxed);
+            health
+                .runtime_drift_avg_ms
+                .store(drift.avg_ms, Ordering::Relaxed);
+            health
+                .runtime_drift_p50_ms
+                .store(drift.p50_ms, Ordering::Relaxed);
+            health
+                .runtime_drift_p95_ms
+                .store(drift.p95_ms, Ordering::Relaxed);
+            health
+                .runtime_drift_p99_ms
+                .store(drift.p99_ms, Ordering::Relaxed);
+            health
+                .runtime_drift_abs_p99_ms
+                .store(drift.abs_p99_ms, Ordering::Relaxed);
+            health
+                .runtime_drift_abs_max_ms
+                .store(drift.abs_max_ms, Ordering::Relaxed);
 
             info!(
-                "Status: tickers={} (+{}/5s) signals={} drift=[{}] lat_us[ingest:samples={} p99={} decision:samples={} p99={} e2e:samples={} p99={}]",
+                "Status: tickers={} (+{}/5s) signals={} drift=[n={} avg={}ms p50={}ms p95={}ms p99={}ms abs_p99={}ms abs_max={}ms] lat_us[ingest:samples={} p99={} decision:samples={} p99={} e2e:samples={} p99={}]",
                 self.ticker_count,
                 interval_tickers,
                 self.signal_count,
-                drift_stats,
+                drift.samples,
+                drift.avg_ms,
+                drift.p50_ms,
+                drift.p95_ms,
+                drift.p99_ms,
+                drift.abs_p99_ms,
+                drift.abs_max_ms,
                 ingest.samples,
                 ingest.p99_us,
                 decision.samples,

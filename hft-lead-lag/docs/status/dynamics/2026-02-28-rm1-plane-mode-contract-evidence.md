@@ -13,6 +13,7 @@ Scope: formalize and verify runtime plane split contract
      - no screener DB persistence init
      - no portfolio scheduler tick
      - strategy-only subscriptions
+   - Runtime server surface is health-only (`/health`), with no trials/runner control endpoints.
 
 ## 2) Code evidence
 1. `src/main.rs`

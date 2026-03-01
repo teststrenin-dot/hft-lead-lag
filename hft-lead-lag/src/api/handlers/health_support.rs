@@ -7,7 +7,7 @@ use crate::infrastructure::exchanges::{BinanceMarketData, GateMarketData};
 
 use super::{
     DbSaturationHealth, HealthResponse, HttpState, RuntimeBacklogDepth, RuntimeLatencySnapshot,
-    RuntimeLatencyStats, RuntimeStageTimestamps,
+    RuntimeDriftSnapshot, RuntimeLatencyStats, RuntimeStageTimestamps,
 };
 
 pub(super) const FALLBACK_ROWS_TTL_MS: i64 = 5_000;
@@ -21,6 +21,25 @@ const RM4_MAX_GATE_BACKLOG: u64 = 64;
 const RM4_MAX_SIGNAL_BACKLOG: u64 = 128;
 const RM4_MAX_EXECUTION_BACKLOG: u64 = 128;
 const RM4_MAX_CONTROL_BACKLOG: u64 = 256;
+const DB_WRITER_STALL_THRESHOLD_MS: i64 = 15_000;
+const DRIFT_ABS_P99_WARN_MS: u64 = 200;
+const ENGINE_STALL_THRESHOLD_MS: i64 = 5_000;
+const SIGNAL_LOOP_STALL_THRESHOLD_MS: i64 = 3_000;
+const EXECUTION_LOOP_STALL_THRESHOLD_MS: i64 = 3_000;
+
+fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64
+}
+
+fn stage_age_ms_from_ns(now_ns: i64, ts_ns: i64) -> Option<i64> {
+    if ts_ns <= 0 || now_ns <= ts_ns {
+        return None;
+    }
+    Some(now_ns.saturating_sub(ts_ns) / 1_000_000)
+}
 
 pub(super) fn evaluate_db_saturation_health(
     db_dropped_batches: u64,
@@ -157,6 +176,15 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
         .load(Ordering::Relaxed);
     let db_dropped_batches = DbWriter::dropped_batches();
     let db_overflowed_batches = DbWriter::overflowed_batches();
+    let db_writer_enqueued_seq = DbWriter::watchdog_enqueued_max_seq();
+    let db_writer_observed_seq = DbWriter::watchdog_observed_max_seq();
+    let db_writer_backlog_seq = db_writer_enqueued_seq.saturating_sub(db_writer_observed_seq);
+    let db_writer_last_progress_ms = DbWriter::watchdog_last_progress_ms();
+    let db_writer_last_progress_age_ms = if db_writer_last_progress_ms > 0 {
+        Some(now_ms.saturating_sub(db_writer_last_progress_ms))
+    } else {
+        None
+    };
     let execution_sent_intents = state
         .health
         .runtime_execution_sent_intents
@@ -263,6 +291,15 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
                 .load(Ordering::Relaxed),
         },
     };
+    let runtime_drift_ms = RuntimeDriftSnapshot {
+        samples: state.health.runtime_drift_samples.load(Ordering::Relaxed),
+        avg_ms: state.health.runtime_drift_avg_ms.load(Ordering::Relaxed),
+        p50_ms: state.health.runtime_drift_p50_ms.load(Ordering::Relaxed),
+        p95_ms: state.health.runtime_drift_p95_ms.load(Ordering::Relaxed),
+        p99_ms: state.health.runtime_drift_p99_ms.load(Ordering::Relaxed),
+        abs_p99_ms: state.health.runtime_drift_abs_p99_ms.load(Ordering::Relaxed),
+        abs_max_ms: state.health.runtime_drift_abs_max_ms.load(Ordering::Relaxed),
+    };
     let runtime_backlog_depth = RuntimeBacklogDepth {
         binance_msg_queue_depth: state
             .health
@@ -355,6 +392,15 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
     } else {
         "hft"
     };
+    let now_ns = now_ns();
+    let state_updated_age_ms =
+        stage_age_ms_from_ns(now_ns, runtime_stage_timestamps.state_updated_ts_ns);
+    let signal_decided_age_ms =
+        stage_age_ms_from_ns(now_ns, runtime_stage_timestamps.signal_decided_ts_ns);
+    let order_intent_enqueued_age_ms =
+        stage_age_ms_from_ns(now_ns, runtime_stage_timestamps.order_intent_enqueued_ts_ns);
+    let order_intent_sent_age_ms =
+        stage_age_ms_from_ns(now_ns, runtime_stage_timestamps.order_intent_sent_ts_ns);
 
     let mut issues = Vec::new();
     let mut warnings = Vec::new();
@@ -380,6 +426,16 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
     if db_saturation.overflow_warn {
         warnings.push("db_overflow_batches_high");
     }
+    if db_writer_backlog_seq > 0
+        && db_writer_last_progress_age_ms
+            .map(|age| age > DB_WRITER_STALL_THRESHOLD_MS)
+            .unwrap_or(false)
+    {
+        issues.push("db_writer_stall");
+    }
+    if runtime_drift_ms.samples > 0 && runtime_drift_ms.abs_p99_ms > DRIFT_ABS_P99_WARN_MS {
+        warnings.push("drift_p99_high");
+    }
     if execution_send_timeouts > 0 {
         warnings.push("execution_send_timeouts_present");
     }
@@ -396,6 +452,31 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
         issues.push("hft_slo_degraded_non_hft");
     } else if rm4_breached {
         warnings.push("hft_slo_window_breach");
+    }
+    if binance && gate
+        && state_updated_age_ms
+            .map(|age| age > ENGINE_STALL_THRESHOLD_MS)
+            .unwrap_or(true)
+    {
+        issues.push("engine_state_stall");
+    }
+    if runtime_backlog_depth.signal_backlog_depth > 0
+        && signal_decided_age_ms
+            .map(|age| age > SIGNAL_LOOP_STALL_THRESHOLD_MS)
+            .unwrap_or(true)
+    {
+        issues.push("signal_loop_stall");
+    }
+    if runtime_backlog_depth.execution_intent_queue_depth > 0 {
+        let enqueued_stalled = order_intent_enqueued_age_ms
+            .map(|age| age > EXECUTION_LOOP_STALL_THRESHOLD_MS)
+            .unwrap_or(true);
+        let sent_stalled = order_intent_sent_age_ms
+            .map(|age| age > EXECUTION_LOOP_STALL_THRESHOLD_MS)
+            .unwrap_or(true);
+        if enqueued_stalled && sent_stalled {
+            issues.push("execution_loop_stall");
+        }
     }
     if trial_queue_depth >= TRIAL_QUEUE_DEPTH_WARN_THRESHOLD {
         warnings.push("trial_queue_depth_high");
@@ -418,6 +499,13 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
 
     let healthy = issues.is_empty();
     let status = if healthy { "ok" } else { "degraded" };
+    let alert_level = if !issues.is_empty() {
+        "critical"
+    } else if !warnings.is_empty() {
+        "warn"
+    } else {
+        "ok"
+    };
     let code = if healthy {
         axum::http::StatusCode::OK
     } else {
@@ -427,6 +515,7 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
         code,
         HealthResponse {
             status,
+            alert_level,
             binance,
             gate,
             binance_last_tick_age_ms,
@@ -443,12 +532,17 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
             db_overflowed_batches,
             db_dropped_batch_budget: DbWriter::dropped_batch_budget(),
             db_overflow_warn_threshold: DbWriter::overflow_warn_threshold(),
+            db_writer_enqueued_seq,
+            db_writer_observed_seq,
+            db_writer_backlog_seq,
+            db_writer_last_progress_age_ms,
             execution_sent_intents,
             execution_dropped_intents,
             execution_send_timeouts,
             execution_kill_switch_active,
             runtime_stage_timestamps,
             runtime_latency_us,
+            runtime_drift_ms,
             runtime_backlog_depth,
             hft_mode_status,
             hft_mode_ever_degraded,

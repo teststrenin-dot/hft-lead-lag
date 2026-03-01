@@ -1,12 +1,12 @@
-# Operating Model Spec v2 (Rust-Only Target)
+# Operating Model Spec v1 (Rust-Only Target)
 
 Date: 2026-02-27
 Status: Canonical operating model for `HFT-CP*`
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Last sync: 2026-02-28 (formal flow contract + state machine + numeric SLO freeze)
+Last sync: 2026-02-28 (`HFT-based-only` purpose and UI feedback/control boundary clarified)
 
 ## 1) Purpose
-Define one executable operating model that binds business flow to implementation checkpoints and enforces Rust-only hot path.
+Define one executable operating model that binds business flow to implementation checkpoints and enforces `HFT-based-only` behavior with Rust-only hot path.
 
 ## 2) Current vs target execution model
 | Domain | Current | Target |
@@ -33,6 +33,7 @@ Define one executable operating model that binds business flow to implementation
 ### 3.3 Competition
 1. Build disjoint shortlist/active allocation per portfolio.
 2. Ensure runtime competition reads only updated symbols and uses deterministic state transitions.
+3. `v1` semantics: this is a disjoint allocation policy (diversification), not overlap competition on one symbol.
 
 ### 3.4 Risk
 1. Guard/cooldown/hard-reset logic.
@@ -43,8 +44,15 @@ Define one executable operating model that binds business flow to implementation
 2. Risk caps and kill switches.
 
 ### 3.6 Feedback
-1. Operator-visible mode status and run artifacts.
+1. Observer-first UI for symbol race and portfolio race.
 2. Health/alerts/recovery telemetry.
+3. UI control scope is minimal: `scout` and `forward` start only.
+4. Broad orchestration controls are not part of the target `HFT-based-only` feedback surface.
+
+### 3.7 Scout (pre-race only)
+1. `scout` exists only to locate trade-bearing parameter ranges.
+2. `scout` output is a compact corridor artifact for race input.
+3. `scout` is not a competition engine and not a final config selector.
 
 ## 4) Formal IO Contract (V1)
 1. Input signals:
@@ -57,6 +65,18 @@ Define one executable operating model that binds business flow to implementation
    - Portfolio assignment snapshot: per portfolio `shortlist` and `active_symbols`.
    - Paper state snapshot: equity, realized pnl, trades, wins/losses, last trade.
    - Health telemetry: latency, backlog, drift.
+
+## 4.1 Mode-specific process boundary
+1. `mixed` mode:
+   - Full process is active: `Signal -> Validation -> Competition -> Risk -> Capital -> Feedback`.
+   - Portfolio scheduler, persistence, and operator pages are enabled.
+   - UI exposes race observation (symbol + portfolio), plus `scout` and `forward` start controls.
+   - `forward` start is valid only when scout artifact prerequisites pass.
+   - `scout` feeds only corridor candidates into race; race performs selection.
+2. `hft_core` mode:
+   - Runtime is reduced to low-jitter execution kernel: `Signal -> Execution -> Health`.
+   - Portfolio scheduler, persistence, control-plane worker, and trial runner routes are disabled.
+   - Runtime server surface is health-only; no race UI and no runner/trials orchestration endpoints.
 
 ## 5) Portfolio Runtime State Machine (operational)
 1. `CandidateCollecting`:

@@ -4,7 +4,7 @@
 //! flushes every 5s — zero impact on trading hot path.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rusqlite::{params, Connection, OpenFlags};
@@ -15,6 +15,12 @@ use tracing::{info, warn};
 static DROPPED_BATCHES: AtomicU64 = AtomicU64::new(0);
 /// Cumulative count of batches deferred to overflow queue under backpressure.
 static OVERFLOWED_BATCHES: AtomicU64 = AtomicU64::new(0);
+/// Highest sequence accepted into DB writer queues.
+static DB_WRITER_ENQUEUED_MAX_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Highest sequence observed by DB writer worker.
+static DB_WRITER_OBSERVED_MAX_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Unix timestamp of last observed DB writer sequence progress.
+static DB_WRITER_LAST_PROGRESS_MS: AtomicI64 = AtomicI64::new(0);
 
 use crate::domain::screener::shadow_fleet::FleetTrade;
 use crate::domain::screener::trader_config::TraderConfig;
@@ -34,6 +40,13 @@ const DROPPED_BATCH_BUDGET: u64 = 0;
 /// Overflowed batch count above this threshold triggers a health warning.
 const OVERFLOW_WARN_THRESHOLD: u64 = 1_000;
 const DEFAULT_STRATEGY_KIND: &str = "baseline_gap";
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
 
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1");
@@ -885,6 +898,7 @@ impl DbWriter {
                 Err(observed) => current = observed,
             }
         }
+        DB_WRITER_ENQUEUED_MAX_SEQ.fetch_max(seq, Ordering::AcqRel);
     }
 
     fn enqueue_command(&self, command: DbCommand, command_label: &'static str) -> bool {
@@ -1064,6 +1078,49 @@ impl DbWriter {
     pub const fn overflow_warn_threshold() -> u64 {
         OVERFLOW_WARN_THRESHOLD
     }
+
+    /// Highest sequence accepted by the producer side.
+    pub fn watchdog_enqueued_max_seq() -> u64 {
+        DB_WRITER_ENQUEUED_MAX_SEQ.load(Ordering::Relaxed)
+    }
+
+    /// Highest sequence observed by the writer worker loop.
+    pub fn watchdog_observed_max_seq() -> u64 {
+        DB_WRITER_OBSERVED_MAX_SEQ.load(Ordering::Relaxed)
+    }
+
+    /// Last writer progress timestamp (milliseconds since epoch).
+    pub fn watchdog_last_progress_ms() -> i64 {
+        DB_WRITER_LAST_PROGRESS_MS.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn set_watchdog_snapshot_for_tests(enqueued: u64, observed: u64, last_progress_ms: i64) {
+        DB_WRITER_ENQUEUED_MAX_SEQ.store(enqueued, Ordering::Relaxed);
+        DB_WRITER_OBSERVED_MAX_SEQ.store(observed, Ordering::Relaxed);
+        DB_WRITER_LAST_PROGRESS_MS.store(last_progress_ms, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub fn reset_watchdog_snapshot_for_tests() {
+        DB_WRITER_ENQUEUED_MAX_SEQ.store(0, Ordering::Relaxed);
+        DB_WRITER_OBSERVED_MAX_SEQ.store(0, Ordering::Relaxed);
+        DB_WRITER_LAST_PROGRESS_MS.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub fn reset_health_counters_for_tests() {
+        DROPPED_BATCHES.store(0, Ordering::Relaxed);
+        OVERFLOWED_BATCHES.store(0, Ordering::Relaxed);
+        Self::reset_watchdog_snapshot_for_tests();
+    }
+}
+
+fn mark_db_writer_observed_progress(seq: u64) {
+    let prev = DB_WRITER_OBSERVED_MAX_SEQ.fetch_max(seq, Ordering::AcqRel);
+    if seq > prev {
+        DB_WRITER_LAST_PROGRESS_MS.store(now_ms(), Ordering::Relaxed);
+    }
 }
 
 fn flush_trade_buffer(conn: &Connection, buf: &mut Vec<FleetTrade>) {
@@ -1167,6 +1224,7 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
                     match command {
                         Some(DbCommand::Trades { seq, trades }) => {
                             observed_max_seq = observed_max_seq.max(seq);
+                            mark_db_writer_observed_progress(seq);
                             buf.extend(trades);
                             if !pending_flushes.is_empty() {
                                 flush_trade_buffer(&conn, &mut buf);
@@ -1180,6 +1238,7 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
                             paper_states,
                         }) => {
                             observed_max_seq = observed_max_seq.max(seq);
+                            mark_db_writer_observed_progress(seq);
                             flush_trade_buffer(&conn, &mut buf);
                             if seq <= latest_portfolio_snapshot_seq {
                                 warn!(
@@ -1208,6 +1267,7 @@ pub fn spawn_writer(db_path: &Path) -> DbWriter {
                             paper_states,
                         }) => {
                             observed_max_seq = observed_max_seq.max(seq);
+                            mark_db_writer_observed_progress(seq);
                             flush_trade_buffer(&conn, &mut buf);
                             if seq <= latest_portfolio_snapshot_seq {
                                 if !trades.is_empty() {

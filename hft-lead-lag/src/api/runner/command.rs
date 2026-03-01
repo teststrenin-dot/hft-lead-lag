@@ -1,9 +1,5 @@
 use super::*;
 
-fn clamp_forward_limit(value: Option<u64>, default: u64, max: u64) -> u64 {
-    value.unwrap_or(default).clamp(1, max)
-}
-
 pub(super) fn runner_ui_config() -> RunnerUiConfig {
     RunnerUiConfig {
         phases: vec![
@@ -11,19 +7,6 @@ pub(super) fn runner_ui_config() -> RunnerUiConfig {
                 name: "scout".to_string(),
                 duration: Some(DEFAULT_SCOUT_DURATION_S),
                 cycles: Some(DEFAULT_SCOUT_CYCLES),
-                max_budget: None,
-                grace_period: None,
-                report_interval: None,
-                max_refs: None,
-                max_configs: None,
-                top_k: None,
-                min_trades: None,
-                min_pnl: None,
-            },
-            RunnerPhaseDefaults {
-                name: "expand".to_string(),
-                duration: Some(DEFAULT_EXPAND_DURATION_S),
-                cycles: Some(DEFAULT_EXPAND_CYCLES),
                 max_budget: None,
                 grace_period: None,
                 report_interval: None,
@@ -45,19 +28,6 @@ pub(super) fn runner_ui_config() -> RunnerUiConfig {
                 top_k: None,
                 min_trades: None,
                 min_pnl: None,
-            },
-            RunnerPhaseDefaults {
-                name: "promote".to_string(),
-                duration: None,
-                cycles: None,
-                max_budget: None,
-                grace_period: None,
-                report_interval: None,
-                max_refs: None,
-                max_configs: None,
-                top_k: Some(DEFAULT_PROMOTE_TOP_K),
-                min_trades: Some(DEFAULT_PROMOTE_MIN_TRADES),
-                min_pnl: Some(DEFAULT_PROMOTE_MIN_PNL),
             },
         ],
     }
@@ -119,78 +89,42 @@ pub(super) fn build_trial_runner_command(
             args.push("--cycles".to_string());
             args.push(cycles.to_string());
         }
-        "expand" => {
-            let cycles = req.cycles.unwrap_or(DEFAULT_EXPAND_CYCLES);
-            if cycles == 0 {
-                return Err("cycles must be >= 1".to_string());
-            }
-            args.push("expand".to_string());
-            args.push("--duration".to_string());
-            args.push(
-                req.duration
-                    .unwrap_or(DEFAULT_EXPAND_DURATION_S)
-                    .to_string(),
-            );
-            args.push("--cycles".to_string());
-            args.push(cycles.to_string());
-        }
         "forward" => {
-            let max_refs = clamp_forward_limit(
-                req.max_refs,
-                DEFAULT_FORWARD_MAX_REFS,
-                FORWARD_MAX_REFS_HARD_CAP,
-            );
-            let max_configs = clamp_forward_limit(
-                req.max_configs,
-                DEFAULT_FORWARD_MAX_CONFIGS,
-                FORWARD_MAX_CONFIGS_HARD_CAP,
-            );
+            let max_budget = req.max_budget.unwrap_or(DEFAULT_FORWARD_MAX_BUDGET_S);
+            let grace_period = req
+                .grace_period
+                .unwrap_or(DEFAULT_FORWARD_GRACE_PERIOD_S);
+            let report_interval = req
+                .report_interval
+                .unwrap_or(DEFAULT_FORWARD_REPORT_INTERVAL_S);
+            let max_refs = req.max_refs.unwrap_or(DEFAULT_FORWARD_MAX_REFS);
+            let max_configs = req.max_configs.unwrap_or(DEFAULT_FORWARD_MAX_CONFIGS);
+
+            if max_budget == 0 {
+                return Err("max_budget must be >= 1".to_string());
+            }
+            if grace_period == 0 {
+                return Err("grace_period must be >= 1".to_string());
+            }
+            if report_interval == 0 {
+                return Err("report_interval must be >= 1".to_string());
+            }
+
             args.push("forward".to_string());
             args.push("--max-budget".to_string());
-            args.push(
-                req.max_budget
-                    .unwrap_or(DEFAULT_FORWARD_MAX_BUDGET_S)
-                    .to_string(),
-            );
+            args.push(max_budget.to_string());
             args.push("--grace-period".to_string());
-            args.push(
-                req.grace_period
-                    .unwrap_or(DEFAULT_FORWARD_GRACE_PERIOD_S)
-                    .to_string(),
-            );
+            args.push(grace_period.to_string());
             args.push("--report-interval".to_string());
-            args.push(
-                req.report_interval
-                    .unwrap_or(DEFAULT_FORWARD_REPORT_INTERVAL_S)
-                    .to_string(),
-            );
+            args.push(report_interval.to_string());
             args.push("--max-refs".to_string());
-            args.push(max_refs.to_string());
+            args.push(max_refs.clamp(1, FORWARD_MAX_REFS_HARD_CAP).to_string());
             args.push("--max-configs".to_string());
-            args.push(max_configs.to_string());
-        }
-        "promote" => {
-            let run_id = req
-                .run_id
-                .as_ref()
-                .map(|v| v.trim())
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| "promote requires run_id".to_string())?;
-            args.push("promote".to_string());
-            args.push(run_id.to_string());
-            args.push("--top-k".to_string());
-            args.push(req.top_k.unwrap_or(DEFAULT_PROMOTE_TOP_K).to_string());
-            args.push("--min-trades".to_string());
             args.push(
-                req.min_trades
-                    .unwrap_or(DEFAULT_PROMOTE_MIN_TRADES)
+                max_configs
+                    .clamp(1, FORWARD_MAX_CONFIGS_HARD_CAP)
                     .to_string(),
             );
-            args.push("--min-pnl".to_string());
-            args.push(format!(
-                "{}",
-                req.min_pnl.unwrap_or(DEFAULT_PROMOTE_MIN_PNL)
-            ));
         }
         _ => return Err(format!("Unsupported phase: {phase}")),
     }
