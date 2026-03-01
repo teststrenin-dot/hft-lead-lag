@@ -10,16 +10,19 @@ from ray_driver.run_id import generate_run_id
 @dataclass
 class _FakeIPC:
     submitted: list[str]
+    submitted_kwargs: list[dict]
 
     def __init__(self):
         self.submitted = []
+        self.submitted_kwargs = []
         self.db_path = None
 
     def clear_ack(self):
         return None
 
-    def submit_batch(self, run_id, configs, timeout_s=30.0):
+    def submit_batch(self, run_id, configs, timeout_s=30.0, **kwargs):
         self.submitted.append(run_id)
+        self.submitted_kwargs.append(dict(kwargs))
         return TrialAck(
             run_id=run_id,
             applied_at_ms=0,
@@ -60,6 +63,18 @@ def test_run_scout_uses_generate_run_id(monkeypatch):
     assert run_id == "scout-fixed-1"
     assert ipc.submitted == ["scout-fixed-1"]
     assert len(alive) == 1
+
+
+def test_run_scout_enables_run_id_takeover(monkeypatch):
+    ipc = _FakeIPC()
+    monkeypatch.setattr(scout, "generate_scout_configs", lambda max_configs=5000: [{"k": 1}])
+    monkeypatch.setattr(scout.time, "sleep", lambda _: None)
+    monkeypatch.setattr(scout, "generate_run_id", lambda phase: "scout-fixed-2")
+
+    scout.run_scout(ipc, duration_s=0)
+
+    assert ipc.submitted_kwargs, "submit_batch must be called"
+    assert ipc.submitted_kwargs[0].get("allow_run_id_takeover") is True
 
 
 def test_run_expand_uses_generate_run_id(monkeypatch):

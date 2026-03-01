@@ -61,6 +61,7 @@ pub(super) struct EventLoopRuntimeContext<'a> {
     pub(super) screener: &'a ScreenerStore,
     pub(super) screener_ingest_enabled: bool,
     pub(super) portfolio_scheduler_enabled: bool,
+    pub(super) signal_log_every: u64,
     pub(super) health_state: &'a HealthState,
     pub(super) execution: &'a ExecutionQueueTx,
     pub(super) ws_tx: Option<&'a tokio::sync::broadcast::Sender<MarketDataEvent>>,
@@ -76,6 +77,7 @@ pub(super) async fn run_event_loop(
 ) -> ! {
     let mut state = EventLoopState::new();
     state.set_screener_ingest_enabled(runtime_context.screener_ingest_enabled);
+    state.set_signal_log_every(runtime_context.signal_log_every);
     let mut portfolio_rebalance_interval = tokio::time::interval(Duration::from_millis(
         PORTFOLIO_REBALANCE_SCHEDULER_INTERVAL_MS,
     ));

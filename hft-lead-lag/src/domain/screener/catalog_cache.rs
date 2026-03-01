@@ -114,34 +114,16 @@ pub(super) fn build_rows_sorted(store: &ScreenerStore) -> Vec<ScreenerRow> {
     let mut rows: Vec<ScreenerRow> = store
         .symbols
         .iter()
-        .filter(|item| !item.value().leader_exchange.is_empty())
+        .filter(|item| item.value().binance.is_some() && item.value().gate.is_some())
         .map(|item| {
             let shadow = &item.value().shadow;
-            let stats = shadow.stats();
             ScreenerRow {
                 symbol: item.key().clone(),
-                leader_exchange: item.value().leader_exchange,
                 data_source: "ws_live",
-                is_fallback: false,
                 last_update_ms: item.value().updated_at_ms,
                 lag_ms: item.value().lag_ms,
-                ws_drift_ms: item.value().drifts.combined,
-                ws_drift_binance_ms: item.value().drifts.binance.unwrap_or(0.0),
-                ws_drift_gate_ms: item.value().drifts.gate.unwrap_or(0.0),
-                ws_drift_ingress_binance_ms: item.value().drifts.binance_ingress.unwrap_or(0.0),
-                ws_drift_ingress_gate_ms: item.value().drifts.gate_ingress.unwrap_or(0.0),
-                entry_half_life_ms: item.value().entry_half_life_ms,
-                avg_gt_p90_ms: item.value().avg_gt_p90_ms,
-                gate_natr_30m_pct: item.value().gate_natr_30m_pct,
-                volume_24h_usd: item.value().volume_24h_usd,
-                shadow_session_pnl_pct: stats.session_pnl_pct,
-                shadow_session_trades: stats.session_trades,
-                shadow_avg_trade_pct: stats.avg_trade_pct,
-                shadow_win_rate_pct: stats.win_rate_pct,
-                shadow_position: stats.position,
-                shadow_spikes_detected: stats.spikes_detected,
-                shadow_avg_catchup_pct: stats.avg_catchup_pct,
-                shadow_avg_lag_ms: stats.avg_catchup_lag_ms,
+                shadow_position: shadow.position_label(),
+                shadow_spikes_detected: shadow.spikes_detected(),
             }
         })
         .collect();

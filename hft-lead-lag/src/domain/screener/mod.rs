@@ -66,8 +66,8 @@ pub use portfolio_records::{
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 const LAG_WINDOW_MS: i64 = 5 * 60 * 1000;
-const SYMBOL_STALE_TTL_MS: i64 = 30 * 60 * 1000;
-const SYMBOL_CATALOG_MAX_SIZE: usize = 2_000;
+const SYMBOL_STALE_TTL_MS: i64 = 5 * 60 * 1000;
+const SYMBOL_CATALOG_MAX_SIZE: usize = 512;
 const SYMBOL_CATALOG_PRUNE_INTERVAL_MS: i64 = 30_000;
 const ROWS_CACHE_MIN_REBUILD_INTERVAL_MS: i64 = 250;
 const PORTFOLIO_REBALANCE_INTERVAL_MS: i64 = 2 * 60 * 1000;
@@ -80,28 +80,11 @@ const PORTFOLIO_ASSIGNMENT_HISTORY_CAP: usize = 64;
 #[derive(Debug, Clone, Serialize)]
 pub struct ScreenerRow {
     pub symbol: String,
-    pub leader_exchange: &'static str,
     pub data_source: &'static str,
-    pub is_fallback: bool,
     pub last_update_ms: i64,
     pub lag_ms: f64,
-    pub ws_drift_ms: f64,
-    pub ws_drift_binance_ms: f64,
-    pub ws_drift_gate_ms: f64,
-    pub ws_drift_ingress_binance_ms: f64,
-    pub ws_drift_ingress_gate_ms: f64,
-    pub entry_half_life_ms: f64,
-    pub avg_gt_p90_ms: f64,
-    pub gate_natr_30m_pct: f64,
-    pub volume_24h_usd: f64,
-    pub shadow_session_pnl_pct: f64,
-    pub shadow_session_trades: usize,
-    pub shadow_avg_trade_pct: f64,
-    pub shadow_win_rate_pct: f64,
     pub shadow_position: &'static str,
     pub shadow_spikes_detected: usize,
-    pub shadow_avg_catchup_pct: f64,
-    pub shadow_avg_lag_ms: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -897,22 +880,6 @@ impl ScreenerStore {
             })
             .collect();
         (states, guards, paper_states)
-    }
-
-    /// Set 24h volume for symbols (called once at startup from REST data).
-    pub fn set_volumes(&self, volumes: &[(String, f64)]) {
-        let mut changed = false;
-        for (sym, vol) in volumes {
-            let mut state = self.symbols.entry(sym.clone()).or_default();
-            let state = state.value_mut();
-            if state.volume_24h_usd != *vol {
-                state.volume_24h_usd = *vol;
-                changed = true;
-            }
-        }
-        if changed {
-            self.mark_rows_cache_dirty();
-        }
     }
 
     /// Set Gate 30m NATR (%) snapshots for symbols.

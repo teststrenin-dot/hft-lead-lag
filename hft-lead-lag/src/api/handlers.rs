@@ -6,7 +6,6 @@ mod trial_axes_support;
 
 use arc_swap::ArcSwap;
 use axum::{extract::Query, extract::State, Json};
-use dashmap::DashMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -23,7 +22,6 @@ use crate::domain::screener::{ScreenerRow, ScreenerStore};
 #[cfg(test)]
 use crate::infrastructure::db::DbWriter;
 use crate::infrastructure::db::{load_portfolio_guards_v1, load_portfolio_state_v1};
-use crate::infrastructure::enrichment::{self, CachedNatr};
 use crate::infrastructure::rest::{BinanceRestClient, GateRestClient};
 
 #[cfg(test)]
@@ -48,7 +46,6 @@ use super::runner::{
 pub(crate) struct HttpState {
     pub min_volume_usd: f64,
     pub screener: ScreenerStore,
-    pub natr_cache: Arc<DashMap<String, CachedNatr>>,
     pub fallback_rows_cache: Arc<ArcSwap<Vec<ScreenerRow>>>,
     pub fallback_rows_last_refresh_ms: Arc<AtomicI64>,
     pub fallback_rows_refresh_in_flight: Arc<AtomicBool>,
@@ -293,7 +290,7 @@ pub(crate) async fn get_symbols(
 
 pub(crate) async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<ScreenerResponse> {
     let live_rows = state.screener.rows_sorted();
-    let mut rows: Vec<ScreenerRow> = if live_rows.is_empty() {
+    let rows: Vec<ScreenerRow> = if live_rows.is_empty() {
         let now_ms = crate::domain::screener::utils::now_ms();
         let cached_rows = state.fallback_rows_cache.load_full();
         let last_refresh_ms = state.fallback_rows_last_refresh_ms.load(Ordering::Relaxed);
@@ -304,13 +301,6 @@ pub(crate) async fn get_screener(State(state): State<Arc<HttpState>>) -> Json<Sc
     } else {
         live_rows
     };
-    let to_fetch = enrichment::enrich_gate_natr_30m_cached_only(&mut rows, &state.natr_cache);
-    if !to_fetch.is_empty() {
-        let cache = state.natr_cache.clone();
-        tokio::spawn(async move {
-            enrichment::warm_gate_natr_30m_cache(to_fetch, cache).await;
-        });
-    }
 
     Json(ScreenerResponse {
         generated_at_ms: crate::domain::screener::utils::now_ms(),

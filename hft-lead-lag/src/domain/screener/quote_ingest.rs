@@ -16,26 +16,17 @@ fn update_symbol_state_and_drain_trades(
     bid: f64,
     ask: f64,
     exchange_event_ts_ms: i64,
-    clocks: TimeDomainSample,
     adjusted_exchange_ts_ms: i64,
 ) -> QuoteUpdateResult {
     let mut state = store.symbols.entry(symbol.to_string()).or_default();
     let state = state.value_mut();
-    let ws_drift = clocks.decision_ws_drift_ms();
-    let ingress_ws_drift = clocks.ingress_ws_drift_ms();
     let quote = Quote {
         bid,
         ask,
         ts_ms: adjusted_exchange_ts_ms,
     };
 
-    if !state.ingest_quote(
-        exchange,
-        quote,
-        exchange_event_ts_ms,
-        ws_drift,
-        ingress_ws_drift,
-    ) {
+    if !state.ingest_quote(exchange, quote, exchange_event_ts_ms) {
         return QuoteUpdateResult::Rejected;
     }
 
@@ -48,14 +39,12 @@ fn update_symbol_state_and_drain_trades(
 
     if state.binance.is_none() || state.gate.is_none() {
         state.updated_at_ms = adjusted_exchange_ts_ms;
-        state.leader_exchange = "";
         state.lag_ms = 0.0;
         return QuoteUpdateResult::PartialBookOnly;
     }
 
     state.updated_at_ms = adjusted_exchange_ts_ms;
     state.update_lag(adjusted_exchange_ts_ms, LAG_WINDOW_MS);
-    state.update_cycles(adjusted_exchange_ts_ms, store.window_ms);
     state.tick_shadow(adjusted_exchange_ts_ms, store.window_ms);
 
     // Fleet: lazy-init on first tick, then tick all + drain trades to db.
@@ -117,7 +106,6 @@ pub(super) fn update(
         bid,
         ask,
         clocks.exchange_event_ts_ms,
-        clocks,
         adjusted_exchange_ts_ms,
     ) {
         QuoteUpdateResult::Rejected => return,

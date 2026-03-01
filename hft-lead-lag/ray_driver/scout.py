@@ -59,7 +59,7 @@ def run_scout(
 
     print(f"[scout] submitting {len(configs)} configs, run_id={run_id}")
     ipc.clear_ack()
-    ack = ipc.submit_batch(run_id, configs)
+    ack = ipc.submit_batch(run_id, configs, allow_run_id_takeover=True)
     print(f"[scout] ack: {ack.config_count} configs applied")
 
     try:

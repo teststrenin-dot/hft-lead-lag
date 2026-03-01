@@ -12,7 +12,6 @@ pub(super) enum SymbolReconcileOutcome {
 }
 
 pub(super) struct RuntimeUniverse {
-    pub(super) common_symbols: Vec<String>,
     pub(super) strategy_symbols: Vec<String>,
     pub(super) screener_symbols: Vec<String>,
     pub(super) gate_vol_map: HashMap<String, f64>,
@@ -179,7 +178,6 @@ pub(super) fn build_runtime_universe(
     );
 
     RuntimeUniverse {
-        common_symbols,
         strategy_symbols,
         screener_symbols,
         gate_vol_map,

@@ -117,6 +117,15 @@ pub(super) fn ingest_exchange_batch<F: Fn() -> i64>(
     drained: &[hft_lead_lag::domain::BookTicker],
     ctx: &mut BatchIngestContext<'_, F>,
 ) {
+    if ctx.screener.is_none() && ctx.ws_tx.is_none() && ctx.control_plane.is_none() {
+        for ticker in std::iter::once(first).chain(drained.iter()) {
+            *ctx.ticker_count += 1;
+            ctx.metrics
+                .record_tick_drift((ctx.now_ms)(), ticker.exchange_ts_ns);
+        }
+        return;
+    }
+
     let mut positions: HashMap<bytes::Bytes, usize> = HashMap::with_capacity(drained.len() + 1);
     let mut latest: Vec<&hft_lead_lag::domain::BookTicker> = Vec::with_capacity(drained.len() + 1);
 

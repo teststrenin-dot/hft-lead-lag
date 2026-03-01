@@ -61,6 +61,24 @@ fn runtime_plane_mode_unknown_value_falls_back_to_mixed() {
 }
 
 #[test]
+fn signal_log_every_defaults_depend_on_runtime_plane_mode() {
+    let _lock = env_test_lock();
+    std::env::remove_var(SIGNAL_LOG_EVERY_ENV);
+    assert_eq!(signal_log_every_from_env(RuntimePlaneMode::Mixed), 1);
+    assert_eq!(signal_log_every_from_env(RuntimePlaneMode::HftCore), 0);
+}
+
+#[test]
+fn signal_log_every_env_override_accepts_zero_and_positive_values() {
+    let _lock = env_test_lock();
+    std::env::set_var(SIGNAL_LOG_EVERY_ENV, "0");
+    assert_eq!(signal_log_every_from_env(RuntimePlaneMode::Mixed), 0);
+    std::env::set_var(SIGNAL_LOG_EVERY_ENV, "100");
+    assert_eq!(signal_log_every_from_env(RuntimePlaneMode::HftCore), 100);
+    std::env::remove_var(SIGNAL_LOG_EVERY_ENV);
+}
+
+#[test]
 fn apply_symbol_cap_respects_env_limit() {
     let _lock = env_test_lock();
     std::env::set_var(MAX_STRATEGY_SYMBOLS_ENV, "2");
@@ -1565,6 +1583,43 @@ fn ingest_exchange_batch_deduplicates_symbol_and_keeps_latest_tick() {
         ws_rx.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
+}
+
+#[test]
+fn ingest_exchange_batch_fast_path_skips_symbol_decode_when_no_fanout() {
+    let first = hft_lead_lag::domain::BookTicker::new(
+        bytes::Bytes::from_static(b"\xFF"),
+        1,
+        2,
+        1,
+        1,
+        100_000_000,
+        100_000_000,
+    );
+    let drained = vec![
+        test_ticker("ETHUSDT", 110_000_000),
+        test_ticker("BTCUSDT", 120_000_000),
+    ];
+    let mut ticker_count = 0usize;
+    let mut metrics = EventLoopMetrics::new();
+    let now_ms = || 150i64;
+    let mut ctx = BatchIngestContext {
+        exchange: "binance",
+        ticker_count: &mut ticker_count,
+        metrics: &mut metrics,
+        now_ms: &now_ms,
+        screener: None,
+        ws_tx: None,
+        control_plane: None,
+    };
+
+    ingest_exchange_batch(&first, &drained, &mut ctx);
+
+    assert_eq!(ticker_count, 3);
+    assert_eq!(
+        metrics.drift_stats_string_and_reset(),
+        "n=3 avg=40ms p50=40ms p95=50ms p99=50ms max=50ms"
+    );
 }
 
 #[test]

@@ -332,12 +332,42 @@ fn rows_sorted_marks_live_ws_source_and_update_time() {
     let row = &rows[0];
     assert_eq!(row.symbol, "BTCUSDT");
     assert_eq!(row.data_source, "ws_live");
-    assert!(!row.is_fallback);
     assert!(row.last_update_ms > 0);
 }
 
 #[test]
-fn rows_sorted_uses_exchange_offset_correction_for_leader_and_lag() {
+fn rows_sorted_projection_omits_legacy_leader_and_volume_fields() {
+    let store = ScreenerStore::default();
+    let ts_ns = 1_700_000_000_000_000_000_i64;
+    store.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
+    store.update(
+        "BTCUSDT",
+        "gate",
+        100.0,
+        100.1,
+        ts_ns + 1_000_000,
+        ts_ns + 1_000_000,
+    );
+
+    let row = store
+        .rows_sorted()
+        .into_iter()
+        .next()
+        .expect("expected at least one row");
+    let json = serde_json::to_value(row).expect("row serialization");
+    let obj = json.as_object().expect("row must serialize as JSON object");
+    assert!(
+        !obj.contains_key("leader_exchange"),
+        "legacy leader field must not be present in screener row"
+    );
+    assert!(
+        !obj.contains_key("volume_24h_usd"),
+        "legacy volume field must not be present in screener row"
+    );
+}
+
+#[test]
+fn rows_sorted_uses_exchange_offset_correction_for_lag() {
     let store = ScreenerStore::default();
     let base_ms = 1_700_000_000_000_i64;
     let gate_clock_ahead_ms = 3_600_000_i64; // +1h
@@ -364,13 +394,60 @@ fn rows_sorted_uses_exchange_offset_correction_for_leader_and_lag() {
     let rows = store.rows_sorted();
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
-    assert_eq!(
-        row.leader_exchange, "binance",
-        "leader must follow corrected timeline, not raw cross-exchange clock skew"
-    );
     assert!(
         row.lag_ms < 100.0,
         "lag should stay near local receive delta, got {}ms",
+        row.lag_ms
+    );
+}
+
+#[test]
+fn rows_sorted_reports_latest_instant_lag_without_percentile_smoothing() {
+    let store = ScreenerStore::default();
+    let base_ms = 1_700_000_000_000_i64;
+
+    // First pair -> tiny lag (~1ms).
+    store.update(
+        "BTCUSDT",
+        "binance",
+        100.0,
+        100.1,
+        base_ms * 1_000_000,
+        base_ms * 1_000_000,
+    );
+    store.update(
+        "BTCUSDT",
+        "gate",
+        100.0,
+        100.1,
+        (base_ms + 1) * 1_000_000,
+        (base_ms + 1) * 1_000_000,
+    );
+
+    // Keep both exchanges monotonic and then create a large lag jump on latest pair.
+    store.update(
+        "BTCUSDT",
+        "binance",
+        100.0,
+        100.1,
+        (base_ms + 2) * 1_000_000,
+        (base_ms + 2) * 1_000_000,
+    );
+    store.update(
+        "BTCUSDT",
+        "gate",
+        100.0,
+        100.1,
+        (base_ms + 1002) * 1_000_000,
+        (base_ms + 1002) * 1_000_000,
+    );
+
+    let rows = store.rows_sorted();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert!(
+        row.lag_ms >= 900.0,
+        "lag must track latest instant delta instead of smoothed percentile, got {}ms",
         row.lag_ms
     );
 }
@@ -391,20 +468,30 @@ fn rows_sorted_uses_snapshot_within_rebuild_interval() {
 
     let first = store.rows_sorted();
     assert_eq!(first.len(), 1);
-    assert_eq!(first[0].volume_24h_usd, 0.0);
+    assert!(first[0].lag_ms <= 5.0);
 
-    store.set_volumes(&[("BTCUSDT".to_string(), 42.0)]);
+    store.update(
+        "BTCUSDT",
+        "gate",
+        100.0,
+        100.1,
+        ts_ns + 21_000_000,
+        ts_ns + 21_000_000,
+    );
     let second = store.rows_sorted();
     assert_eq!(second.len(), 1);
     assert_eq!(
-        second[0].volume_24h_usd, 0.0,
+        second[0].lag_ms, first[0].lag_ms,
         "within cache interval rows must come from previous snapshot"
     );
 
     std::thread::sleep(std::time::Duration::from_millis(350));
     let third = store.rows_sorted();
     assert_eq!(third.len(), 1);
-    assert_eq!(third[0].volume_24h_usd, 42.0);
+    assert!(
+        third[0].lag_ms >= 15.0,
+        "after cache interval elapsed row must be rebuilt with new lag"
+    );
 }
 
 #[test]

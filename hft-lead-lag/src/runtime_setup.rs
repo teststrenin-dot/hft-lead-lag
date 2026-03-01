@@ -3,17 +3,11 @@ use hft_lead_lag::api::{
     HttpServer, HttpServerConfig, HttpServerSurface, MarketDataEvent, MarketDataServer,
     ScreenerStore, WsServerConfig,
 };
-use hft_lead_lag::infrastructure::rest::GateRestClient;
 use hft_lead_lag::{BinanceMarketData, GateMarketData, MarketDataStream};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{error, info, warn};
-
-const GATE_NATR_PERIOD_30M: usize = 30;
-const GATE_NATR_REFRESH_INTERVAL_SECS: u64 = 60;
-const GATE_NATR_BATCH_SIZE: usize = 12;
-const GATE_NATR_REQUEST_TIMEOUT_MS: u64 = 500;
 
 pub(super) async fn subscribe_gate_symbols(gate: &mut GateMarketData, symbols: &[String]) {
     let mut ok = 0usize;
@@ -59,126 +53,6 @@ pub(super) async fn drain_stale_ticks(binance: &mut BinanceMarketData, gate: &mu
             stale_binance,
             stale_gate
         );
-    }
-}
-
-async fn refresh_gate_natr_batch(
-    screener: &ScreenerStore,
-    symbols: &[String],
-    start_idx: usize,
-) -> usize {
-    if symbols.is_empty() {
-        return 0;
-    }
-
-    let batch_size = GATE_NATR_BATCH_SIZE.min(symbols.len());
-    let rest = GateRestClient::new();
-    let mut updates: Vec<(String, Option<f64>)> = Vec::with_capacity(batch_size);
-
-    for offset in 0..batch_size {
-        let idx = (start_idx + offset) % symbols.len();
-        let symbol = &symbols[idx];
-        let natr = match tokio::time::timeout(
-            tokio::time::Duration::from_millis(GATE_NATR_REQUEST_TIMEOUT_MS),
-            rest.get_natr_30m(symbol, GATE_NATR_PERIOD_30M),
-        )
-        .await
-        {
-            Ok(Ok(Some(v))) if v.is_finite() && v >= 0.0 => Some(v),
-            _ => None,
-        };
-        updates.push((symbol.clone(), natr));
-    }
-
-    let (fetched, missing) = apply_gate_natr_refresh_results(screener, updates);
-    info!(
-        "Gate NATR refresh: fetched={} missing={} batch={} symbols={}",
-        fetched,
-        missing,
-        batch_size,
-        symbols.len()
-    );
-
-    (start_idx + batch_size) % symbols.len()
-}
-
-fn apply_gate_natr_refresh_results(
-    screener: &ScreenerStore,
-    updates: Vec<(String, Option<f64>)>,
-) -> (usize, usize) {
-    let mut valid_updates: Vec<(String, f64)> = Vec::with_capacity(updates.len());
-    let mut fetched = 0usize;
-    let mut missing = 0usize;
-    for (symbol, maybe_natr) in updates {
-        match maybe_natr {
-            Some(v) if v.is_finite() && v >= 0.0 => {
-                valid_updates.push((symbol, v));
-                fetched += 1;
-            }
-            _ => {
-                missing += 1;
-            }
-        }
-    }
-    if !valid_updates.is_empty() {
-        screener.set_gate_natr_30m(&valid_updates);
-    }
-    (fetched, missing)
-}
-
-pub(super) fn spawn_gate_natr_refresher(screener: ScreenerStore, symbols: Vec<String>) {
-    if symbols.is_empty() {
-        warn!("Gate NATR refresher skipped: no symbols");
-        return;
-    }
-
-    tokio::spawn(async move {
-        let mut idx = 0usize;
-        loop {
-            idx = refresh_gate_natr_batch(&screener, &symbols, idx).await;
-            tokio::time::sleep(tokio::time::Duration::from_secs(
-                GATE_NATR_REFRESH_INTERVAL_SECS,
-            ))
-            .await;
-        }
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn apply_gate_natr_refresh_results_keeps_previous_values_on_missing_entries() {
-        let screener = ScreenerStore::default();
-        let ts_ns = 1_700_000_000_000_000_000_i64;
-        screener.update("BTCUSDT", "binance", 100.0, 100.1, ts_ns, ts_ns);
-        screener.update(
-            "BTCUSDT",
-            "gate",
-            100.0,
-            100.1,
-            ts_ns + 1_000_000,
-            ts_ns + 1_000_000,
-        );
-        screener.set_gate_natr_30m(&[("BTCUSDT".to_string(), 2.5)]);
-
-        let (fetched, missing) = apply_gate_natr_refresh_results(
-            &screener,
-            vec![
-                ("BTCUSDT".to_string(), None),
-                ("ETHUSDT".to_string(), Some(1.2)),
-            ],
-        );
-
-        assert_eq!(fetched, 1);
-        assert_eq!(missing, 1);
-        let rows = screener.rows_sorted();
-        let btc = rows
-            .iter()
-            .find(|row| row.symbol == "BTCUSDT")
-            .expect("BTCUSDT row");
-        assert!((btc.gate_natr_30m_pct - 2.5).abs() < f64::EPSILON);
     }
 }
 

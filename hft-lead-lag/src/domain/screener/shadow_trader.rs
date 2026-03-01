@@ -663,6 +663,10 @@ impl ShadowTrader {
         }
     }
 
+    pub fn spikes_detected(&self) -> usize {
+        self.spike_timestamps.len()
+    }
+
     fn cleanup_spikes(&mut self, ts_ms: i64) {
         let cutoff = ts_ms - 2 * 60 * 1000;
         while let Some(&spike_ts) = self.spike_timestamps.front() {

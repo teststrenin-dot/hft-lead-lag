@@ -2,14 +2,14 @@
 
 mod command;
 
+use crate::domain::screener::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use crate::domain::screener::{TraderConfig, CONFIG_ID_CONTRACT_VERSION};
-use rusqlite::OptionalExtension;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
@@ -95,7 +95,7 @@ struct ForwardPhaseOptions {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ScoutReferenceRow {
-    config_id: u64,
+    config_id: i64,
     trades: u64,
     avg_pnl_pct: f64,
 }
@@ -505,7 +505,7 @@ impl TrialRunnerManager {
                     return;
                 }
             };
-            let selected_ids = select_reference_ids(&refs, opts.max_refs);
+            let mut selected_ids = select_reference_ids(&refs, opts.max_refs);
             if selected_ids.is_empty() {
                 manager
                     .finish_job(
@@ -529,8 +529,27 @@ impl TrialRunnerManager {
                 )
                 .await;
 
-            let configs = match load_configs_for_reference_ids(&db_path, &selected_ids, opts.max_configs)
-            {
+            let mut configs =
+                load_configs_for_reference_ids(&db_path, &selected_ids, opts.max_configs);
+            if configs.is_err() && selected_ids.len() < refs.len() {
+                let fallback_ids = select_reference_ids(&refs, refs.len() as u64);
+                if fallback_ids.len() > selected_ids.len() {
+                    manager
+                        .append_log(
+                            job_id,
+                            "sys",
+                            format!(
+                                "forward internal: top refs missing in db; retrying with all valid refs ({})",
+                                fallback_ids.len()
+                            ),
+                        )
+                        .await;
+                    selected_ids = fallback_ids;
+                    configs =
+                        load_configs_for_reference_ids(&db_path, &selected_ids, opts.max_configs);
+                }
+            }
+            let configs = match configs {
                 Ok(configs) => configs,
                 Err(e) => {
                     manager
@@ -550,12 +569,7 @@ impl TrialRunnerManager {
             let ack_path = config_dir
                 .join("trial-acks")
                 .join(format!("{submission_id}.json"));
-            if let Err(e) = enqueue_trial_batch(
-                &config_dir,
-                &run_id,
-                &submission_id,
-                &configs,
-            ) {
+            if let Err(e) = enqueue_trial_batch(&config_dir, &run_id, &submission_id, &configs) {
                 manager
                     .finish_job(job_id, RunnerJobState::Failed, None, Some(e.message))
                     .await;
@@ -671,7 +685,11 @@ impl TrialRunnerManager {
                 return;
             }
             manager
-                .append_log(job_id, "sys", format!("forward internal: run cleared run_id={run_id}"))
+                .append_log(
+                    job_id,
+                    "sys",
+                    format!("forward internal: run cleared run_id={run_id}"),
+                )
                 .await;
             manager
                 .finish_job(job_id, RunnerJobState::Success, Some(0), None)
@@ -820,7 +838,7 @@ fn load_scout_references(path: &Path) -> Result<Vec<ScoutReferenceRow>, RunnerEr
 fn select_reference_ids(rows: &[ScoutReferenceRow], max_refs: u64) -> Vec<u64> {
     let mut selected: Vec<ScoutReferenceRow> = rows
         .iter()
-        .filter(|row| row.config_id > 0 && row.trades > 0 && row.avg_pnl_pct.is_finite())
+        .filter(|row| row.config_id != 0 && row.trades > 0 && row.avg_pnl_pct.is_finite())
         .cloned()
         .collect();
     selected.sort_by(|a, b| {
@@ -833,7 +851,7 @@ fn select_reference_ids(rows: &[ScoutReferenceRow], max_refs: u64) -> Vec<u64> {
     selected
         .into_iter()
         .take(max_refs as usize)
-        .map(|row| row.config_id)
+        .map(|row| row.config_id as u64)
         .collect()
 }
 
@@ -842,9 +860,8 @@ fn load_configs_for_reference_ids(
     ids: &[u64],
     max_configs: u64,
 ) -> Result<Vec<TraderConfig>, RunnerError> {
-    let conn = crate::infrastructure::db::open_db_readonly(db_path).map_err(|e| {
-        RunnerError::internal(format!("open db {}: {e}", db_path.display()))
-    })?;
+    let conn = crate::infrastructure::db::open_db_readonly(db_path)
+        .map_err(|e| RunnerError::internal(format!("open db {}: {e}", db_path.display())))?;
 
     let mut stmt = conn
         .prepare(
@@ -935,7 +952,10 @@ fn forward_run_budget_s(opts: &ForwardPhaseOptions) -> u64 {
     opts.max_budget_s
 }
 
-fn try_read_trial_ack(ack_path: &Path, expected_run_id: &str) -> Result<Option<TrialAckPayload>, RunnerError> {
+fn try_read_trial_ack(
+    ack_path: &Path,
+    expected_run_id: &str,
+) -> Result<Option<TrialAckPayload>, RunnerError> {
     let raw = match std::fs::read_to_string(ack_path) {
         Ok(raw) => raw,
         Err(_) => return Ok(None),
@@ -1014,7 +1034,7 @@ fn validate_phase_prerequisites(workdir: &Path, phase: &str) -> Result<(), Runne
     let rows = load_scout_references(&refs_path)?;
     let valid_rows = rows
         .iter()
-        .filter(|row| row.config_id > 0 && row.trades > 0 && row.avg_pnl_pct.is_finite())
+        .filter(|row| row.config_id != 0 && row.trades > 0 && row.avg_pnl_pct.is_finite())
         .count();
 
     if valid_rows == 0 {
@@ -1573,6 +1593,37 @@ mod tests {
     }
 
     #[test]
+    fn load_scout_references_accepts_signed_config_ids() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("hft_runner_scout_refs_legacy_{ts}"));
+        fs::create_dir_all(&base).expect("mkdir base");
+        let refs_path = base.join("scout-references.json");
+        fs::write(
+            &refs_path,
+            r#"
+            [
+              {"config_id": -8141442055384427616, "trades": 12, "avg_pnl_pct": 0.8},
+              {"config_id": 5, "trades": 20, "avg_pnl_pct": 0.5}
+            ]
+            "#,
+        )
+        .expect("write refs");
+
+        let rows = load_scout_references(&refs_path).expect("must parse legacy refs");
+        let ids = select_reference_ids(&rows, 10);
+        assert_eq!(
+            ids,
+            vec![(-8141442055384427616_i64) as u64, 5_u64],
+            "signed config_ids must remain eligible (except zero)"
+        );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn forward_display_command_is_internal_not_python() {
         let opts = ForwardPhaseOptions {
             max_budget_s: 120,
@@ -1613,7 +1664,10 @@ mod tests {
 
         let result = try_read_trial_ack(&ack_path, "run-1");
         assert!(result.is_ok(), "invalid json should not fail immediately");
-        assert!(result.expect("ok").is_none(), "invalid json is treated as pending");
+        assert!(
+            result.expect("ok").is_none(),
+            "invalid json is treated as pending"
+        );
 
         let _ = fs::remove_dir_all(base);
     }
@@ -1721,6 +1775,123 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "forward runner did not complete before deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn forward_internal_runner_falls_back_when_top_refs_missing_in_db() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("hft_runner_forward_fallback_{ts}"));
+        fs::create_dir_all(base.join("ray_driver")).expect("mkdir ray_driver");
+        fs::create_dir_all(base.join("data")).expect("mkdir data");
+        fs::create_dir_all(base.join("config/trial-batches")).expect("mkdir trial-batches");
+        fs::create_dir_all(base.join("config/trial-acks")).expect("mkdir trial-acks");
+
+        let db_path = base.join("data/optimizer.db");
+        let conn = crate::infrastructure::db::open_db(&db_path).expect("open db");
+        let cfg = TraderConfig::default();
+        let cfg_id = cfg.config_id() as i64;
+        crate::infrastructure::db::upsert_configs(&conn, &[cfg]).expect("upsert config");
+        drop(conn);
+
+        fs::write(
+            base.join("data/scout-references.json"),
+            format!(
+                r#"[{{"config_id":123456789,"trades":50,"avg_pnl_pct":9.9}},{{"config_id":{cfg_id},"trades":12,"avg_pnl_pct":0.4}}]"#
+            ),
+        )
+        .expect("write scout refs");
+
+        let ack_base = base.clone();
+        tokio::spawn(async move {
+            let batch_dir = ack_base.join("config/trial-batches");
+            let ack_dir = ack_base.join("config/trial-acks");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                if let Ok(entries) = std::fs::read_dir(&batch_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                            continue;
+                        }
+                        let Some(file_name) = path.file_name() else {
+                            continue;
+                        };
+                        let Ok(raw) = std::fs::read_to_string(&path) else {
+                            continue;
+                        };
+                        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                            continue;
+                        };
+                        let Some(run_id) = payload.get("run_id").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        if run_id.is_empty() {
+                            continue;
+                        }
+                        let ack_path = ack_dir.join(file_name);
+                        let ack = serde_json::json!({
+                            "run_id": run_id,
+                            "status": "ok",
+                            "config_count": 1,
+                            "drained_trades": 0
+                        });
+                        if let Ok(bytes) = serde_json::to_vec_pretty(&ack) {
+                            let _ = std::fs::write(&ack_path, bytes);
+                            return;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        let manager = TrialRunnerManager::new(base.clone());
+        manager
+            .start(RunnerStartRequest {
+                phase: "forward".to_string(),
+                duration: None,
+                cycles: None,
+                max_budget: Some(1),
+                grace_period: Some(1),
+                report_interval: Some(1),
+                max_refs: Some(1),
+                max_configs: Some(1),
+                run_id: None,
+                top_k: None,
+                min_trades: None,
+                min_pnl: None,
+            })
+            .await
+            .expect("start forward");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = manager.status(200).await;
+            if let Some(job) = status.recent_jobs.first() {
+                if job.state != RunnerJobState::Running {
+                    assert_eq!(
+                        job.state,
+                        RunnerJobState::Success,
+                        "job logs: {:?}",
+                        status.logs
+                    );
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "forward job did not finish in time"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

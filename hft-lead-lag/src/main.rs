@@ -66,7 +66,7 @@ use runtime_hot_reload::{drain_runtime_grid_reset_signals, runtime_grid_sleep_ms
 use runtime_hot_reload::{spawn_runtime_grid_hot_reload, RuntimeGridHotReloadSpec};
 use runtime_setup::{
     configure_and_connect_exchanges, drain_stale_ticks, init_screener_persistence,
-    spawn_gate_natr_refresher, start_api_servers, subscribe_gate_symbols,
+    start_api_servers, subscribe_gate_symbols,
 };
 use runtime_symbols::{build_runtime_universe, fetch_volume_tickers, RuntimeUniverse};
 #[cfg(test)]
@@ -111,6 +111,7 @@ const RUNTIME_PLANE_MODE_ENV: &str = "RUNTIME_PLANE_MODE";
 const MAX_STRATEGY_SYMBOLS_ENV: &str = "MAX_STRATEGY_SYMBOLS";
 const MAX_SCREENER_SYMBOLS_ENV: &str = "MAX_SCREENER_SYMBOLS";
 const MAX_RUNTIME_GRID_CONFIGS_ENV: &str = "MAX_RUNTIME_GRID_CONFIGS";
+const SIGNAL_LOG_EVERY_ENV: &str = "SIGNAL_LOG_EVERY";
 const DEFAULT_MAX_STRATEGY_SYMBOLS_2CORE: usize = 64;
 const DEFAULT_MAX_SCREENER_SYMBOLS_2CORE: usize = 128;
 const DEFAULT_MAX_RUNTIME_GRID_CONFIGS_2CORE: usize = 512;
@@ -176,6 +177,32 @@ fn parse_positive_env_usize(name: &str) -> Option<usize> {
             );
             None
         }
+    }
+}
+
+fn parse_non_negative_env_u64(name: &str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    let value = raw.trim();
+    match value.parse::<u64>() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            warn!(
+                "{} is set to '{}' but is not a valid integer; falling back to default",
+                name, value
+            );
+            None
+        }
+    }
+}
+
+fn signal_log_every_from_env(runtime_plane_mode: RuntimePlaneMode) -> u64 {
+    if let Some(value) = parse_non_negative_env_u64(SIGNAL_LOG_EVERY_ENV) {
+        return value;
+    }
+    if runtime_plane_mode.hft_core() {
+        0
+    } else {
+        1
     }
 }
 
@@ -427,7 +454,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         gate_tickers,
     );
     let RuntimeUniverse {
-        common_symbols,
         mut strategy_symbols,
         mut screener_symbols,
         gate_vol_map,
@@ -522,12 +548,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("screener persistence: disabled in hft_core plane mode");
     }
 
-    // Seed 24h volume from Gate REST data
-    let vol_pairs: Vec<(String, f64)> = common_symbols
-        .iter()
-        .map(|s| (s.clone(), gate_vol_map.get(s).copied().unwrap_or(0.0)))
-        .collect();
-    screener.set_volumes(&vol_pairs);
     if !runtime_plane_mode.hft_core() {
         spawn_runtime_grid_hot_reload(
             screener.clone(),
@@ -541,9 +561,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 initial_signature: runtime_grid_last_signature,
             },
         );
-        spawn_gate_natr_refresher(screener.clone(), common_symbols.clone());
     } else {
-        info!("control-plane helpers: runtime-grid hot reload and NATR refresher are disabled");
+        info!("control-plane helpers: runtime-grid hot reload is disabled");
     }
     let ws_tx = start_api_servers(
         MIN_VOLUME_USD,
@@ -624,6 +643,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             screener: &screener,
             screener_ingest_enabled: control_plane.is_none() && !runtime_plane_mode.hft_core(),
             portfolio_scheduler_enabled: !runtime_plane_mode.hft_core(),
+            signal_log_every: signal_log_every_from_env(runtime_plane_mode),
             health_state: health_state.as_ref(),
             execution: &execution,
             ws_tx: if runtime_plane_mode.hft_core() || control_plane.is_some() {

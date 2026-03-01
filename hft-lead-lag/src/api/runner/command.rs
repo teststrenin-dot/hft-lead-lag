@@ -91,9 +91,7 @@ pub(super) fn build_trial_runner_command(
         }
         "forward" => {
             let max_budget = req.max_budget.unwrap_or(DEFAULT_FORWARD_MAX_BUDGET_S);
-            let grace_period = req
-                .grace_period
-                .unwrap_or(DEFAULT_FORWARD_GRACE_PERIOD_S);
+            let grace_period = req.grace_period.unwrap_or(DEFAULT_FORWARD_GRACE_PERIOD_S);
             let report_interval = req
                 .report_interval
                 .unwrap_or(DEFAULT_FORWARD_REPORT_INTERVAL_S);

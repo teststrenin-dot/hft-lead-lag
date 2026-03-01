@@ -6,8 +6,8 @@ use crate::infrastructure::enrichment;
 use crate::infrastructure::exchanges::{BinanceMarketData, GateMarketData};
 
 use super::{
-    DbSaturationHealth, HealthResponse, HttpState, RuntimeBacklogDepth, RuntimeLatencySnapshot,
-    RuntimeDriftSnapshot, RuntimeLatencyStats, RuntimeStageTimestamps,
+    DbSaturationHealth, HealthResponse, HttpState, RuntimeBacklogDepth, RuntimeDriftSnapshot,
+    RuntimeLatencySnapshot, RuntimeLatencyStats, RuntimeStageTimestamps,
 };
 
 pub(super) const FALLBACK_ROWS_TTL_MS: i64 = 5_000;
@@ -297,8 +297,14 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
         p50_ms: state.health.runtime_drift_p50_ms.load(Ordering::Relaxed),
         p95_ms: state.health.runtime_drift_p95_ms.load(Ordering::Relaxed),
         p99_ms: state.health.runtime_drift_p99_ms.load(Ordering::Relaxed),
-        abs_p99_ms: state.health.runtime_drift_abs_p99_ms.load(Ordering::Relaxed),
-        abs_max_ms: state.health.runtime_drift_abs_max_ms.load(Ordering::Relaxed),
+        abs_p99_ms: state
+            .health
+            .runtime_drift_abs_p99_ms
+            .load(Ordering::Relaxed),
+        abs_max_ms: state
+            .health
+            .runtime_drift_abs_max_ms
+            .load(Ordering::Relaxed),
     };
     let runtime_backlog_depth = RuntimeBacklogDepth {
         binance_msg_queue_depth: state
@@ -453,7 +459,8 @@ pub(super) fn health_response(state: &HttpState) -> (axum::http::StatusCode, Hea
     } else if rm4_breached {
         warnings.push("hft_slo_window_breach");
     }
-    if binance && gate
+    if binance
+        && gate
         && state_updated_age_ms
             .map(|age| age > ENGINE_STALL_THRESHOLD_MS)
             .unwrap_or(true)

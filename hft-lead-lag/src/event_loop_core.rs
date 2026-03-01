@@ -285,6 +285,7 @@ impl EventLoopMetrics {
 pub(super) struct EventLoopState {
     pub(super) ticker_count: usize,
     pub(super) signal_count: usize,
+    signal_log_every: u64,
     screener_ingest_enabled: bool,
     last_status_at: Instant,
     #[cfg(test)]
@@ -493,6 +494,7 @@ impl EventLoopState {
         Self {
             ticker_count: 0,
             signal_count: 0,
+            signal_log_every: 1,
             screener_ingest_enabled: true,
             last_status_at: Instant::now(),
             #[cfg(test)]
@@ -522,6 +524,10 @@ impl EventLoopState {
 
     pub(super) fn set_screener_ingest_enabled(&mut self, enabled: bool) {
         self.screener_ingest_enabled = enabled;
+    }
+
+    pub(super) fn set_signal_log_every(&mut self, every: u64) {
+        self.signal_log_every = every;
     }
 
     pub(super) fn process_exchange_result(
@@ -740,9 +746,24 @@ impl EventLoopState {
 
             if let Some(signal) = signal {
                 self.signal_count += 1;
+                let should_log_signal = self.signal_log_every > 0
+                    && (self.signal_count as u64 % self.signal_log_every == 0);
+                if should_log_signal {
+                    info!(
+                        "{} signal #{}: {} | spread={:.2}bps | dir={} | bid_ask={:.2}bps ask_bid={:.2}bps | {}",
+                        signal.strategy,
+                        self.signal_count,
+                        signal.symbol,
+                        signal.spread_bps,
+                        signal.direction,
+                        signal.bid_ask_bps,
+                        signal.ask_bid_bps,
+                        signal.context
+                    );
+                }
                 let enqueued_ts_ns = Self::now_ns();
                 let intent = OrderIntent {
-                    signal: signal.clone(),
+                    signal,
                     signal_decided_ts_ns,
                     enqueued_ts_ns,
                 };
@@ -751,17 +772,6 @@ impl EventLoopState {
                         .runtime_last_order_intent_enqueued_ts_ns
                         .store(enqueued_ts_ns, Ordering::Relaxed);
                 }
-                info!(
-                    "{} signal #{}: {} | spread={:.2}bps | dir={} | bid_ask={:.2}bps ask_bid={:.2}bps | {}",
-                    signal.strategy,
-                    self.signal_count,
-                    signal.symbol,
-                    signal.spread_bps,
-                    signal.direction,
-                    signal.bid_ask_bps,
-                    signal.ask_bid_bps,
-                    signal.context
-                );
             }
         }
         health

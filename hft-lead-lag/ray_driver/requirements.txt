@@ -1,1 +1,1 @@
-ray[tune]>=2.9
+# No third-party dependencies required for scout/expand/promote.

@@ -5,7 +5,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use std::sync::Arc;
@@ -209,16 +208,17 @@ impl HttpServer {
         listener: tokio::net::TcpListener,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let db_path = PathBuf::from("data/optimizer.db");
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        if matches!(self.surface, HttpServerSurface::Full) {
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Run schema init/migrations once on server boot; handlers use read-only opens.
+            let _ = crate::infrastructure::db::open_db(&db_path)?;
         }
-        // Run schema init/migrations once on server boot; handlers use read-only opens.
-        let _ = crate::infrastructure::db::open_db(&db_path)?;
 
         let state = Arc::new(HttpState {
             min_volume_usd: self.min_volume_usd,
             screener: self.screener.clone(),
-            natr_cache: Arc::new(DashMap::new()),
             fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
             fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
             fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),

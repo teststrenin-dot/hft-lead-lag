@@ -1,1 +1,1 @@
-"""Ray Tune + ASHA driver for HFT shadow fleet optimization."""
+"""Python utilities for scout/expand/promote phases."""

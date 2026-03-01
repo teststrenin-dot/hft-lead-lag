@@ -1,6 +1,5 @@
 use super::*;
 use axum::extract::State;
-use dashmap::DashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -74,7 +73,6 @@ async fn health_returns_degraded_when_feed_is_stale() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -98,7 +96,6 @@ async fn health_reports_drop_counters() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -181,7 +178,6 @@ async fn health_reports_trial_lifecycle_telemetry() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener,
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -256,7 +252,6 @@ async fn health_reports_execution_fast_path_telemetry_and_kill_switch_issue() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -315,7 +310,6 @@ async fn health_marks_hft_mode_degraded_after_three_consecutive_rm4_breaches() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -381,7 +375,6 @@ async fn health_does_not_increment_rm4_streak_without_window_advance() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -442,7 +435,6 @@ async fn health_reports_watchdog_stalls_for_engine_signal_and_execution() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -480,7 +472,6 @@ async fn health_reports_db_writer_stall_when_backlog_progress_is_stale() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -537,7 +528,6 @@ async fn health_emits_drift_warning_when_p99_abs_is_high() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -565,7 +555,6 @@ async fn fleet_policy_endpoint_returns_empty_for_unknown_symbol() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -591,7 +580,6 @@ async fn fleet_policy_overview_returns_empty_without_fleets() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -622,7 +610,6 @@ async fn fleet_policy_overview_returns_symbol_rows_with_policies() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener,
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -668,7 +655,6 @@ async fn trial_runs_expose_patch_level_metadata() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -720,7 +706,6 @@ async fn forward_runs_expose_patch_level_metadata() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -756,7 +741,6 @@ async fn portfolio_active_endpoint_returns_a_and_b_slots() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -786,7 +770,6 @@ async fn portfolio_active_endpoint_respects_dynamic_portfolio_ids() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener,
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -818,7 +801,6 @@ async fn portfolio_candidates_endpoint_returns_derived_metrics() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener,
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -864,7 +846,6 @@ async fn portfolio_performance_endpoint_returns_paper_money_stats() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener,
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -911,7 +892,6 @@ async fn portfolio_guards_endpoint_reports_cooldown_state() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener,
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -966,7 +946,6 @@ async fn portfolio_active_endpoint_falls_back_to_db_state_snapshot() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -1027,7 +1006,6 @@ async fn portfolio_guards_endpoint_falls_back_to_db_state_snapshot() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -1071,7 +1049,6 @@ async fn portfolio_api_exposes_assignment_transition_after_cooldown() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener,
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -1094,9 +1071,12 @@ async fn portfolio_api_exposes_assignment_transition_after_cooldown() {
     );
 
     for i in 0..5 {
-        state
-            .screener
-            .portfolio_observe_closed_trade_v1("XRPUSDT", -0.08, true, 700_000 + i * 1_000);
+        state.screener.portfolio_observe_closed_trade_v1(
+            "XRPUSDT",
+            -0.08,
+            true,
+            700_000 + i * 1_000,
+        );
     }
     state.screener.portfolio_scheduler_tick_v1(900_000);
 
@@ -1125,7 +1105,6 @@ async fn forward_fresh_start_requires_explicit_confirm() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener: ScreenerStore::default(),
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -1170,7 +1149,6 @@ async fn forward_fresh_start_resets_runtime_race_state() {
     let state = Arc::new(HttpState {
         min_volume_usd: 1_000_000.0,
         screener,
-        natr_cache: Arc::new(DashMap::new()),
         fallback_rows_cache: Arc::new(ArcSwap::from_pointee(Vec::new())),
         fallback_rows_last_refresh_ms: Arc::new(AtomicI64::new(0)),
         fallback_rows_refresh_in_flight: Arc::new(AtomicBool::new(false)),
@@ -1195,7 +1173,10 @@ async fn forward_fresh_start_resets_runtime_race_state() {
     assert!(resp.config_count > 0);
     assert_eq!(state.screener.current_run_id(), Some(resp.run_id));
     assert!(
-        state.screener.portfolio_candidate_stats_v1(3_000_000).is_empty(),
+        state
+            .screener
+            .portfolio_candidate_stats_v1(3_000_000)
+            .is_empty(),
         "candidate history must be cleared on fresh start"
     );
     assert!(

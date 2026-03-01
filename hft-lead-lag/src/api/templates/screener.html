@@ -33,25 +33,11 @@
     <thead>
       <tr>
         <th data-key="symbol" onclick="sortBy('symbol')">Coin</th>
-        <th data-key="leader_exchange" onclick="sortBy('leader_exchange')">Leader</th>
         <th data-key="data_source" onclick="sortBy('data_source')">Source</th>
-        <th data-key="is_fallback" onclick="sortBy('is_fallback')">Fallback</th>
         <th class="num" data-key="last_update_ms" onclick="sortBy('last_update_ms')">Fresh ms</th>
         <th class="num" data-key="lag_ms" onclick="sortBy('lag_ms')">Lag</th>
-        <th class="num" data-key="ws_drift_ingress_binance_ms" onclick="sortBy('ws_drift_ingress_binance_ms')">Drift BN</th>
-        <th class="num" data-key="ws_drift_ingress_gate_ms" onclick="sortBy('ws_drift_ingress_gate_ms')">Drift GT</th>
-        <th class="num" data-key="volume_24h_usd" onclick="sortBy('volume_24h_usd')">Vol 24h</th>
-        <th class="num" data-key="entry_half_life_ms" onclick="sortBy('entry_half_life_ms')">Half-life</th>
-        <th class="num" data-key="avg_gt_p90_ms" onclick="sortBy('avg_gt_p90_ms')">>P90</th>
-        <th class="num" data-key="gate_natr_30m_pct" onclick="sortBy('gate_natr_30m_pct')">NATR%</th>
         <th data-key="shadow_position" onclick="sortBy('shadow_position')">Pos</th>
         <th class="num" data-key="shadow_spikes_detected" onclick="sortBy('shadow_spikes_detected')">Spikes</th>
-        <th class="num" data-key="shadow_session_pnl_pct" onclick="sortBy('shadow_session_pnl_pct')">PnL%</th>
-        <th class="num" data-key="shadow_session_trades" onclick="sortBy('shadow_session_trades')">Trd</th>
-        <th class="num" data-key="shadow_avg_trade_pct" onclick="sortBy('shadow_avg_trade_pct')">Avg%</th>
-        <th class="num" data-key="shadow_win_rate_pct" onclick="sortBy('shadow_win_rate_pct')">Win%</th>
-        <th class="num" data-key="shadow_avg_catchup_pct" onclick="sortBy('shadow_avg_catchup_pct')">Catch%</th>
-        <th class="num" data-key="shadow_avg_lag_ms" onclick="sortBy('shadow_avg_lag_ms')">Lag ms</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
@@ -92,25 +78,11 @@
       document.getElementById('rows').innerHTML = rows.map(r => `
         <tr>
           <td><b>${r.symbol}</b></td>
-          <td>${r.leader_exchange}</td>
           <td>${r.data_source || 'unknown'}</td>
-          <td>${r.is_fallback ? 'yes' : 'no'}</td>
           <td class="num">${Math.max(0, Date.now() - Number(r.last_update_ms || 0)).toFixed(0)}</td>
           <td class="num">${Number(r.lag_ms).toFixed(0)}</td>
-          <td class="num">${Number(r.ws_drift_ingress_binance_ms).toFixed(0)}</td>
-          <td class="num">${Number(r.ws_drift_ingress_gate_ms).toFixed(0)}</td>
-          <td class="num">${(Number(r.volume_24h_usd)/1e6).toFixed(1)}M</td>
-          <td class="num">${Number(r.entry_half_life_ms).toFixed(0)}</td>
-          <td class="num">${Number(r.avg_gt_p90_ms).toFixed(0)}</td>
-          <td class="num">${Number(r.gate_natr_30m_pct).toFixed(4)}</td>
           <td>${r.shadow_position}</td>
           <td class="num">${r.shadow_spikes_detected}</td>
-          <td class="num" style="color:${Number(r.shadow_session_pnl_pct)>=0?'#4ade80':'#f87171'}">${Number(r.shadow_session_pnl_pct).toFixed(4)}</td>
-          <td class="num">${r.shadow_session_trades}</td>
-          <td class="num" style="color:${Number(r.shadow_avg_trade_pct)>=0?'#4ade80':'#f87171'}">${Number(r.shadow_avg_trade_pct).toFixed(4)}</td>
-          <td class="num">${Number(r.shadow_win_rate_pct).toFixed(1)}</td>
-          <td class="num">${Number(r.shadow_avg_catchup_pct).toFixed(3)}</td>
-          <td class="num">${Number(r.shadow_avg_lag_ms).toFixed(0)}</td>
         </tr>
       `).join('');
     } catch (e) {
