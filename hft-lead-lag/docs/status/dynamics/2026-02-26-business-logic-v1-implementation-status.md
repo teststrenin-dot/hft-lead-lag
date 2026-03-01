@@ -1,14 +1,14 @@
 # Implementation Status — HFT Runtime Migration
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (CP7 block8 external alert-hook script added)
+Last sync: 2026-03-01 (status deep-dive refresh; compact screener projection cleanup landed)
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Roadmap anchor: `docs/status/core/2026-02-26-business-logic-roadmap.md`
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## 1) Executive status
 1. Core Rust runtime is alive and producing signals/portfolio analytics.
-2. Main open HFT gaps are ops hardening (`watchdog/recovery`) and observer-plane completion, not language/runtime ownership.
+2. Main open HFT gap is CP7 operational closure (scheduled drill/hook policy), not language/runtime ownership.
 3. Project is now tracked against `HFT-CP0..HFT-CP7` runtime-hardening ladder.
 
 ## 2) Runtime planes (current)
@@ -16,8 +16,8 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 |---|---|---|
 | Signal/Shadow runtime | Rust (`src/domain/screener/*`) | `Implemented` |
 | Candidate math and ranking | Rust | `Implemented` |
-| Portfolio race analytics | Rust + API/UI | `Implemented (analytics)` |
-| Scout pre-stage (range discovery only) | Rust target (`scout` -> corridor artifact), legacy Python/Ray kept as transitional cold-path only | `In transition` |
+| Portfolio race analytics | Rust + API/UI | `Implemented` |
+| Scout pre-stage (range discovery only) | Transitional Python/Ray orchestration; output consumed by Rust forward runtime | `In transition` |
 | Execution fast path SLA layer | Rust queue/worker + health SLA telemetry | `Implemented` |
 
 ## 3) HFT checkpoint progress
@@ -44,7 +44,7 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 ## 4) What is kept from legacy track
 1. Existing strategy and screener business logic is reused as functional baseline.
 2. Existing reliability hotfixes (dedupe/guard/reload hardening) remain valid.
-3. Operator surface remains observer-first (`symbol race` + `portfolio race`) with minimal control (`scout` + `forward` start only).
+3. Operator surface remains observer-first (`symbol race` + `portfolio race`) with minimal control (`scout` + `forward` start only), plus compact screener projection (no legacy `leader/24h volume` fields).
 4. Runner control path now enforces scoped phases (`scout`, `forward`) with forward prerequisite guard in command/start flow (`docs/status/dynamics/2026-02-28-observer-scout-forward-control-evidence.md`).
 
 ## 5) What is explicitly deprecated
@@ -55,7 +55,7 @@ Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
 
 ## 6) Top open gaps (priority)
 1. `P1`: finish `HFT-CP7` ops hardening (scheduled policy integration for drills/hooks).
-2. `P1`: finish observer-plane contract for near-realtime race feedback without contaminating hot path.
+2. `P2`: migrate `scout` off Python/Ray into Rust-native path (or isolate it strictly off trading host).
 3. `P2`: optional `HFT-CP0` baseline snapshot automation for before/after regression diffs.
 
 ## 7) Tracking rule

@@ -3,7 +3,7 @@
 Date: 2026-02-28
 Status: Active
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`
-Last sync: 2026-02-28 (CP7 block8 alert-hook script landed; dynamics scope aligned to observer-first UI + `scout+forward` control)
+Last sync: 2026-03-01 (status deep-dive refresh; closed forward gap-list moved to archive; compact observer projection noted)
 
 ## `HFT-CP0` Latency and Allocation Observatory
 1. Done and not touched:
@@ -166,8 +166,9 @@ Last sync: 2026-02-28 (CP7 block8 alert-hook script landed; dynamics scope align
 1. Done and not touched:
    - `mixed` mode provides portfolio/symbol race observation through API/UI.
    - UI runner control surface is constrained to `scout` + `forward`, with server-side rejection of other phases and forward prerequisite guard (`2026-02-28-observer-scout-forward-control-evidence.md`).
+   - Screener observer projection is compacted (legacy `leader` and `24h volume` columns/fields removed from active payload surface).
 2. Done but must be reworked:
-   - polling UI remains transitional; near-realtime observer stream is still open.
+   - polling UI remains transitional; near-realtime push/stream observer mode is still open.
 3. Missing and required:
    - avoid re-introducing broad trials/runner control endpoints in active contour.
    - keep observer plane isolated from `hft_core` hot path.

@@ -1,7 +1,7 @@
 # Business Logic Roadmap — HFT Runtime Track
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (`HFT-based-only` direction and observer-first UI feedback scope clarified)
+Last sync: 2026-03-01 (status deep-dive refresh; observer projection compacted; archived closed forward gap list)
 
 ## Canonical sources
 1. `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
@@ -46,6 +46,7 @@ For `hft_core` mode, canonical runtime flow is reduced to `Signal -> Execution -
 1. Mandatory observer views:
    - Symbol race (candidate ranking movement, gate transitions).
    - Portfolio race (shortlist/active transitions, paper equity/pnl progression).
+   - Compact screener observer projection only (`symbol`, `source`, `fresh_ms`, `lag_ms`, `position`, `spikes`) to reduce non-essential payload and cognitive load.
 2. Mandatory risk visibility:
    - Cooldown/hard-reset events and current guard state.
 3. Allowed controls from UI:
@@ -119,7 +120,7 @@ For `hft_core` mode, canonical runtime flow is reduced to `Signal -> Execution -
 ## Legacy continuity map
 1. Legacy signal/validation/scoring remains reusable baseline.
 2. Existing `/portfolio` and `/trials` UI are retained but are not proof of hot-path readiness.
-3. Python orchestration remains transitional and must not re-enter runtime hot path.
+3. `forward` runtime orchestration is Rust-internal; Python remains transitional for `scout`/offline only and must not re-enter runtime hot path.
 
 ## Exit criteria for re-baseline stage
 1. All status docs reference `HFT-CP*` as primary checkpoint system.

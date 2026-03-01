@@ -1,7 +1,7 @@
 # Project Math Model — HFT Lead-Lag
 
 Date: 2026-02-26
-Last sync: 2026-02-28 (CP6 intent-age and queue/kill-switch remediation reflected)
+Last sync: 2026-03-01 (deep-dive status refresh; formulas validated against current runtime)
 Scope: математика и формулы, реально используемые в runtime.
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
 Checkpoint set: `docs/status/dynamics/2026-02-28-hft-rust-only-checkpoints.md`

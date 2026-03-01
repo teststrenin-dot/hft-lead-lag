@@ -2,7 +2,7 @@
 
 Date: 2026-02-27
 Status: Active strategic anchor (`HFT-based-only`, Rust-only runtime stage)
-Last sync: 2026-02-28 (`HFT-based-only` objective and observer-first UI feedback contract clarified)
+Last sync: 2026-03-01 (deep-dive status refresh; objective and control map validated unchanged)
 
 ## 1) Locked Business Objective
 Maximize risk-adjusted return under constrained capital by continuously selecting robust alpha contexts (symbols/configs/portfolios) from shadow validation into paper/live execution, while strictly containing drawdown and operational failure risk, in an `HFT-based-only` architecture (event-driven, low-jitter, Rust hot path).

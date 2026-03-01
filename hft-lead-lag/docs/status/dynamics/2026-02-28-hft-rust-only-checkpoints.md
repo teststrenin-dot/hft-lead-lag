@@ -3,11 +3,11 @@
 Date: 2026-02-28
 Status: Active
 Strategic anchor: `docs/status/core/2026-02-27-business-objective-economic-control-map.md`
-Last sync: 2026-02-28 (CP7 block8 external alert-hook script + observer `scout+forward` scope sync)
+Last sync: 2026-03-01 (status deep-dive refresh; forward gap-list archived; observer projection compacted)
 
 ## 1) Locked Architecture Invariant
 1. Runtime hot path is Rust-only.
-2. Python/Ray is allowed only for offline/cold tasks and must not consume runtime CPU budget on the trading host.
+2. `forward` runtime path is Rust-internal; Python/Ray is allowed only for offline/cold tasks (including transitional `scout`) and must not consume runtime CPU budget on the trading host.
 3. Control-plane and data-plane are separated by explicit contracts.
 4. UI scope is observer-first (symbol/portfolio race) with minimal control (`scout` + `forward` start only).
 5. `scout` is pre-race range discovery only (trade-bearing corridors), not final selector.
